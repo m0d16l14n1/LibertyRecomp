@@ -6,6 +6,7 @@
 #include <rex/graphics/gta4_native/surface_view.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <fmt/format.h>
@@ -103,6 +104,15 @@ bool Renderer::State::Resolve(const gta4_native::ResolveCommand& request, std::s
     const bool initialized = source->initialized;
     if (!ResolveClears(resolve, error)) return false;
     if (preserved) return true;
+    // Some resolves are rejected every frame (two per frame in Games-on-Demand play). The caller
+    // logs only the first 64 command failures and every 4096th; build the detailed report, which
+    // walks related surfaces, only as often as it can reach the log.
+    static std::atomic<uint64_t> no_content_rejections{0};
+    const uint64_t rejection = no_content_rejections.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (rejection > 64 && rejection % 4096 != 0) {
+      error = "Resolve source has no produced content";
+      return false;
+    }
     error = fmt::format(
         "Resolve source has no produced content: source={:08X} generation={} "
         "wanted={} produced={} initialized={} flags={:08X} destination={:08X} "

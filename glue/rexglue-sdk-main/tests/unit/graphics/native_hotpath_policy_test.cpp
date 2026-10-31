@@ -134,7 +134,9 @@ TEST_CASE("shared semantic key serialization covers every array and scalar witho
 #define FIELD(name) check([](auto& k){k.name=1;})
  FIELD(boolean_version.epoch);FIELD(boolean_version.revision);FIELD(image_descriptor_epoch);FIELD(sampler_descriptor_epoch);FIELD(cached_descriptor_epoch);
  FIELD(environmental_data_hash);FIELD(environmental_sequence);FIELD(device);FIELD(descriptor_copy);FIELD(descriptor_page);FIELD(width);FIELD(height);FIELD(logical_width);FIELD(logical_height);FIELD(sample_count);FIELD(alpha_reference_bits);FIELD(alpha_to_mask);FIELD(color_output_mask);FIELD(clip_plane_enable_mask);FIELD(vertex_booleans);FIELD(pixel_booleans);FIELD(descriptor_backend);FIELD(environment_present);FIELD(split_postfx_applied);
+ FIELD(tone_lut_address);FIELD(cloud_mask_address);FIELD(cloud_mask_width);FIELD(cloud_mask_height);FIELD(modern_effects_enabled);FIELD(water_reflection);
 #undef FIELD
+ for(size_t i=0;i<6;++i)check([&](auto& k){k.viewport_bits[i]=1;});
  for(size_t i=0;i<4;++i){check([&](auto& k){k.color_output_info[i]=1;});check([&](auto& k){k.clip_plane_bits[i]=0x7FC00001u;});}
  REQUIRE(mutations==original.size());
 }

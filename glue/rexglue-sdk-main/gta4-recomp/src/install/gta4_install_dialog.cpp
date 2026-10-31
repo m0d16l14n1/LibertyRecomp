@@ -371,8 +371,9 @@ void InstallDialog::OnDraw(ImGuiIO& io) {
     ImGui::PushStyleColor(ImGuiCol_Text, kTextDim);
     if (!dlc_only_) {
       ImGui::TextWrapped(
-          "Select your legally obtained PAL (NZ/AU/EU) Xbox 360 GTA IV source and Title Update 5. "
-          "The update may be an STFS package or a raw default.xexp.");
+          "Select your legally obtained Xbox 360 GTA IV source (USA disc or Games on Demand "
+          "package) and its Title Update 8. The update may be an STFS package or a raw "
+          "default.xexp.");
     } else {
       ImGui::TextWrapped("Add either or both episodes to the existing GTA IV installation.");
     }

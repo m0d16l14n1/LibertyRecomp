@@ -11,7 +11,7 @@ static void ExerciseRendererMenu(uint8_t* base) {
   assert(info && info->lifecycle == Lifecycle::kRequiresRestart);
   const std::string saved = GetFlagByName("gpu_plugin");
   assert(SetFlagByName("gpu_plugin", ""));
-  assert(CurrentSettingValue(setting) == "gta4-native");
+  assert(CurrentSettingValue(setting) == gta4::kDefaultGpuPlugin);
   FinalizeInit();
   for (size_t i = 0; i < choices.size(); ++i) {
     assert(setting.choices[i].value == choices[i].first);

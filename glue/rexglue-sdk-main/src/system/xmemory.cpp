@@ -863,27 +863,6 @@ rex::memory::PageAccess ToPageAccess(uint32_t protect) {
   }
 }
 
-uint32_t FromPageAccess(rex::memory::PageAccess protect) {
-  switch (protect) {
-    case memory::PageAccess::kNoAccess:
-      return memory::kMemoryProtectNoAccess;
-    case memory::PageAccess::kReadOnly:
-      return memory::kMemoryProtectRead;
-    case memory::PageAccess::kReadWrite:
-      return memory::kMemoryProtectRead | memory::kMemoryProtectWrite;
-    case memory::PageAccess::kExecuteReadOnly:
-      // Guest memory cannot be executable - this should never happen :)
-      assert_always();
-      return memory::kMemoryProtectRead;
-    case memory::PageAccess::kExecuteReadWrite:
-      // Guest memory cannot be executable - this should never happen :)
-      assert_always();
-      return memory::kMemoryProtectRead | memory::kMemoryProtectWrite;
-  }
-
-  return memory::kMemoryProtectNoAccess;
-}
-
 BaseHeap::BaseHeap() : membase_(nullptr), heap_base_(0), heap_size_(0), page_size_(0) {}
 
 BaseHeap::~BaseHeap() = default;
@@ -1533,15 +1512,17 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32
     host_length = aligned_end - aligned_start;
   }
 
-  memory::PageAccess old_protect_access;
-  if (!rex::memory::Protect(host_address, host_length, ToPageAccess(protect),
-                            old_protect ? &old_protect_access : nullptr)) {
+  // Report the old protection from the page table: POSIX mprotect cannot return it (the macOS
+  // host Protect always reports no access), and the host range may be rounded out to 16 KB pages
+  // that cover other allocations. Like VirtualProtect, this is the first page's protection.
+  const uint32_t previous_protect = page_table_[start_page_number].current_protect;
+  if (!rex::memory::Protect(host_address, host_length, ToPageAccess(protect), nullptr)) {
     REXSYS_ERROR("BaseHeap::Protect failed due to host VirtualProtect failure");
     return false;
   }
 
   if (old_protect) {
-    *old_protect = FromPageAccess(old_protect_access);
+    *old_protect = previous_protect;
   }
 
   // Perform table change.

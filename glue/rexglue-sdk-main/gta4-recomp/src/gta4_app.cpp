@@ -80,6 +80,13 @@ REXCVAR_DEFINE_BOOL(install_dlc, false, "GTA IV/Installation",
 REXCVAR_DEFINE_BOOL(install_check, false, "GTA IV/Installation",
                     "Verify the installed game and episode layouts before launch")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(install_game_source, "", "GTA IV/Installation",
+                      "Install from this base-game source without the wizard (with "
+                      "install_update_source), then launch")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(install_update_source, "", "GTA IV/Installation",
+                      "Title Update 8 package or default.xexp for install_game_source")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(gta4_performance_hud, false, "GTA IV/Graphics/Display",
                     "Show Apple's Metal Performance HUD (FPS, GPU time, frame-time graph); applies on restart")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -608,6 +615,26 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
   paths.marketplace_content_root = liberty_root_ / "dlc";
   paths.config_path = native_config_path_;
 
+  // Headless install: the same validation and copy as the wizard, without its file pickers.
+  const std::string headless_game = REXCVAR_GET(install_game_source);
+  const std::string headless_update = REXCVAR_GET(install_update_source);
+  REXCVAR_SET(install_game_source, "");
+  REXCVAR_SET(install_update_source, "");
+  if (!headless_game.empty()) {
+    gta4::install::Selection selection;
+    selection.game_source = headless_game;
+    selection.update_source = headless_update;
+    gta4::install::Progress progress;
+    REXLOG_INFO("Headless install from {} (update {})", headless_game, headless_update);
+    const auto result = gta4::install::Install(selection, liberty_root_, progress);
+    if (result.success) {
+      REXLOG_INFO("Headless install finished ({} bytes)", progress.copied_bytes.load());
+    } else {
+      REXLOG_ERROR("Headless install failed: {}", result.error);
+      std::fprintf(stderr, "[install] failed: %s\n", result.error.c_str());
+    }
+  }
+
   const bool force_install = REXCVAR_GET(install);
   const bool force_dlc = REXCVAR_GET(install_dlc);
   const bool run_check = REXCVAR_GET(install_check);
@@ -673,7 +700,7 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   rex::input::mnk::SetNativeControllerCompatibilityBindings(
       gta4::input::KeyboardControllerBindings());
   if (!config.graphics && config.gpu_plugin.empty()) {
-    config.gpu_plugin = "gta4-native";
+    config.gpu_plugin = gta4::kDefaultGpuPlugin;
   }
 
   // Resolve the backend-dependent combination before the AA controller latches

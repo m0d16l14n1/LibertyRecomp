@@ -36,23 +36,34 @@ namespace {
 using namespace rex::literals;
 
 constexpr uint32_t kGta4TitleId = 0x545407F2;
-// PAL fork: the supported disc is the PAL retail release (base version 7) + Title Update 5.
-// See docs/PAL-PORT.md and tools/xex/README.md for how these were measured.
-constexpr uint32_t kGta4UsaMediaId = 0x7CF4679F;  // PAL retail (name kept to limit churn)
-constexpr uint32_t kRequiredRegion = rex::XEX_REGION_PAL;
-// Derived from the PAL TU5 XEXP delta descriptor's source_version_value.
-constexpr uint32_t kRequiredBaseVersion = 0x00000007;
-// Full-file XXH3-64 recorded by the official Liberty installer for the GTA IV
-// USA retail 1.00 default.xex. This complements the XEXP signature digest:
-// retaining a valid header/signature is not sufficient if the XEX body changed.
-constexpr uint64_t kRequiredBaseXexXxh3 = 15674128280634689956ULL;  // PAL retail default.xex
-// SHA-1 of the 0x100-byte RSA signature required by the pinned v8 XEXP's
-// digest_source. Derived from the payload, not from a patched executable.
-// PAL: equals the TU5 XEXP digest_source.
-constexpr std::array<uint8_t, 20> kRequiredRsaSignatureSha1 = {
-    0x24, 0xBD, 0xC3, 0xD4, 0xD6, 0xB1, 0x87, 0x0E, 0x15, 0x61,
-    0x37, 0x80, 0xE4, 0x3E, 0x8F, 0x7D, 0xA1, 0x8A, 0x87, 0xB9,
-};
+// The full-file XXH3-64 complements the XEXP signature digest: retaining a valid header/signature
+// is not sufficient if the XEX body changed.
+constexpr std::array<SupportedRelease, 2> kSupportedReleases = {{
+    {
+        .label = "Retail 1.00",
+        .media_id = 0x6AC07221,
+        .region = rex::XEX_REGION_NTSCU,
+        .base_version = 0x00000005,
+        .base_xex_xxh3 = 2823947441600373906ULL,
+        .rsa_signature_sha1 = {0x19, 0x2B, 0x3F, 0x56, 0x7C, 0x59, 0x36, 0x0C, 0x6C, 0xE2,
+                               0x11, 0x82, 0x0D, 0x77, 0x6F, 0x6B, 0x25, 0x25, 0x1A, 0x89},
+        .target_version = 0x00000805,
+        .patch_sha256 = "480aee5e2b42707791e7571bb8407c5bb3f6c7534f07f9beb426db4cfc648fd3",
+    },
+    {
+        // Measured 2026-10-31 from the 00007000 package; its TU8 is labelled "RUS Title Update #8"
+        // on the marketplace but is the same 0x806 build. Region flags: all but NTSC-J Japan.
+        .label = "Games on Demand",
+        .media_id = 0x4A53F9F6,
+        .region = 0x00FFFD00,
+        .base_version = 0x00000006,
+        .base_xex_xxh3 = 16038580895545601006ULL,
+        .rsa_signature_sha1 = {0xA2, 0x4D, 0xFE, 0x5C, 0x65, 0x1F, 0xF8, 0x53, 0x83, 0x55,
+                               0xCC, 0xC4, 0x7F, 0x68, 0x75, 0x33, 0xF5, 0x6E, 0xEA, 0x44},
+        .target_version = 0x00000806,
+        .patch_sha256 = "158c18bab6d59058f388d10d0dfb9e51f803c3725888cb7f769e41b5484fd31a",
+    },
+}};
 constexpr size_t kMaximumMetadataFileSize = 64_MiB;
 constexpr size_t kMaximumTreeEntries = 500000;
 constexpr size_t kMaximumOptionalHeaders = 4096;
@@ -443,6 +454,17 @@ std::string FormatXexRegion(uint32_t region) {
   return result;
 }
 
+std::span<const SupportedRelease> SupportedReleases() { return kSupportedReleases; }
+
+const SupportedRelease* FindSupportedRelease(uint32_t media_id) {
+  for (const SupportedRelease& release : kSupportedReleases) {
+    if (release.media_id == media_id) {
+      return &release;
+    }
+  }
+  return nullptr;
+}
+
 GameSourceInspection ClassifyGameSourceMetadata(const GameSourceMetadata& metadata) {
   GameSourceInspection result;
   result.title_id = metadata.title_id;
@@ -456,6 +478,7 @@ GameSourceInspection ClassifyGameSourceMetadata(const GameSourceMetadata& metada
   result.display_name =
       metadata.title_id == kGta4TitleId ? "Grand Theft Auto IV" : "Unknown Xbox 360 title";
 
+  const SupportedRelease* release = FindSupportedRelease(metadata.media_id);
   if (metadata.module_flags != rex::XEX_MODULE_TITLE) {
     result.status = GameSourceStatus::kCorruptImage;
     result.rejection_reason = "default.xex does not have the required retail title-module flags.";
@@ -463,31 +486,37 @@ GameSourceInspection ClassifyGameSourceMetadata(const GameSourceMetadata& metada
     result.status = GameSourceStatus::kWrongGame;
     result.rejection_reason = fmt::format("Title ID {:08X} is not Grand Theft Auto IV ({:08X}).",
                                           metadata.title_id, kGta4TitleId);
-  } else if (metadata.media_id != kGta4UsaMediaId) {
+  } else if (!release) {
+    std::string supported;
+    for (const SupportedRelease& candidate : kSupportedReleases) {
+      supported += fmt::format("{}{} {:08X}", supported.empty() ? "" : ", ", candidate.label,
+                               candidate.media_id);
+    }
     result.status = GameSourceStatus::kWrongMediaId;
-    result.rejection_reason =
-        fmt::format("Media ID {:08X} is not the supported PAL retail media ({:08X}).",
-                    metadata.media_id, kGta4UsaMediaId);
-  } else if (metadata.region != kRequiredRegion) {
+    result.rejection_reason = fmt::format(
+        "Media ID {:08X} is not a supported release ({}).", metadata.media_id, supported);
+  } else if (metadata.region != release->region) {
     result.status = GameSourceStatus::kWrongRegion;
     result.rejection_reason = fmt::format(
-        "The source is {}; exact PAL region flags ({:08X}) are required. Region-free and "
+        "The source is {}; the {} release has region flags {:08X}. Region-free and "
         "multi-region images are unsupported.",
-        FormatXexRegion(metadata.region), kRequiredRegion);
-  } else if (metadata.xex_version != kRequiredBaseVersion ||
-             metadata.base_version != kRequiredBaseVersion) {
+        FormatXexRegion(metadata.region), release->label, release->region);
+  } else if (metadata.xex_version != release->base_version ||
+             metadata.base_version != release->base_version) {
     result.status = GameSourceStatus::kWrongRevision;
     result.rejection_reason =
-        fmt::format("XEX/base versions {}/{} do not match retail 1.00 ({}/{}).",
+        fmt::format("XEX/base versions {}/{} do not match {} ({}/{}).",
                     FormatXexVersion(metadata.xex_version), FormatXexVersion(metadata.base_version),
-                    FormatXexVersion(kRequiredBaseVersion), FormatXexVersion(kRequiredBaseVersion));
-  } else if (metadata.rsa_signature_sha1 != kRequiredRsaSignatureSha1) {
+                    release->label, FormatXexVersion(release->base_version),
+                    FormatXexVersion(release->base_version));
+  } else if (metadata.rsa_signature_sha1 != release->rsa_signature_sha1) {
     result.status = GameSourceStatus::kWrongSignature;
-    result.rejection_reason =
-        "The XEX RSA signature does not match the PAL retail source required by Title Update 5.";
+    result.rejection_reason = fmt::format(
+        "The XEX RSA signature does not match the {} source required by Title Update 8.",
+        release->label);
   } else {
     result.status = GameSourceStatus::kSupported;
-    result.release_label = "Retail 1.00";
+    result.release_label = std::string(release->label);
   }
   return result;
 }
@@ -499,11 +528,13 @@ GameSourceInspection InspectGameXex(std::span<const uint8_t> bytes) {
     return Rejected(GameSourceStatus::kCorruptImage, GameSourceKind::kUnknown, std::move(error));
   }
   GameSourceInspection result = ClassifyGameSourceMetadata(metadata);
-  if (result.supported() && XXH3_64bits(bytes.data(), bytes.size()) != kRequiredBaseXexXxh3) {
+  const SupportedRelease* release = FindSupportedRelease(metadata.media_id);
+  if (result.supported() &&
+      XXH3_64bits(bytes.data(), bytes.size()) != release->base_xex_xxh3) {
     result.status = GameSourceStatus::kWrongExecutable;
     result.release_label.clear();
     result.rejection_reason =
-        "The complete default.xex does not match GTA IV PAL retail (base version 7).";
+        fmt::format("The complete default.xex does not match GTA IV {}.", release->label);
   }
   return result;
 }

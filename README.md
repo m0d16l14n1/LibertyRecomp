@@ -7,17 +7,20 @@
 > [!CAUTION]
 > This is a personal, work-in-progress fork. It is in early development and is NOT meant for public use.
 
-**Liberty Recompiled, PAL and macOS edition.** This repository is a fork of
-[OZORDI/LibertyRecomp](https://github.com/OZORDI/LibertyRecomp), the unofficial PC port of the
-Xbox 360 version of Grand Theft Auto IV created through static recompilation. The fork changes the
-project's target in two ways:
+**Liberty Recompiled, Games-on-Demand + TU8 and macOS edition.** This repository is a fork of
+[hamishakl/LibertyRecomp](https://github.com/hamishakl/LibertyRecomp) (the PAL + macOS fork), which
+itself forks [OZORDI/LibertyRecomp](https://github.com/OZORDI/LibertyRecomp), the unofficial PC port of
+the Xbox 360 version of Grand Theft Auto IV created through static recompilation. This fork:
 
-- **It runs from the PAL disc, not the US one.** Upstream recompiles the USA release (media ID
-  `0x6AC07221`, Title Update 8). This fork recompiles the **PAL (NZ/AU/EU)** release (media ID
-  `0x7CF4679F`, base version 7) with **Title Update 5**. The PAL build is a different compile of the
-  game, so every hard-coded guest address was remapped; see [docs/PAL-PORT.md](docs/PAL-PORT.md).
-- **It is developed and tested on macOS (Apple Silicon) with the native Metal renderer.** Windows and
-  Linux are not built or tested here. Upstream remains the place for those platforms.
+- **Runs from the Xbox 360 Games-on-Demand (GOD) package + Title Update 8.** That is the copy this
+  fork is developed with (see [Game version](#game-version)). Its TU8 patches the executable into
+  the **same compile as the USA disc + TU8** that upstream recompiled, so the US code in
+  `generated/` runs it unchanged. The USA disc + TU8 is accepted too.
+- **Keeps the macOS (Apple Silicon) and native Metal work** of the PAL fork: renderer, frame
+  pacing, trackpad input, UI theme, diagnostics. The PAL fork's address remap was reversed, so
+  every hook is back on US/TU8 addresses; the PAL disc is no longer supported here.
+- **Is developed and tested on macOS with the native Metal renderer.** Windows and Linux are not
+  built or tested here. Upstream remains the place for those platforms.
 
 **This project does not include any game assets. You must provide the files from your own legally
 acquired copy of the game to install or build Liberty Recompiled.**
@@ -29,6 +32,7 @@ recompilation tooling in this space was directly inspired by
 
 ## Table of Contents
 
+- [Game version](#game-version)
 - [What is different in this fork](#what-is-different-in-this-fork)
 - [Status](#status)
 - [Installation](#installation)
@@ -38,33 +42,60 @@ recompilation tooling in this space was directly inspired by
 - [Mod Support](#mod-support)
 - [Documentation](#documentation)
 
+## Game version
+
+The copy in use is the Xbox 360 **Games-on-Demand** package of GTA IV, laid out as on a console
+drive (`545407F2/00007000/` for the game, `545407F2/000B0000/` for the title update). Game files
+are never committed; the folders are in `.gitignore`.
+
+| | Games on Demand (this fork's target) | USA disc (upstream's target) |
+|---|---|---|
+| Title ID | `545407F2` | `545407F2` |
+| Media ID | `0x4A53F9F6` | `0x6AC07221` |
+| Base `default.xex` version | 6 (0.0.0.6) | 5 (0.0.0.5) |
+| Region flags | `0x00FFFD00` (all but NTSC-J Japan) | `0x000000FF` (USA) |
+| Title update | TU8 (`tu00000006_00000000`, listed as "RUS Title Update #8") | TU8 |
+| Patched version | **0.0.8.6** (`0x806`) | 0.0.8.5 (`0x805`) |
+| Patched image | `0x1300000`, same compile as US TU8 | `0x1300000` |
+
+**Why the US code runs it:** with TU8 applied, all 141,148 recompiled call sites in `generated/` find
+the same `bl` at the same address with the same target (`tools/xex/compare_callsites.py`, 100%, zero
+drift). Without TU8 the GOD base is a different compile (5.6% match), so **TU8 is required**. The PAL
+disc + TU5 is a third compile and would need its own remap (`docs/PAL-PORT.md`).
+
+**What support means here:**
+- Installer: accepts the GOD package (the `00007000/<id>` file with its `.data` folder) or the USA
+  disc, each with its own TU8, verified by media ID, region, base hash, RSA signature and patch hash.
+- Runtime: the US/TU8 recompilation with every hook on US addresses (`tools/xex/check_us_addresses.py`
+  verifies all ~4,100 address references against `generated/`).
+- Platform: macOS on Apple Silicon, `gta4-metal` renderer by default.
+
 ## What is different in this fork
 
-| Area | Upstream | This fork |
+| Area | OZORDI upstream | This fork |
 |---|---|---|
-| Game release | USA disc, Title Update 8 | **PAL disc, Title Update 5** (`LIBERTY_RECOMP_PAL=ON`, builds `generated_pal/`) |
-| Platforms | Windows, Linux, macOS | **macOS Apple Silicon** only (macOS 26, Homebrew LLVM) |
-| Default renderer | `gta4-native` (Vulkan via MoltenVK) | **`gta4-metal`**, the native Metal renderer. The MoltenVK path hits "graphics device lost" on the PAL build |
-| Shader cache | US shaders | US cache plus the 24 PAL executable-embedded shaders (Bink video etc.); pipelines are recorded and precompiled into a Metal binary archive at launch |
-| Installer | US media ID and TU8 hashes | PAL media ID, region, base hash and TU5 hashes; the US pre-patched shortcut is inert |
+| Game release | USA disc, Title Update 8 | **Games on Demand + TU8** (same executable as USA + TU8, which is also accepted). Builds `generated/` (`LIBERTY_RECOMP_PAL=OFF`) |
+| Platforms | Windows, Linux, macOS | **macOS Apple Silicon** only (Homebrew LLVM) |
+| Default renderer | `gta4-native` (Vulkan via MoltenVK) | **`gta4-metal`**, the native Metal renderer (the title default on Apple platforms); `gta4-native` stays selectable |
+| Shader cache | US shaders | US cache (plus 24 unused PAL entries from the PAL fork); pipelines are recorded and precompiled into a Metal binary archive at launch |
+| Installer | US media ID and TU8 hashes | A release table: USA disc + TU8 and Games on Demand + TU8 |
 | UI | Green Xenia-style ImGui | GTA IV-style theme: black panels, DIN type, amber accent, across the installer, chat and overlays |
 | World settings | Draw distance 3×, shadows 2×, population 1.25×, 1080p reflections | Xbox 360 parity by default (measured faster and busier on the M4); upstream values as a preset |
 | Diagnostics | Native profiler | Per-frame Metal timing CSV, GPU pass profiler, presenter trace, stutter capture tooling in `tools/perf/` |
 | Mouse / trackpad | Hold-RMB aim; camera re-centres after mouse look | Trackpad-aware input: mouse look holds the camera, tap-to-toggle aim on a trackpad, a keyboard aim key (Option), all in the pause-menu settings |
 
-Address matching, remapping and the XEX/TU tooling that made the PAL port possible live in
-`tools/xex/` (see its README).
+Address matching, remapping and the XEX/TU/GOD tooling live in `tools/xex/` (see its README).
 
 ## Status
 
-- The PAL build boots, installs through the PAL installer, plays the opening cutscene and free-roam
-  on `gta4-metal`.
+- **Games on Demand + TU8 (2026-10-31):** executable verified identical in layout to US TU8, hooks
+  and installer retargeted, app builds. Not yet installed and played through on this fork; the
+  next step is a first boot.
+- Inherited from the PAL fork (measured there on the PAL build): boots, plays the opening cutscene
+  and free-roam on `gta4-metal`.
 - Frame pacing work on 2026-10-10 removed a once-per-second main-thread stall (IOKit HID inventory),
   stopped a hidden window from dropping to 4 fps, and found that rendering at the 2× backing store
   of a scaled display mode was the main GPU cost. Dense city traffic still sits around 30 fps.
-- Known PAL gaps are listed at the end of [docs/PAL-PORT.md](docs/PAL-PORT.md): a few data addresses
-  are still US values (cloud/timecycle selection may misbehave) and some hooks sit on functions TU5
-  changed.
 - Everything upstream lists as complete (audio, saves, input, VFS, multiplayer stubs, FusionFix
   overlays) is carried over, but only the macOS + Metal path is exercised here.
 
@@ -75,17 +106,18 @@ Install directory on macOS: `~/Library/Application Support/LibertyRecomp/`
 
 ### Game files required
 
-You need a legal **PAL** copy of GTA IV for Xbox 360 plus its Title Update 5. The installer checks
-the media ID, region and hashes, and rejects the US release.
+You need a legal copy of GTA IV for Xbox 360, either the **Games-on-Demand** package or the **USA
+disc**, plus that release's Title Update 8. The installer checks the media ID, region and hashes;
+the PAL disc and other releases are rejected.
 
 | Input | What to provide |
 |---|---|
-| Base game | PAL disc image (`.iso`), an extracted disc folder, or an XContent package |
-| Title Update 5 | The `default.xexp` from the console's `Content/0000000000000000/545407F2/000B0000/`, or the STFS package containing it. A disc-only dump is rejected |
+| Base game | GOD: the header file `545407F2/00007000/<id>` (keep `<id>.data/` next to it). USA: disc image (`.iso`) or extracted disc folder |
+| Title Update 8 | The TU package from the console's `Content/0000000000000000/545407F2/000B0000/` (for GOD: `tu00000006_00000000`), or a bare `default.xexp`. Each release needs its own TU8 |
 | Episodes | Optional: The Lost and Damned / The Ballad of Gay Tony XContent packages |
 
 See the [Dumping Guide](docs/DUMPING-en.md) for extraction and `tools/xex/README.md` for how the
-disc and TU were obtained and verified for this fork.
+GOD package and TU were verified (`extract_god.py`, `apply_tu.py`, `compare_callsites.py`).
 
 ### Launch arguments
 
@@ -109,6 +141,13 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
   on by default). For more headroom, `resolution = "1440p"` in `native.toml` (the same choice as
   Settings > Resolution in game) renders at 2224×1440 at the display aspect; on the M4 that cut
   GPU time per frame from 33 ms to 20 ms.
+- **MacBook Air default: 1440 lines.** With no resolution set, a MacBook Air renders at most
+  1440 pixels tall at the panel's aspect (`gta4_native_air_resolution_cap`, on by default; any
+  explicit `resolution` wins). On a 15-inch M5 Air (2026-10-31) that took free-roam from 33–45 fps
+  (GPU 15–26 ms at 2880×1864) to a held 60 fps (GPU ~12 ms at 2224×1440).
+- **Fonts on the Games-on-Demand copy.** Its font textures use a different glyph layout, so the
+  port's high-resolution replacement atlases are skipped for them (the log says
+  `keeping the stock texture`); otherwise every letter would be drawn as the wrong glyph.
 - **Frame pacing.** The title runs one frame ahead of presentation by default
   (`present_frames_ahead = 1`): with CPU and GPU both just under a 60 Hz tick, that cut frames shown
   for two vsyncs from 24% to 8% and raised the on-screen rate from 48 to 55 fps on the same route,
@@ -171,18 +210,24 @@ pause menu's Liberty settings page and in the F4 overlay under GTA IV / Input.
 
 ## Building on macOS
 
-Requirements: macOS 26 with Xcode and the Metal toolchain
+Requirements: macOS 26 or later with Xcode and the Metal toolchain
 (`xcodebuild -downloadComponent MetalToolchain`), and
-`brew install cmake ninja llvm spirv-cross glslang`.
+`brew install cmake ninja llvm spirv-cross glslang vulkan-loader molten-vk` (the last two bundle a
+Vulkan runtime for the optional `gta4-native` renderer). Tested 2026-10-31 on macOS 27.2 / Xcode 27.1.
 
 ```bash
-git clone https://github.com/hamishakl/LibertyRecomp.git
+git clone https://github.com/m0d16l14n1/LibertyRecomp.git
 cd LibertyRecomp
 python3 tools/setup_repo.py
-cmake --preset macos-release -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
+cmake --preset macos-release -DCMAKE_OSX_DEPLOYMENT_TARGET=27.0   # = your macOS major version
 cmake --build --preset macos-release --target LibertyRecomp
 open "out/build/macos-release/LibertyRecomp/Liberty Recompiled.app"
 ```
+
+The deployment target must be at least the minimum of Homebrew's `libc++` (macOS 27 with LLVM 23 on
+macOS 27); the bundle check fails with `Mach-O minimum ... exceeds app minimum` otherwise. curl is
+taken from the macOS SDK, so a third-party framework with old curl headers (CryptoPro CSP) no
+longer breaks the build.
 
 Setup fetches the pinned dependencies and applies the required source patches. After pulling:
 
@@ -191,9 +236,18 @@ git -c submodule.recurse=false pull --ff-only
 python3 tools/setup_repo.py
 ```
 
-The PAL recompilation is generated from your own PAL `default.xex` + `default.xexp`; the pipeline
-(`rexglue codegen`, `tools/xex/match_functions.py`, `remap_sources.py`, `build_pal_config.py`) is
-described in [docs/PAL-PORT.md](docs/PAL-PORT.md). See [docs/BUILDING.md](docs/BUILDING.md) for
+The US/TU8 recompilation in `glue/rexglue-sdk-main/gta4-recomp/generated/` is tracked, so no game
+executable is needed to build. Regenerating it from the Games-on-Demand `default.xex` + TU8 reproduces it byte for
+byte (`out/build/codegen` per docs/BUILDING.md, then `rexglue codegen gta4_manifest.toml` with the two
+files linked as `gta4-recomp/assets/default_v8.xex` / `.xexp`).
+
+**Experimental: register-local codegen.** `rexglue codegen gta4_fast_manifest.toml` writes
+`generated_fast/` (local, not tracked) with condition/count/XER registers as C++ locals, and
+`-DLIBERTY_RECOMP_FAST_CODEGEN=ON` builds from it. It needs a play test before it becomes the default
+(docs/BACKLOG.md item 25). Build it in its own folder (`cmake --preset macos-release -B out/build/macos-fast
+-DLIBERTY_RECOMP_FAST_CODEGEN=ON`). Every build folder writes the SDK libraries to the shared
+`glue/rexglue-sdk-main/out/mac-arm64/`, so rebuild the folder you test from last. After changing hooks, run `python3 tools/xex/check_us_addresses.py`
+to confirm every guest address still exists in that tree. See [docs/BUILDING.md](docs/BUILDING.md) for
 presets, memory-limited builds and the `from_chars` deployment-target error.
 
 ## Mod Support
@@ -207,7 +261,7 @@ upstream's design.
 
 | Document | Description |
 |---|---|
-| [PAL port](docs/PAL-PORT.md) | Plan, status, known gaps and lessons from the US → PAL port |
+| [PAL port](docs/PAL-PORT.md) | History of the PAL fork's US → PAL port (reversed in this fork) and its lessons |
 | [Dev notes](docs/DEV-NOTES.md) | Map of the codebase for macOS work: boot flow, hooks, renderers, tools |
 | [Building Guide](docs/BUILDING.md) | Build presets and macOS troubleshooting |
 | [Dumping Guide](docs/DUMPING-en.md) | Extracting game files from an Xbox 360 |

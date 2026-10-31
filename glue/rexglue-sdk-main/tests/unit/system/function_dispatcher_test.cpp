@@ -17,18 +17,11 @@
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/xmemory.h>
 
+#include "../shared_guest_memory.h"
+
 namespace {
 
-rex::memory::Memory& GetTestMemory() {
-  static rex::memory::Memory memory;
-  static bool initialized = false;
-  if (!initialized) {
-    rex::InitLogging();
-    REQUIRE(memory.Initialize());
-    initialized = true;
-  }
-  return memory;
-}
+rex::memory::Memory& GetTestMemory() { return rex::test::SharedGuestMemory("function_dispatcher"); }
 
 void DummyFn(PPCContext&, uint8_t*) {}
 

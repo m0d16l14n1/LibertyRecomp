@@ -91,10 +91,16 @@ bool ReplaceAllPathTokens(std::string& haystack, std::string_view needle,
                           std::string_view replacement) {
   if (needle.empty())
     return false;
+  const bool bare_filename = needle.find_first_of("/\\") == std::string_view::npos;
   bool replaced = false;
   std::string::size_type pos = 0;
   while ((pos = haystack.find(needle, pos)) != std::string::npos) {
-    bool boundary_before = pos == 0 || !IsPathTokenChar(haystack[pos - 1]);
+    // A bare filename also matches as the last component of a longer path
+    // ("${CMAKE_CURRENT_SOURCE_DIR}/game_config.toml").
+    const bool path_separator_before =
+        pos > 0 && (haystack[pos - 1] == '/' || haystack[pos - 1] == '\\') && bare_filename;
+    bool boundary_before =
+        pos == 0 || !IsPathTokenChar(haystack[pos - 1]) || path_separator_before;
     bool boundary_after =
         pos + needle.size() >= haystack.size() || !IsPathTokenChar(haystack[pos + needle.size()]);
     if (!boundary_before || !boundary_after) {

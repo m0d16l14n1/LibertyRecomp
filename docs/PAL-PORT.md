@@ -1,5 +1,10 @@
 # PAL port plan
 
+> **2026-10-31, this fork (m0d16l14n1):** the target moved to the Games-on-Demand package + TU8, which
+> patches to the US TU8 compile. The remap below was reversed in `gta4-recomp/src` and the build uses
+> `generated/` again (`LIBERTY_RECOMP_PAL=OFF`). This document is kept as the PAL fork's history and as the
+> method to follow if another release ever needs a remap. See `tools/xex/README.md`.
+
 Goal: run Liberty Recompiled from the **PAL (NZ/AU/EU) disc + Title Update 5** instead of the US build
 upstream targets. Started 2026-10-08. Background and measurements: `tools/xex/README.md`.
 

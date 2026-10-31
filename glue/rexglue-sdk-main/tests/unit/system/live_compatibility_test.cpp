@@ -21,6 +21,8 @@
 #include <rex/system/xsocket.h>
 #include <rex/system/xmemory.h>
 
+#include "../shared_guest_memory.h"
+
 #include "system/xam/live_compatibility_internal.h"
 #include "kernel/xam/xam_qos_internal.h"
 #include "system/xam/xsession_internal.h"
@@ -160,16 +162,7 @@ TEST_CASE("XNQOS guest allocation uses exact big-endian ABI and contiguous title
   CHECK_FALSE(qos_detail::QosGuestAllocationSize(std::span{&inconsistent, size_t{1}}));
 }
 
-rex::memory::Memory& GetLiveTestMemory() {
-  static rex::memory::Memory memory;
-  static bool initialized = false;
-  if (!initialized) {
-    rex::InitLogging();
-    REQUIRE(memory.Initialize());
-    initialized = true;
-  }
-  return memory;
-}
+rex::memory::Memory& GetLiveTestMemory() { return rex::test::SharedGuestMemory("live_compatibility"); }
 
 class GuestAllocation {
  public:
@@ -1042,6 +1035,13 @@ TEST_CASE("UDP wrapper preserves Xbox network byte order", "[live][socket]") {
   REQUIRE(XSUCCEEDED(sender.Initialize(rex::system::XSocket::X_AF_INET,
                                        rex::system::XSocket::X_SOCK_DGRAM,
                                        rex::system::XSocket::X_IPPROTO_UDP)));
+  // Bind explicitly: macOS getsockname reports port 0 for a socket that sendto bound implicitly,
+  // which would leave nothing to compare the received source port against.
+  rex::system::N_XSOCKADDR_IN sender_bind{};
+  sender_bind.sin_family = AF_INET;
+  sender_bind.sin_port = 0;
+  sender_bind.sin_addr = INADDR_LOOPBACK;
+  REQUIRE(XSUCCEEDED(sender.Bind(&sender_bind, sizeof(sender_bind))));
 
   rex::system::N_XSOCKADDR_IN destination{};
   destination.sin_family = AF_INET;

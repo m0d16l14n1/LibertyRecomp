@@ -26,6 +26,14 @@ VectorFontSet SelectVectorFontSet(size_t index, uint64_t hash) {
   if (index == 2 && hash == 0x6C569517F27F53D2ull) return VectorFontSet::kTbogt;
   return VectorFontSet::kGta4;
 }
+bool StockFontMatchesAtlasLayout(size_t index, uint64_t hash) {
+  // Games-on-Demand release (media 4A53F9F6): its font textures hold extra glyphs, so the Latin
+  // cells sit about seven places later and the replacement atlases draw "the" as "¡ol".
+  if (index == 0 && hash == 0x13F4419414EA9CB9ull) return false;
+  if (index == 1 && hash == 0x601543F27E876E31ull) return false;
+  if (index == 2 && hash == 0x9F5EF825DDB933B4ull) return false;
+  return true;
+}
 uint64_t StockFontIdentity(std::span<const uint8_t> bytes) {
   if (bytes.size() < kFontIdentityBytes) return 0;
   std::unique_ptr<XXH3_state_t, decltype(&XXH3_freeState)> state(XXH3_createState(), XXH3_freeState);

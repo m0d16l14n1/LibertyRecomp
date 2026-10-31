@@ -12,6 +12,9 @@ enum class VectorFontSet : size_t { kGta4, kTlad, kTbogt };
 struct VectorFontAtlas { const char* filename = nullptr; std::vector<uint8_t> alpha; };
 const char* VectorFontSetName(VectorFontSet set);
 VectorFontSet SelectVectorFontSet(size_t atlas_index, uint64_t stock_identity_hash);
+// False for stock fonts whose glyph cells are laid out differently from the release the atlases
+// were traced from; drawing the replacement over them maps every character to the wrong glyph.
+bool StockFontMatchesAtlasLayout(size_t atlas_index, uint64_t stock_identity_hash);
 // Existing identity table was derived from a 16-byte alignment prefix. Keep
 // that explicit wire convention independent of a backend's upload allocator.
 uint64_t StockFontIdentity(std::span<const uint8_t> linear_bc3);

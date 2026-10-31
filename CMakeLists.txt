@@ -21,6 +21,18 @@ if(APPLE AND NOT CMAKE_TOOLCHAIN_FILE)
 endif()
 project("LibertyRecomp-ALL")
 
+# Take curl's headers from the macOS SDK. Otherwise a framework under /Library/Frameworks that ships
+# its own curl/curl.h can win (CryptoPro CSP bundles 7.65, which lacks CURLOPT_PROTOCOLS_STR).
+if(APPLE AND NOT CURL_INCLUDE_DIR)
+    execute_process(COMMAND xcrun --sdk macosx --show-sdk-path
+                    OUTPUT_VARIABLE _liberty_sdk_path OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE _liberty_sdk_result ERROR_QUIET)
+    if(_liberty_sdk_result EQUAL 0 AND EXISTS "${_liberty_sdk_path}/usr/include/curl/curl.h")
+        set(CURL_INCLUDE_DIR "${_liberty_sdk_path}/usr/include" CACHE PATH
+            "Directory containing curl/curl.h")
+    endif()
+endif()
+
 # Reproduce the source fixes carried for pinned upstream dependencies.
 liberty_apply_dependency_patches("${CMAKE_CURRENT_SOURCE_DIR}")
 

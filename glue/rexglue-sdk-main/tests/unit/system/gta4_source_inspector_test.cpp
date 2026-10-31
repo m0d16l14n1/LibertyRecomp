@@ -176,6 +176,29 @@ TEST_CASE("GTA IV source classifier accepts only canonical USA retail 1.00 ident
   CHECK(result.region == rex::XEX_REGION_NTSCU);
 }
 
+TEST_CASE("GTA IV source classifier accepts the Games-on-Demand base 6 identity",
+          "[gta4][installer][source-inspection]") {
+  auto metadata = RetailMetadata();
+  metadata.media_id = 0x4A53F9F6;
+  metadata.xex_version = 0x00000006;
+  metadata.base_version = 0x00000006;
+  metadata.region = 0x00FFFD00;
+  metadata.rsa_signature_sha1 = {0xA2, 0x4D, 0xFE, 0x5C, 0x65, 0x1F, 0xF8, 0x53, 0x83, 0x55,
+                                 0xCC, 0xC4, 0x7F, 0x68, 0x75, 0x33, 0xF5, 0x6E, 0xEA, 0x44};
+  const GameSourceInspection result = ClassifyGameSourceMetadata(metadata);
+  REQUIRE(result.supported());
+  CHECK(result.release_label == "Games on Demand");
+
+  SECTION("USA signature on the Games-on-Demand media") {
+    metadata.rsa_signature_sha1 = RetailMetadata().rsa_signature_sha1;
+    CHECK(ClassifyGameSourceMetadata(metadata).status == GameSourceStatus::kWrongSignature);
+  }
+  SECTION("USA base version on the Games-on-Demand media") {
+    metadata.xex_version = metadata.base_version = 0x00000005;
+    CHECK(ClassifyGameSourceMetadata(metadata).status == GameSourceStatus::kWrongRevision);
+  }
+}
+
 TEST_CASE("GTA IV source classifier rejects mismatched identity fields",
           "[gta4][installer][source-inspection]") {
   SECTION("title") {

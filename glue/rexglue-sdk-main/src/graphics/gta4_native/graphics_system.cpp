@@ -5295,7 +5295,9 @@ Gta4NativeGraphicsSystem::CaptureTextureResource(uint32_t handle,
   const VectorFontAtlas* vector_font = nullptr;
   if (vector_font_index) {
     vector_font_set = SelectVectorFontSet(*vector_font_index, stock_identity_hash);
-    vector_font = FindVectorFontAtlas(vector_font_set, *vector_font_index);
+    if (core::StockFontMatchesAtlasLayout(*vector_font_index, stock_identity_hash)) {
+      vector_font = FindVectorFontAtlas(vector_font_set, *vector_font_index);
+    }
     if (ShouldTraceVectorFonts()) {
       REXLOG_INFO(
           "gta4-native-font-debug: identify font={} atlas-index={} set={} "

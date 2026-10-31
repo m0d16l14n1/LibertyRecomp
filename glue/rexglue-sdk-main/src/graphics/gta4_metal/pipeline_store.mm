@@ -163,6 +163,24 @@ bool PipelineStore::Open(id<MTLDevice> device, const std::filesystem::path& cach
       if (recorded_.insert(HashRecipe(recipe)).second) recipes_.push_back(recipe);
     }
   }
+  // Seed recipes shipped in the bundle (recorded in play on the US/TU8 build): a first launch
+  // compiles them behind the loading screen instead of stalling the first drive. Re-read every
+  // launch rather than copied into the user's log, so an app update can replace the set; recipes
+  // this device or the current settings cannot build are filtered out by the precompile.
+  size_t seeded = 0;
+  if (NSString* resources = [[NSBundle mainBundle] resourcePath]) {
+    const auto seed = std::filesystem::path(resources.UTF8String) / "metal" / "pipeline_recipes_seed.bin";
+    if (std::ifstream in(seed, std::ios::binary); in) {
+      PipelineRecipe recipe;
+      while (in.read(reinterpret_cast<char*>(&recipe), sizeof(recipe))) {
+        if (recipe.version != PipelineRecipe::kVersion) continue;
+        if (recorded_.insert(HashRecipe(recipe)).second) {
+          recipes_.push_back(recipe);
+          ++seeded;
+        }
+      }
+    }
+  }
   if (std::ifstream in(manifest_path_, std::ios::binary); in) {
     uint64_t hash;
     while (in.read(reinterpret_cast<char*>(&hash), sizeof(hash))) archived_.insert(hash);
@@ -185,8 +203,8 @@ bool PipelineStore::Open(id<MTLDevice> device, const std::filesystem::path& cach
   if (!descriptor.url) archived_.clear();
 
   log_.open(recipes_path_, std::ios::binary | std::ios::app);
-  REXLOG_INFO("gta4-metal-pipeline-cache: {} recipes recorded, {} archived ({})", recipes_.size(), archived_.size(),
-              archive_path_.filename().string());
+  REXLOG_INFO("gta4-metal-pipeline-cache: {} recipes recorded ({} from the bundled seed), {} archived ({})",
+              recipes_.size(), seeded, archived_.size(), archive_path_.filename().string());
   return true;
 }
 

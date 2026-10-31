@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include <rex/crypto/sha256.h>
 #include <rex/filesystem.h>
 #include <rex/filesystem/device.h>
@@ -44,13 +45,9 @@ namespace {
 using namespace rex::literals;
 
 constexpr uint32_t kGta4TitleId = 0x545407F2;
-// PAL fork: PAL retail base (version 7) + Title Update 5 (0.0.5.7). See docs/PAL-PORT.md.
-constexpr uint32_t kRequiredTargetVersion = 0x00000507;
-constexpr uint64_t kRequiredBaseXexXxh3 = 15674128280634689956ULL;
-constexpr std::string_view kRequiredPatchSha256 =
-    "602f1c585619ba57775d826cba3df751176d8a0911794b3643159e42315172c3";
-// US-only shortcut (a pre-patched v8 default.xex). No PAL equivalent is distributed; it can never
-// match a 0x507 base, so this path is inert in the PAL fork.
+// Supported base releases and their TU8 patches live in gta4_source_inspector.cpp.
+// US-only shortcut: a pre-patched v8 default.xex installed without a sibling XEXP.
+constexpr uint32_t kEmbeddedTargetVersion = 0x00000805;
 constexpr std::string_view kEmbeddedTargetXexSha256 =
     "8268fdc91f83c4288e1db8319a109e622865497d1405d9f4ca98f46830d1ff21";
 constexpr size_t kMaximumMetadataFileSize = 64_MiB;
@@ -81,6 +78,7 @@ struct XexInfo {
   uint32_t module_flags = 0;
   uint32_t version = 0;
   uint32_t title_id = 0;
+  uint32_t media_id = 0;
   std::array<uint8_t, 0x100> rsa_signature{};
   bool has_security_info = false;
   bool has_execution_info = false;
@@ -294,6 +292,7 @@ bool ParseXex(std::span<const uint8_t> bytes, XexInfo& info, std::string& error)
           reinterpret_cast<const rex::xex2_opt_execution_info*>(bytes.data() + offset);
       info.version = execution->version_value;
       info.title_id = execution->title_id;
+      info.media_id = execution->media_id;
       info.has_execution_info = true;
     } else if (key == rex::XEX_HEADER_DELTA_PATCH_DESCRIPTOR) {
       if (offset > header_size ||
@@ -337,16 +336,23 @@ bool ValidatePatch(const XexInfo& base, const XexInfo& patch, std::span<const ui
     error = "The selected update does not contain a delta XEXP patch.";
     return false;
   }
-  if (patch.delta_target_version != kRequiredTargetVersion) {
-    error = "This build requires GTA IV PAL Title Update 5 (0.0.5.7).";
+  const SupportedRelease* release = FindSupportedRelease(base.media_id);
+  if (!release) {
+    error = "The base game is not a release supported by this build.";
+    return false;
+  }
+  if (patch.delta_target_version != release->target_version) {
+    error = fmt::format("This build requires GTA IV Title Update 8 ({}) for the {} release.",
+                        FormatXexVersion(release->target_version), release->label);
     return false;
   }
   if (patch.delta_source_version != base.version) {
     error = "The selected title update does not target this base-game revision.";
     return false;
   }
-  if (HashBytes(patch_bytes) != kRequiredPatchSha256) {
-    error = "The selected XEXP is not the supported GTA IV PAL Title Update 5.";
+  if (HashBytes(patch_bytes) != release->patch_sha256) {
+    error = fmt::format("The selected XEXP is not the supported GTA IV Title Update 8 for the {} "
+                        "release.", release->label);
     return false;
   }
 
@@ -744,7 +750,8 @@ bool WriteManifest(const std::filesystem::path& game_root, const XexInfo& base,
   stream << "format=1\n";
   stream << "title_id=545407F2\n";
   stream << "base_version=" << base.version << "\n";
-  stream << "target_version=" << kRequiredTargetVersion << "\n";
+  const SupportedRelease* release = FindSupportedRelease(base.media_id);
+  stream << "target_version=" << (release ? release->target_version : base.version) << "\n";
   stream << "rpf_layout=preserved-and-extracted\n";
   stream << "base_sha256=" << HashBytes(base_bytes) << "\n";
   if (!patch_bytes.empty()) {
@@ -865,12 +872,14 @@ bool ValidateInstalledPair(const std::filesystem::path& game_root, std::string& 
     return false;
   }
 
-  if (base.version == kRequiredTargetVersion && HashBytes(base_bytes) == kEmbeddedTargetXexSha256) {
+  if (base.version == kEmbeddedTargetVersion && HashBytes(base_bytes) == kEmbeddedTargetXexSha256) {
     return true;
   }
 
-  if (XXH3_64bits(base_bytes.data(), base_bytes.size()) != kRequiredBaseXexXxh3) {
-    reason = "default.xex does not match GTA IV PAL retail (base version 7).";
+  const SupportedRelease* release = FindSupportedRelease(base.media_id);
+  if (!release || XXH3_64bits(base_bytes.data(), base_bytes.size()) != release->base_xex_xxh3) {
+    reason = "default.xex does not match a supported GTA IV release (USA retail 1.00 or Games "
+             "on Demand).";
     return false;
   }
 
@@ -958,7 +967,7 @@ Result Install(const Selection& selection, const std::filesystem::path& install_
 
   std::optional<PreparedUpdate> update;
   if (game && selection.update_source.empty()) {
-    result.error = "The supported PAL retail source requires GTA IV Title Update 5.";
+    result.error = "The supported base game requires GTA IV Title Update 8.";
     return result;
   }
   if (game) {

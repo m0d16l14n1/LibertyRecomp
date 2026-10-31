@@ -4,12 +4,20 @@ project(gta4_recomp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# PAL fork: build from the PAL (base 7 + TU5) recompilation by default. The US tree in generated/
-# stays as the reference for tools/xex address matching. See docs/PAL-PORT.md.
-option(LIBERTY_RECOMP_PAL "Build from the PAL recompilation (generated_pal/)" ON)
+# Build from the US Title Update 8 recompilation in generated/. The USA disc + TU8 and the
+# Games-on-Demand package + TU8 both patch to this executable. The PAL (base 7 + TU5) tree is a
+# different compile whose hook addresses are no longer in src/; see docs/PAL-PORT.md.
+option(LIBERTY_RECOMP_PAL "Build from the PAL recompilation (generated_pal/)" OFF)
+# Opt-in: the same US/TU8 code generated with condition/count/XER/reserved registers as C++
+# locals (gta4_fast_config.toml). Not tracked; generate it from your own default.xex + TU8 with
+# `rexglue codegen gta4_fast_manifest.toml`. Needs a play test before it becomes the default.
+option(LIBERTY_RECOMP_FAST_CODEGEN "Build from the register-local recompilation (generated_fast/)" OFF)
 if(LIBERTY_RECOMP_PAL)
     set(GTA4_GENERATED_DIR generated_pal)
     set(GTA4_CODEGEN_MANIFEST gta4_pal_manifest.toml)
+elseif(LIBERTY_RECOMP_FAST_CODEGEN)
+    set(GTA4_GENERATED_DIR generated_fast)
+    set(GTA4_CODEGEN_MANIFEST gta4_fast_manifest.toml)
 else()
     set(GTA4_GENERATED_DIR generated)
     set(GTA4_CODEGEN_MANIFEST gta4_manifest.toml)
@@ -212,6 +220,12 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
     include("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/metal/MetalShaderArchive.cmake")
     liberty_add_metal_shader_archive(LibertyRecomp "${LIBERTY_RECOMP_WORKSPACE_ROOT}")
     liberty_stage_vulkan_temporal_archive(LibertyRecomp)
+
+    # Pipeline recipes recorded in play, precompiled at the first launch (PipelineStore::Open).
+    set(LIBERTY_METAL_RECIPE_SEED "${CMAKE_CURRENT_SOURCE_DIR}/res/metal/pipeline_recipes_seed.bin")
+    set_source_files_properties("${LIBERTY_METAL_RECIPE_SEED}" PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/metal")
+    target_sources(LibertyRecomp PRIVATE "${LIBERTY_METAL_RECIPE_SEED}")
 
     get_property(LIBERTY_METAL_PASS_LIBRARY GLOBAL PROPERTY REX_METAL_PASSES_LIBRARY)
     if(LIBERTY_METAL_PASS_LIBRARY)

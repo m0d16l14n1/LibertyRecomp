@@ -57,6 +57,11 @@ std::shared_ptr<TextureResource> ResourceStore::State::FontTexture(uint32_t hand
                                      source.data() + offset, block_bytes);
   }
   const uint64_t identity = StockFontIdentity(linear);
+  if (!StockFontMatchesAtlasLayout(font_id - 1, identity)) {
+    REXLOG_INFO("gta4-metal-fonts: font={} identity={:016X} has a different glyph layout; "
+                "keeping the stock texture", font_id, identity);
+    return {};
+  }
   const auto set = SelectVectorFontSet(font_id - 1, identity);
   const auto* atlas = FindVectorFontAtlas(set, font_id - 1);
   if (!atlas) return {}; // Keep the game font when a replacement asset is unavailable.

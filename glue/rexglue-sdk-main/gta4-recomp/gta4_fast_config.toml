@@ -1,0 +1,10 @@
+# Register-as-local codegen variant of gta4_config.toml (LIBERTY_RECOMP_FAST_CODEGEN).
+# Only registers no hook reads from a caller's context are kept in C++ locals. Hooks read callers'
+# non-volatile registers (r22-r31, f29, f31) and key on ctx.lr, so non_volatile_as_local,
+# non_argument_as_local and skip_lr stay off; see docs/BACKLOG.md item 25.
+includes = ["gta4_config.toml"]
+
+cr_as_local = true
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true

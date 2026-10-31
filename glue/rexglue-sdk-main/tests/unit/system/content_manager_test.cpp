@@ -13,6 +13,8 @@
 #include <rex/system/xam/content_device.h>
 #include <rex/system/xam/content_manager.h>
 
+#include "../shared_guest_memory.h"
+
 namespace {
 
 class ContentTestDirectory {
@@ -119,6 +121,7 @@ TEST_CASE("aggregate content metadata preserves package identity when copied",
 TEST_CASE("saved games use the dedicated loose portable root", "[system][content][save]") {
   ContentTestDirectory temp;
   const auto saved_game_root = temp.path() / "portable-saves";
+  rex::test::ReleaseSharedGuestMemory();  // one guest Memory per process
   rex::Runtime runtime(temp.path() / "game", temp.path() / "user", {}, {}, {},
                        temp.path() / "marketplace", saved_game_root);
   rex::RuntimeConfig config;
@@ -158,6 +161,7 @@ TEST_CASE("saved games use the dedicated loose portable root", "[system][content
 TEST_CASE("marketplace packages mount and expose setup metadata through extra",
           "[.integration][system][content]") {
   ContentTestDirectory temp;
+  rex::test::ReleaseSharedGuestMemory();  // one guest Memory per process
   rex::Runtime runtime(temp.path() / "game", temp.path() / "user", {}, {}, {},
                        temp.path() / "marketplace");
   rex::RuntimeConfig config;

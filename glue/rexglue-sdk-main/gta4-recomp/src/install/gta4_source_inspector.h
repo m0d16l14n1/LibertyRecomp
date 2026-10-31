@@ -8,8 +8,28 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace gta4::install {
+
+// A base release whose Title Update 8 produces the executable the recompiled code was generated
+// from. The USA disc (base 5) and the Games-on-Demand package (base 6) are both delta-patched by
+// their own TU8 into the same compile; see tools/xex/README.md.
+struct SupportedRelease {
+  std::string_view label;
+  uint32_t media_id;
+  uint32_t region;
+  uint32_t base_version;
+  // Full-file XXH3-64 of the base default.xex.
+  uint64_t base_xex_xxh3;
+  // SHA-1 of the base XEX RSA signature, which is the TU8 XEXP's digest_source.
+  std::array<uint8_t, 20> rsa_signature_sha1;
+  uint32_t target_version;
+  std::string_view patch_sha256;
+};
+
+std::span<const SupportedRelease> SupportedReleases();
+const SupportedRelease* FindSupportedRelease(uint32_t media_id);
 
 enum class GameSourceKind {
   kUnknown,
