@@ -1236,8 +1236,12 @@ std::string CurrentSettingValue(const Setting& source) {
     const double seconds = std::strtod(value.c_str(), &end);
     if (end != value.c_str()) value = std::to_string(static_cast<int>(seconds + 0.5));
   }
-  if (std::string_view(setting.cvar) == "mnk_trackpad_sensitivity") {
-    // "2.000000" -> "2", "1.500000" -> "1.5", to match the choice values.
+  if (std::string_view(setting.cvar) == "mnk_trackpad_sensitivity" ||
+      std::string_view(setting.cvar) == "gta4_native_hdr_paper_white_nits" ||
+      std::string_view(setting.cvar) == "gta4_native_hdr_peak_nits") {
+    // "2.000000" -> "2", "1.500000" -> "1.5", to match the choice values. Unmatched, a row
+    // shows its first choice (paper white read "80 nits" at the 203 default) and the next
+    // press steps from there.
     char* end = nullptr;
     const double scale = std::strtod(value.c_str(), &end);
     if (end != value.c_str()) {

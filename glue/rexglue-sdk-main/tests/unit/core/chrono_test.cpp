@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <rex/chrono/chrono.h>
+#include <rex/chrono/chrono_steady_cast.h>
 
 using rex::chrono::WinSystemClock;
 
@@ -314,4 +315,22 @@ TEST_CASE("weekday c_encoding returns 0=Sunday through 6=Saturday", "[chrono]") 
   CHECK(weekday{sys_days{year{2021} / month{1} / day{1}}}.c_encoding() == 5);
   // 2000-01-01 is Saturday (6)
   CHECK(weekday{sys_days{year{2000} / month{1} / day{1}}}.c_encoding() == 6);
+}
+
+// =============================================================================
+// NT -> steady_clock conversion (timer due times)
+// =============================================================================
+
+TEST_CASE("NT due time near the FileTime epoch converts to the past", "[chrono]") {
+  // A legal "already due" absolute time. Its ~425-year delta from now used to
+  // overflow steady_clock's int64 nanoseconds and land ~150 years ahead, so a
+  // timer armed with it never fired (upstream rexglue PR #538).
+  const auto steady_now = std::chrono::steady_clock::now();
+  const auto due = std::chrono::clock_cast<std::chrono::steady_clock>(
+      WinSystemClock::from_file_time(kFtNtEpoch + 1));
+  CHECK(due < steady_now);
+  // Far-future due times stay in the future.
+  const auto far = std::chrono::clock_cast<std::chrono::steady_clock>(
+      WinSystemClock::from_file_time(UINT64_MAX / 2));
+  CHECK(far > steady_now + std::chrono::hours(24 * 365));
 }

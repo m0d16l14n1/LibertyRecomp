@@ -69,12 +69,12 @@ Rules carried over from MCLA:
 | P2 | CPU: WaitMultiple without 1 ms polling (upstream PR #501), timer queue blocking wait (MCLA) | done (BACKLOG 37): fewer wake-ups, same fps |
 | P3 | Anisotropic filtering default above 1x | done: 16x, no measurable cost (BACKLOG 36) |
 | P4 | Refresh the bundled pipeline recipe seed from city driving (first-run hitches: 90-150 pipelines built in the first minute) | done: 482 recipes; first launch compiles them in ~5 s, and its archive save no longer crashes (BACKLOG 38). Refresh again after longer city sessions |
-| P5 | Remaining POSIX fixes from upstream (#531 lost wakeups, #538 timer clamp): this SDK's `threading_posix.cpp` has diverged, so they need porting by hand | to do |
+| P5 | Remaining POSIX fixes from upstream (#531 lost wakeups, #538 timer clamp) | #538 done with a test (BACKLOG 43); #531 not ported: GTA IV never calls the path it fixes, and its `WaitUntil` can deadlock ping-pong `SignalAndWait` pairs (BACKLOG 44) |
 | P6 | Lock-free guest atomics (MCLA `rexglue-guest-atomics-lock-free.patch`) | low value: the region check is clean (0 violations), but the global lock is barely contended here (BACKLOG 40) |
 | P7 | `CAMetalDisplayLink` pacing check on ProMotion panels | to do (needs a 120 Hz display) |
 | P8 | Above-panel output (MetalFX to 2880x1864 on the Air) costs 17-21 ms GPU: only for Pro/Max chips; the launcher's suggestion should pick it by GPU core count | to do |
-| P9 | HDR / EDR on the Air's panel: the in-game paper-white row shows 80 nits while the cvar default is 203; check which one the renderer uses before offering HDR in the launcher | to check |
-| P10 | Dense-traffic city benchmark route (the docks route is light): a second pad script driving into Algonquin, to measure P8 and future GPU work where it matters | to do |
+| P9 | HDR / EDR on the Air's panel | the 80-vs-203 nits mismatch was a menu display bug, fixed (BACKLOG 45); whether HDR looks better than SDR on the Air's limited EDR headroom is still to judge by eye |
+| P10 | Dense-traffic city benchmark route (the docks route is light) | needs a story save in Algonquin to load; open-loop driving from a new game cannot reach it reproducibly (BACKLOG 46) |
 
 ## Measuring
 
