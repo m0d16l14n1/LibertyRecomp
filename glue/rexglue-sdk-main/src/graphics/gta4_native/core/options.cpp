@@ -22,7 +22,9 @@ REXCVAR_DEFINE_STRING(gta4_texture_filtering, "trilinear", "GTA IV/Graphics/Text
     .allowed({"bilinear", "trilinear"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
-REXCVAR_DEFINE_STRING(gta4_anisotropic_filtering, "1x", "GTA IV/Graphics/Texture Filtering",
+// Fork default 16x: no measurable GPU cost on the M5 Air (MetalFX Quality, circle window GPU
+// 14.3 ms against 14.9 at 1x, 2026-11-01), and roads and pavements stay sharp at a slant.
+REXCVAR_DEFINE_STRING(gta4_anisotropic_filtering, "16x", "GTA IV/Graphics/Texture Filtering",
                       "Material anisotropic filtering: 1x, 2x, 4x, 8x, or 16x")
     .allowed({"1x", "2x", "4x", "8x", "16x"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);

@@ -12,16 +12,189 @@
 #include <algorithm>
 #include <forward_list>
 
+#include <disruptorplus/blocking_wait_strategy.hpp>
 #include <disruptorplus/multi_threaded_claim_strategy.hpp>
 #include <disruptorplus/ring_buffer.hpp>
 #include <disruptorplus/sequence_barrier.hpp>
 #include <disruptorplus/spin_wait_strategy.hpp>
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/thread.h>
 #include <rex/thread/timer_queue.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace dp = disruptorplus;
+
+REXCVAR_DEFINE_BOOL(timer_queue_blocking_wait, true, "Kernel",
+                    "Let the timer thread sleep on a condition variable until the next timer "
+                    "is due or a new one is queued, instead of spinning (yielding, with a 1 ms "
+                    "sleep every 20th turn). Off restores the spin wait.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_BOOL(timer_queue_hr_wait, false, "Kernel",
+                    "On Windows, with the timer thread blocking: wait for a timer that is due within "
+                    "20 ms on a high-resolution waitable timer (0.3 ms late on average, nothing "
+                    "spinning) instead of the condition variable. With libc++ (the llvm-mingw builds) "
+                    "a condition variable's timeout is cut down to whole milliseconds, so a timer due "
+                    "in under 1 ms makes the wait return at once and the thread spin until it is due: "
+                    "a whole core with the 1 ms timestamp timer. On gives that core back (the process "
+                    "used 22 to 58% less CPU). With 4 logical processors it also shortened the frame "
+                    "(uncapped +17 to 21% FPS, the 99th percentile 30 ms to 10-12 ms); with 16 and 8 "
+                    "it made the frame 1 to 2.4% longer in the busier scenes, with or without "
+                    "timer_queue_hr_spin_us. So the SDK's default is off; the MCLA host turns it on by "
+                    "itself for 5 or fewer logical processors (src/mcla_app.cpp). Off is the "
+                    "condition variable and its spin.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_INT32(timer_queue_hr_spin_us, 0, "Kernel",
+                     "With timer_queue_hr_wait: how many microseconds before a timer is due the "
+                     "timer thread stops sleeping and spins (with the processor's pause hint) "
+                     "until it is. The high-resolution wait wakes 0.3 ms late on average, so a "
+                     "timer that matters to the millisecond (the 1 ms timestamp the guest reads) is "
+                     "late by that; spinning for the last part trades some of the saved CPU for "
+                     "an exact wake-up. 0 sleeps all the way.")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+namespace {
+
+#if defined(_WIN32)
+// One high-resolution waitable timer per waiting thread.
+struct HrTimer {
+  HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_ALL_ACCESS);
+  ~HrTimer() {
+    if (handle) {
+      CloseHandle(handle);
+    }
+  }
+};
+#endif
+
+// The timer thread's wait for new timers: the original spin wait, or with
+// timer_queue_blocking_wait a condition variable. Publishing always signals
+// the blocking side, so the choice can change while the thread waits.
+class TimerWaitStrategy {
+ public:
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[]) {
+    return Blocking() ? blocking_.wait_until_published(sequence, count, sequences)
+                      : spin_.wait_until_published(sequence, count, sequences);
+  }
+
+  template <typename Rep, typename Period>
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[],
+                                      const std::chrono::duration<Rep, Period>& timeout) {
+    return Blocking() ? blocking_.wait_until_published(sequence, count, sequences, timeout)
+                      : spin_.wait_until_published(sequence, count, sequences, timeout);
+  }
+
+  template <typename Clock, typename Duration>
+  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
+                                      const std::atomic<dp::sequence_t>* const sequences[],
+                                      const std::chrono::time_point<Clock, Duration>& timeout_time) {
+    if (!Blocking()) {
+      return spin_.wait_until_published(sequence, count, sequences, timeout_time);
+    }
+    // An empty queue waits until time_point::max(), which the condition
+    // variable cannot convert; wake at least once a second instead (the
+    // caller just waits again, and a cvar change is picked up).
+    const auto now = Clock::now();
+    const auto limit = std::chrono::time_point_cast<Duration>(now + std::chrono::seconds(1));
+    auto deadline = timeout_time < limit ? timeout_time : limit;
+#if defined(_WIN32)
+    if (REXCVAR_GET(timer_queue_hr_wait)) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
+      if (remaining > std::chrono::nanoseconds::zero()) {
+        if (remaining <= std::chrono::milliseconds(20)) {
+          dp::sequence_t result;
+          const std::chrono::nanoseconds spin(
+              static_cast<int64_t>(std::clamp(REXCVAR_GET(timer_queue_hr_spin_us), 0, 1000)) * 1000);
+          if (HrWait(sequence, count, sequences, remaining, spin, &result)) {
+            return result;
+          }
+        } else {
+          // Long wait: the condition variable until shortly before the deadline (it can wake a
+          // tick late), then the loop comes back here for the short wait.
+          deadline = std::chrono::time_point_cast<Duration>(deadline - std::chrono::milliseconds(10));
+        }
+      }
+    }
+#endif
+    return blocking_.wait_until_published(sequence, count, sequences, deadline);
+  }
+
+  void signal_all_when_blocking() {
+    blocking_.signal_all_when_blocking();
+#if defined(_WIN32)
+    SetEvent(wake_event_);
+#endif
+  }
+
+ private:
+  static bool Blocking() { return REXCVAR_GET(timer_queue_blocking_wait); }
+
+#if defined(_WIN32)
+  // Sleeps on the thread's high-resolution timer until `spin` before `remaining` is up, or until
+  // a timer is queued (signal_all_when_blocking), then spins (pause hint) the rest of `remaining`
+  // unless something was queued. False if the timer could not be made. *result is what the
+  // condition variable's wait would have returned: the least-advanced sequence, which is before
+  // `sequence` if nothing was published.
+  bool HrWait(dp::sequence_t sequence, size_t count,
+              const std::atomic<dp::sequence_t>* const sequences[],
+              std::chrono::nanoseconds remaining, std::chrono::nanoseconds spin,
+              dp::sequence_t* result) {
+    static thread_local HrTimer timer;
+    if (!timer.handle) {
+      return false;
+    }
+    const auto end = std::chrono::steady_clock::now() + remaining;
+    // The event is reset before the sequences are read: a timer queued after the read sets it
+    // again, and the wait below then returns at once.
+    ResetEvent(wake_event_);
+    *result = dp::minimum_sequence_after(sequence, count, sequences);
+    if (dp::difference(*result, sequence) >= 0) {
+      return true;
+    }
+    if (remaining > spin) {
+      LARGE_INTEGER due;
+      due.QuadPart = -static_cast<LONGLONG>((remaining - spin).count() / 100);
+      if (!SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0)) {
+        return false;
+      }
+      const HANDLE handles[2] = {wake_event_, timer.handle};
+      WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+      *result = dp::minimum_sequence_after(sequence, count, sequences);
+      if (dp::difference(*result, sequence) >= 0) {
+        return true;
+      }
+    }
+    if (spin > std::chrono::nanoseconds::zero()) {
+      // The thread is awake and the timer nearly due: wait for it without a wake-up to be late for.
+      while (std::chrono::steady_clock::now() < end) {
+        *result = dp::minimum_sequence_after(sequence, count, sequences);
+        if (dp::difference(*result, sequence) >= 0) {
+          return true;
+        }
+        YieldProcessor();
+      }
+    }
+    return true;
+  }
+
+  HANDLE wake_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+#endif
+
+  dp::spin_wait_strategy spin_;
+  dp::blocking_wait_strategy blocking_;
+};
+
+}  // namespace
 
 namespace rex::thread {
 
@@ -142,9 +315,9 @@ class TimerQueue {
   // This ring buffer will be used to introduce timers queued by the public API
   static constexpr size_t kWaitCount = 512;
   dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
-  dp::spin_wait_strategy wait_strategy_;
-  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
-  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
+  TimerWaitStrategy wait_strategy_;
+  dp::multi_threaded_claim_strategy<TimerWaitStrategy> claim_strategy_;
+  dp::sequence_barrier<TimerWaitStrategy> consumed_;
 
   // This is a _sorted_ (ascending due_) list of active timers managed by a
   // dedicated thread

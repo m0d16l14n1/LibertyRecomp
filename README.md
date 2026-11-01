@@ -81,16 +81,20 @@ disc + TU5 is a third compile and would need its own remap (`docs/PAL-PORT.md`).
 | Installer | US media ID and TU8 hashes | A release table: USA disc + TU8 and Games on Demand + TU8 |
 | UI | Green Xenia-style ImGui | GTA IV-style theme: black panels, DIN type, amber accent, across the installer, chat and overlays |
 | World settings | Draw distance 3×, shadows 2×, population 1.25×, 1080p reflections | Xbox 360 parity by default (measured faster and busier on the M4); upstream values as a preset |
-| Diagnostics | Native profiler | Per-frame Metal timing CSV, GPU pass profiler, presenter trace, stutter capture tooling in `tools/perf/` |
+| Upscaling | Native-size SMAA | **MetalFX temporal upscaling (Quality)** by default on Apple Silicon: renders at 2/3 size, upscales to the output; SMAA at native size stays one setting away |
+| Diagnostics | Native profiler | Per-frame Metal timing CSV, GPU pass profiler, presenter trace, stutter capture tooling, and an unattended benchmark that plays a fixed route with a scripted controller (`tools/perf/`) |
 | Mouse / trackpad | Hold-RMB aim; camera re-centres after mouse look | Trackpad-aware input: mouse look holds the camera, tap-to-toggle aim on a trackpad, a keyboard aim key (Option), all in the pause-menu settings |
 
 Address matching, remapping and the XEX/TU/GOD tooling live in `tools/xex/` (see its README).
 
 ## Status
 
-- **Games on Demand + TU8 (2026-10-31):** executable verified identical in layout to US TU8, hooks
-  and installer retargeted, app builds. Not yet installed and played through on this fork; the
-  next step is a first boot.
+- **Games on Demand + TU8 (2026-11-01):** installs, boots and plays on native Metal on a 15-inch
+  MacBook Air M5: the new-game intro, Roman's taxi at the docks and free driving hold the 60 Hz
+  panel rate (61 fps, no frame over 25 ms in the driving window) with MetalFX Quality at the Air's
+  1440-line output. Measured by `tools/perf/bench.sh`, not by hand; see *Settings and performance*.
+- Next steps (launcher, in-game settings, remaining performance work) are planned in
+  [docs/MACOS-PLAN.md](docs/MACOS-PLAN.md).
 - Inherited from the PAL fork (measured there on the PAL build): boots, plays the opening cutscene
   and free-roam on `gta4-metal`.
 - Frame pacing work on 2026-10-10 removed a once-per-second main-thread stall (IOKit HID inventory),
@@ -152,8 +156,34 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
   (`present_frames_ahead = 1`): with CPU and GPU both just under a 60 Hz tick, that cut frames shown
   for two vsyncs from 24% to 8% and raised the on-screen rate from 48 to 55 fps on the same route,
   at up to one frame of latency. Settings > **Frame Pacing** switches to Low Latency.
-- **Anti-aliasing is cheap.** SMAA costs about 2.5 ms per frame at full size; it is not the
-  bottleneck.
+- **MetalFX upscaling is the default on Apple Silicon.** `gta4_native_upscaler = "metalfx"` with
+  `gta4_temporal_upscaler_quality = "quality"` renders at 2/3 of the output size (1483×959 for the
+  Air's 2224×1440) and lets MetalFX's temporal scaler rebuild the full image; it also replaces SMAA
+  as the anti-aliasing. Measured on the M5 Air (2026-11-01, driving window of the bench route, runs
+  interleaved with rests because the Air has no fan):
+
+  | Setting | Output | fps | GPU ms/frame | Frames over 25 ms |
+  |---|---|---|---|---|
+  | **MetalFX Quality (default)** | 2224×1440 | 61 | 10.3–10.5 | 0 |
+  | SMAA, native size | 2224×1440 | 61 | ~11.5 | 0–28 (rises as the Mac warms) |
+  | MetalFX TAA, native size (`gta4_native_anti_aliasing = "metalfx_taa"`) | 2224×1440 | 42 | 16.4 | 332 |
+  | MetalFX Performance | 2880×1864 (panel) | 47 | 19.1 | 122 |
+  | MetalFX Quality | 2880×1864 (panel) | 43 | 21.3 | 199 |
+  | SMAA, native size | 2880×1864 (panel) | 36 | 25.4 | 445 |
+
+  The last four rows ran back to back on a warm Mac, so they understate a cool one by a few fps,
+  but none holds 60 on an Air; the panel-resolution rows are for Pro and Max chips. The image is clean, slightly
+  softer on small text than SMAA. To go back to native-size SMAA, set `gta4_native_upscaler = "native"`
+  in `native.toml` or Settings > Display > Advanced > Upscaling. The frame rate is capped by the
+  60 Hz display link: `gta4_frame_limit = 0` and `--gta4_present_mode=immediate` do not lift it.
+- **Anisotropic filtering is 16× by default** (was 1×). Roads and pavements at a glancing angle stay
+  sharp; on the M5 Air the driving window's GPU time did not change measurably.
+- **Fewer CPU wake-ups.** Waiting on several kernel objects at once polled every 1 ms (upstream
+  rexglue PR #501 fixes this with a shared condition variable; ported here), and the timer queue
+  spun instead of blocking (the fix from the MCLA port). Frame rate is unchanged because the GPU
+  sets the pace, but the timer thread went from 11.5% to 0.7% busy and the audio worker from 3.6% to
+  2.2%, which is heat a fanless Air no longer spends. `timer_queue_blocking_wait = false` restores
+  the old timer queue.
 - **Deferred resolves.** The Xbox 360 copies its render targets into textures 28 times a frame.
   The Metal renderer now records each copy and runs it when the texture is first read or the
   source is about to be redrawn, so a copy that is overwritten unread is dropped. The frame summary
@@ -177,9 +207,20 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
   cannot multisample 32-bit float surfaces; the renderer substitutes RG16Float there and logs it.
 - **Crash or black screen at the shader loading screen.** Apple keeps its own shader cache for the
   app under `$(getconf DARWIN_USER_CACHE_DIR)/OZORDI.LibertyRecomp/com.apple.metal`; a stale entry
-  there makes Metal fault while saving the rebuilt pipeline archive. The game now clears that cache
-  on the launch after a failed rebuild (the errors log says `cleared the host shader cache`), so a
-  second launch recovers by itself. To do it by hand, delete that directory with the game closed.
+  there makes Metal fault while saving the rebuilt pipeline archive. The game clears that cache
+  before any launch that rebuilds the archive: the first launch, the first after an update that
+  ships new pipeline recipes, and the launch after a failed rebuild (the errors log says
+  `cleared the host shader cache`). To do it by hand, delete that directory with the game closed.
+- **First launch.** The app ships 482 pipeline recipes recorded in play (intro, docks, city
+  driving, MetalFX passes); the first launch compiles them behind the loading screen (about 5 s on
+  the M5) so the first drive does not stall on new pipelines.
+- **Unattended runs and benchmarks.** `--gta4_pad_script=<file>` plays a scripted controller
+  (press, hold, sticks, triggers, waits, screenshots of the game image, quit), and
+  `--gta4_pad_pipe=<fifo>` takes the same commands live (`tools/perf/pad.sh`).
+  `tools/perf/bench.sh <label> [--flags]` starts a new game, skips into the docks, drives a circle
+  and prints per-window fps, percentiles and GPU time; `tools/perf/bench_matrix.sh` runs a list of
+  settings with rests in between. The bench needs a profile without a story save. Details in
+  [docs/MACOS-PLAN.md](docs/MACOS-PLAN.md#measuring).
 - **Launch flags are not saved.** A cvar given on the command line (`--diagnostics`, `--log_file`,
   the capture script's CSV paths, `--gta4_performance_hud`) is never written to `native.toml` by the
   settings menu unless you change it there afterwards.
@@ -262,6 +303,7 @@ upstream's design.
 | Document | Description |
 |---|---|
 | [PAL port](docs/PAL-PORT.md) | History of the PAL fork's US → PAL port (reversed in this fork) and its lessons |
+| [macOS plan](docs/MACOS-PLAN.md) | Launcher and in-game settings plan, performance backlog, how to benchmark |
 | [Dev notes](docs/DEV-NOTES.md) | Map of the codebase for macOS work: boot flow, hooks, renderers, tools |
 | [Building Guide](docs/BUILDING.md) | Build presets and macOS troubleshooting |
 | [Dumping Guide](docs/DUMPING-en.md) | Extracting game files from an Xbox 360 |

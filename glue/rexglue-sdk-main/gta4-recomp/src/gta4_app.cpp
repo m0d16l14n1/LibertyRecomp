@@ -38,6 +38,7 @@
 #include "gta4_touch_coordinator.h"
 #include "install/gta4_install_dialog.h"
 #include "install/gta4_installer.h"
+#include "gta4_dev_pad.h"
 #include "input/user_music_player.h"
 #include "input/text_chat_dialog.h"
 #include "input/context_touch_controls.h"
@@ -193,7 +194,16 @@ REXCVAR_DEFINE_BOOL(gta4_native_anti_aliasing_unified, false,
 REXCVAR_DEFINE_STRING(gta4_native_smaa_quality, "high", "GTA IV/Graphics/Anti-Aliasing",
                       "SMAA 1x preset: low, medium, high, or ultra")
     .allowed({"low", "medium", "high", "ultra"});
-REXCVAR_DEFINE_STRING(gta4_native_upscaler, "native", "GTA IV/Graphics/Upscaling",
+// Fork default on macOS: MetalFX Quality (2/3 render size, temporal upscale to the output size).
+// Measured 2026-11-01 on a 15-inch M5 Air at 2224x1440, same route, cooled runs: GPU ~10.4 ms
+// against SMAA's ~11.5, process CPU 109-116 s against 112-130 s per run, and no frames over 25 ms
+// while the Mac warmed up where SMAA dropped 16-28. `native` in native.toml brings SMAA back.
+#if REX_PLATFORM_MAC && !REX_PLATFORM_IOS
+inline constexpr const char* kDefaultUpscaler = "metalfx";
+#else
+inline constexpr const char* kDefaultUpscaler = "native";
+#endif
+REXCVAR_DEFINE_STRING(gta4_native_upscaler, kDefaultUpscaler, "GTA IV/Graphics/Upscaling",
                       "Output upscaler: native, fsr1, MetalFX, FSR 3.1, or DLSS; temporal modes require backend support")
     .allowed({"native", "fsr1", "metalfx", "fsr3", "dlss"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -814,9 +824,11 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
     const auto device = voice_device.lock();
     return device && device->capture_available();
   };
+  gta4::dev_pad::Configure(config);
 }
 
 void GTA4App::OnPostSetup() {
+  gta4::dev_pad::Start(&app_context());
   gta4::presentation::InitializeOptions();
   rex::graphics::gta4_native::InitializeAntiAliasingController();
   gta4::input::ConfigureContextTouchSettings(native_config_path_.parent_path() / "touch-controls.ini");

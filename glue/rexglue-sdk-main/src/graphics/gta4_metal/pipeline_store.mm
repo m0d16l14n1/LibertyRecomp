@@ -1,5 +1,6 @@
 #include "pipeline_store.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 #include <unistd.h>
@@ -19,18 +20,41 @@ std::filesystem::path PipelineStore::Directory(const std::filesystem::path& cach
   return cache_root / "gta4-metal" / title;
 }
 
+namespace {
+// True when this launch will rebuild the archive without a rebuild-pending marker to say so: no
+// manifest yet (first launch, or a new OS/GPU/shader identity), or a bundled seed newer than every
+// manifest (an app update added recipes). Either way the rebuild serializes a fresh archive.
+bool RebuildWithoutMarker(const std::filesystem::path& directory) {
+  std::error_code ec;
+  std::filesystem::file_time_type newest_manifest{};
+  bool any_manifest = false;
+  for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+    if (entry.path().extension() != ".manifest") continue;
+    any_manifest = true;
+    newest_manifest = std::max(newest_manifest, entry.last_write_time(ec));
+  }
+  if (!any_manifest) return true;
+  NSString* resources = [[NSBundle mainBundle] resourcePath];
+  if (!resources) return false;
+  const auto seed = std::filesystem::path(resources.UTF8String) / "metal" / "pipeline_recipes_seed.bin";
+  const auto seed_time = std::filesystem::last_write_time(seed, ec);
+  return !ec && seed_time > newest_manifest;
+}
+}  // namespace
+
 void PipelineStore::PrepareLaunch(const std::filesystem::path& cache_root, uint32_t title_id) {
   std::error_code ec;
-  if (!std::filesystem::exists(Directory(cache_root, title_id) / kRebuildMarker, ec)) return;
+  const auto directory = Directory(cache_root, title_id);
+  if (!std::filesystem::exists(directory / kRebuildMarker, ec) && !RebuildWithoutMarker(directory)) return;
   // Apple keeps a per-app shader cache under the user cache directory. Pipelines served from it are
   // not compiled in this process, and serializing a binary archive that holds one of them can fault
-  // inside Metal (see pipeline_store.h). The marker says this launch rebuilds, so start that cache
-  // empty; everything it held is recompiled into our archive by the rebuild anyway.
+  // inside Metal (see pipeline_store.h). This launch rebuilds, so start that cache empty; everything
+  // it held is recompiled into our archive by the rebuild anyway.
   char user_cache[PATH_MAX];
   const size_t length = confstr(_CS_DARWIN_USER_CACHE_DIR, user_cache, sizeof(user_cache));
   NSString* bundle = [[NSBundle mainBundle] bundleIdentifier];
   if (!length || length > sizeof(user_cache) || !bundle) {
-    REXLOG_WARN("gta4-metal-pipeline-cache: pipeline rebuild pending but the host shader cache "
+    REXLOG_WARN("gta4-metal-pipeline-cache: pipeline rebuild expected but the host shader cache "
                 "location is unknown; leaving it in place");
     return;
   }
@@ -48,7 +72,7 @@ void PipelineStore::PrepareLaunch(const std::filesystem::path& cache_root, uint3
                 host_cache.string(), ec.message());
     return;
   }
-  REXLOG_WARN("gta4-metal-pipeline-cache: pipeline rebuild pending; cleared the host shader cache {} "
+  REXLOG_WARN("gta4-metal-pipeline-cache: pipeline rebuild expected; cleared the host shader cache {} "
               "({} files, {:.1f} MB) so the rebuilt archive can be serialized",
               host_cache.string(), files, double(bytes) / (1024.0 * 1024.0));
 }
@@ -236,6 +260,11 @@ void PipelineStore::ClearRebuildMarker() {
 void PipelineStore::Settle() {
   std::lock_guard lock(mutex_);
   ClearRebuildMarker();
+  // The archive is current: date the manifest after the bundled seed, so PrepareLaunch does not
+  // keep expecting a rebuild (and clearing Apple's cache) after an update that added nothing new.
+  std::error_code ec;
+  if (std::filesystem::exists(manifest_path_, ec))
+    std::filesystem::last_write_time(manifest_path_, std::filesystem::file_time_type::clock::now(), ec);
 }
 
 std::vector<PipelineRecipe> PipelineStore::Pending() const {

@@ -63,11 +63,14 @@ uint64_t HashRecipe(const PipelineRecipe& recipe);
 // Reproduced 2026-10-11: the same 482-pipeline rebuild crashed with the existing
 // <DARWIN_USER_CACHE_DIR>/<bundle id>/com.apple.metal and saved in 5 s with that directory moved
 // aside. The rebuild-pending marker lets PrepareLaunch clear that cache before Metal is first used.
+// Reproduced again 2026-11-01 on a first launch (no marker yet) after the seed grew to 482
+// recipes, so PrepareLaunch also clears it when no manifest exists or the seed is newer.
 class PipelineStore {
  public:
   // Call before the Metal device exists. When a rebuild is pending (new recipes were recorded, or a
-  // previous rebuild never finished saving), removes Apple's per-app shader cache so the rebuilt
-  // pipelines compile fresh and the archive can be serialized. Logs what it did.
+  // previous rebuild never finished saving) or expected (no manifest yet, or a bundled seed newer
+  // than the manifest: first launch and app updates), removes Apple's per-app shader cache so the
+  // rebuilt pipelines compile fresh and the archive can be serialized. Logs what it did.
   static void PrepareLaunch(const std::filesystem::path& cache_root, uint32_t title_id);
 
   bool Open(id<MTLDevice> device, const std::filesystem::path& cache_root, uint32_t title_id,

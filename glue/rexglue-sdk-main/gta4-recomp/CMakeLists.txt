@@ -113,6 +113,7 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         "${LIBERTY_DESKTOP_ICON}"
         src/main.cpp
         src/gta4_app.cpp
+        src/gta4_dev_pad.cpp
         src/gta4_shader_precompile_screen.cpp
         src/gta4_ui_theme.cpp
         src/gta4_frontend_hooks.cpp

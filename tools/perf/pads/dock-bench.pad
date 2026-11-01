@@ -1,0 +1,22 @@
+# Benchmark from a new game (no story save): the intro cutscene, then Roman's taxi at the docks.
+# Run through tools/perf/bench.sh, which cuts frames.csv at these marks.
+wait 35s
+mark cutscene
+wait 20s
+mark cutscene_end
+# Skip the rest of the intro; the player is put in Roman's taxi.
+press a
+wait 10s
+mark parked
+wait 15s
+mark parked_end
+# A full-lock circle: steady camera motion for the temporal paths.
+stick lx 1
+trigger rt 0.6
+mark circle
+wait 30s
+mark circle_end
+release all
+shot {out}/end.png 0.5
+wait 1s
+quit

@@ -719,7 +719,11 @@ bool Renderer::PrecompilePipelines(const std::function<bool(uint32_t,uint32_t)>&
 void Renderer::State::RecordFrameSample(uint32_t frame) {
   const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count());
-  if(!frame_log_origin_ns) frame_log_origin_ns=now;
+  if(!frame_log_origin_ns) {
+    frame_log_origin_ns=now;
+    // The steady-clock origin of at_ms, for lining frames up with gta4_pad_marks.
+    std::ofstream(frame_log_path+".origin")<<now<<"\n";
+  }
   const auto prep=resources.preparation_statistics();
   if(frame_samples.size()<frame_samples.capacity()){
     frame_samples.push_back({frame,now-frame_log_origin_ns,frame_last_present_ns?now-frame_last_present_ns:0,
