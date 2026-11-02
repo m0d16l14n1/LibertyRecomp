@@ -73,9 +73,10 @@ enum Catalogue {
         + "than SMAA on an M5 Air; MSAA and supersampling are for Pro and Max chips.")
 
     static let frameGeneration = Setting("gta4_metalfx_frame_generation", "MetalFX frame generation", .toggle, on(false),
-        "Draws a frame between every two the game renders. Only worth it on a screen faster than 60 Hz "
-        + "(ProMotion, a 120 Hz monitor): on a 60 Hz screen it adds latency and shows nothing more. Not yet "
-        + "measured on this fork.")
+        "MetalFX makes a frame between every two the game renders. On a 60 Hz screen the game renders 30 "
+        + "and you see 60: on an M5 Air the shown rate held 60 with about three quarters of the GPU time, at the "
+        + "cost of about one frame more latency. On a 120 Hz screen it renders up to 60 and shows up to 120. "
+        + "Turns on MetalFX anti-aliasing if no MetalFX mode is chosen.")
 
     static let textureFiltering = Setting("gta4_texture_filtering", "Texture filtering", .choice([
         c("Bilinear", s("bilinear")), c("Trilinear (default)", s("trilinear")),

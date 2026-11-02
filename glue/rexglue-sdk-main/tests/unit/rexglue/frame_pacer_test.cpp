@@ -94,6 +94,26 @@ TEST_CASE("Publication acknowledgement blocks only the producer and consumes the
   REQUIRE(wait.wait_for(5ms)==std::future_status::timeout);
   g.Accept(second); REQUIRE(wait.wait_for(100ms)==std::future_status::ready);REQUIRE(wait.get());
 }
+TEST_CASE("One frame ahead never replaces an unshown publication", "[frame-pacer]") {
+  FramePublicationGate g;g.SetAvailable(true);
+  auto first=g.Publish(30,false,1);
+  REQUIRE(g.Wait(first));                       // one ahead: the producer may go on
+  auto second_ready=std::async(std::launch::async,[&]{return g.WaitBeforePublish(30,false,1);});
+  REQUIRE(second_ready.wait_for(5ms)==std::future_status::timeout);  // first not shown yet
+  g.Accept(first);
+  REQUIRE(second_ready.wait_for(100ms)==std::future_status::ready);REQUIRE(second_ready.get());
+  auto second=g.Publish(30,false,1);
+  REQUIRE(g.Wait(second));
+  // Unlocked, paired, or no frames ahead: nothing to wait for before publishing.
+  REQUIRE(g.WaitBeforePublish(0,false,1));
+  REQUIRE(g.WaitBeforePublish(30,true,0));
+  REQUIRE(g.WaitBeforePublish(30,false,0));
+  // Surface loss releases a waiting producer.
+  auto lost=std::async(std::launch::async,[&]{return g.WaitBeforePublish(30,false,1);});
+  REQUIRE(lost.wait_for(5ms)==std::future_status::timeout);
+  g.SetAvailable(false);
+  REQUIRE(lost.wait_for(100ms)==std::future_status::ready);REQUIRE(lost.get());
+}
 TEST_CASE("Producer handoff cancels on surface loss, shutdown, and unlocked mode", "[frame-pacer]") {
   for(int action=0;action<3;++action) {
     FramePublicationGate g;g.SetAvailable(true);auto serial=g.Publish(40);

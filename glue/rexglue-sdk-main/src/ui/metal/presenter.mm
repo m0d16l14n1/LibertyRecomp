@@ -182,6 +182,13 @@ struct MetalPresenter::State {
   std::shared_ptr<DisplayFeedbackInbox> feedback = std::make_shared<DisplayFeedbackInbox>();
   uint64_t surface_epoch = 0, display_target_ns = 0, display_deadline_ns = 0;
   uint64_t last_actual_ns = 0, last_feedback_generation = 0;
+  // Always-on 10 s display summary (what reached the screen, real and
+  // MetalFX-generated, and how evenly), as MCLA's presenter logs it.
+  struct DisplayWindow {
+    uint64_t start_ns = 0;
+    uint32_t real = 0, generated = 0, missed = 0, intervals = 0, long_intervals = 0;
+    double sum_ms = 0, sum_sq_ms = 0, max_ms = 0;
+  } display_window;
   uint32_t requested_rate = UINT32_MAX, screen_rate = 0;
   bool vsync = true;
   bool hdr = false;
@@ -317,6 +324,7 @@ void MetalPresenter::PollPresentationTiming() {
       if (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
         REXLOG_INFO("FramePacer metal=not-displayed epoch={} serial={} frame={} presentation={} fps={}",
             value.surface_epoch, value.publication, value.frame, value.presentation_id, value.fps);
+      ++state_->display_window.missed;
       continue;
     }
     if (!IsCurrentDisplayFeedback(value, state_->surface_epoch, frame_pacer().generation(),
@@ -328,6 +336,28 @@ void MetalPresenter::PollPresentationTiming() {
     if(rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
       REXLOG_INFO("gta4-metal-displayed kind={} publication={} frame={} actual-ns={} interval-ns={} presentation={}",
           value.generated?"generated":"real",value.publication,value.frame,value.actual_host_ns,interval,value.presentation_id);
+    {
+      auto& w = state_->display_window;
+      if (!w.start_ns) w.start_ns = value.actual_host_ns;
+      ++(value.generated ? w.generated : w.real);
+      if (interval) {
+        const double ms = interval / 1e6;
+        ++w.intervals; w.sum_ms += ms; w.sum_sq_ms += ms * ms; w.max_ms = std::max(w.max_ms, ms);
+        // Longer than 1.5 refresh periods: a repeated or skipped display slot.
+        const double period = state_->screen_rate ? 1000.0 / state_->screen_rate : 1000.0 / 60.0;
+        if (ms > period * 1.5) ++w.long_intervals;
+      }
+      if (value.actual_host_ns > w.start_ns && value.actual_host_ns - w.start_ns >= 10'000'000'000ull) {
+        const double seconds = (value.actual_host_ns - w.start_ns) / 1e9;
+        const double mean = w.intervals ? w.sum_ms / w.intervals : 0;
+        const double sd = w.intervals ? std::sqrt(std::max(0.0, w.sum_sq_ms / w.intervals - mean * mean)) : 0;
+        REXLOG_INFO("gta4-metal-display shown-fps={:.1f} real={} generated={} not-displayed={} "
+                    "interval-ms mean={:.2f} sd={:.2f} max={:.1f} long={} over={:.1f}s",
+                    (w.real + w.generated) / seconds, w.real, w.generated, w.missed, mean, sd, w.max_ms,
+                    w.long_intervals, seconds);
+        w = {}; w.start_ns = value.actual_host_ns;
+      }
+    }
     state_->last_actual_ns = value.actual_host_ns;
     state_->last_feedback_generation = value.generation;
     // The display link's predictions already supply phase for the shared pacer.

@@ -192,6 +192,22 @@ class FramePublicationGate {
              admitted_ + ahead_ >= serial;
     });
   }
+  // Running one frame ahead (ahead >= 1) must not mean replacing a frame the host
+  // has not shown: the mailbox keeps only the newest image, so a producer that
+  // publishes S+2 before S+1 is painted renders S+1 for nothing. At a 30 fps cap
+  // that rendered 60 frames a second and showed 30. Call before publishing: it
+  // waits until the previous publication is admitted (shown), so the producer may
+  // render the next frame meanwhile but never overwrites an unshown one.
+  bool WaitBeforePublish(uint32_t fps, bool paired, uint32_t ahead) {
+    std::unique_lock lock(mutex_);
+    // Hidden: the handoff wait after publishing already paces at its slow watchdog.
+    if (paired || !ahead || !fps || hidden_) return true;
+    const uint64_t epoch = epoch_, previous = published_;
+    const uint64_t watchdog = WatchdogNs(fps);
+    return condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
+      return stopped_ || !available_ || epoch_ != epoch || admitted_ >= previous;
+    });
+  }
   static constexpr uint64_t kHiddenWatchdogNs = 500'000'000;
   static constexpr uint64_t WatchdogNs(uint32_t fps) noexcept {
     constexpr uint64_t kFloor = 50'000'000, kCeiling = 250'000'000;

@@ -145,6 +145,13 @@ struct Renderer::State {
   uint64_t next_declaration=1,submitted=0,draws=0,resolves=0,clears=0;
   uint64_t pipeline_creations = 0, declaration_definitions = 0, declaration_reuses = 0;
   uint64_t pipeline_ready = 0, pipeline_waits = 0, pipeline_wait_ns = 0;
+  // Time this frame's draws have waited for compiling pipelines, and the scene
+  // draws left out once that budget ran out (gta4_metal_pipeline_wait_budget_ms).
+  uint64_t pipeline_budget_used_ns = 0, pipeline_deferred_draws = 0;
+  // GBuffer-shaped draws (3 colour targets, depth write) per guest frame: while no temporal
+  // frame was active, and while active but not at the temporal input size.
+  uint32_t gbuffer_inactive = 0, gbuffer_off_extent = 0, gbuffer_active = 0;
+  uint32_t gbuffer_last_w = 0, gbuffer_last_h = 0;
   uint64_t render_passes_created = 0;
   // Bounded diagnostics: color slots, depth, extent, or an external pass break.
   std::array<uint64_t, 128> pass_breaks{};
@@ -263,7 +270,7 @@ struct Renderer::State {
   bool CaptureTargets(std::span<const uint8_t>,uint32_t color_mask,bool depth,Targets&,std::string&);
   bool BeginRender(const Targets&,std::string& error);
   Pipeline* DrawPipeline(const Targets&,const FixedState&,const VertexDeclaration&,bool up,uint32_t stride,std::string&);
-  bool CompletePipeline(Pipeline&, std::string&);
+  bool CompletePipeline(Pipeline&, std::string&, bool* deferred = nullptr);
   RecipeLibrary LibraryOf(const ShaderCache& cache) const {
     return &cache==&stock?RecipeLibrary::kStock:&cache==&overrides?RecipeLibrary::kOverride:
         &cache==&temporal_stock?RecipeLibrary::kTemporalStock:RecipeLibrary::kTemporalOverride;

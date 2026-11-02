@@ -74,6 +74,9 @@ REXCVAR_DECLARE(bool, gta4_force_highest_lod);
 REXCVAR_DECLARE(double, gta4_draw_distance_scale);
 REXCVAR_DECLARE(bool, gta4_modern_shaders);
 REXCVAR_DECLARE(uint32_t, gta4_drawable_reference_limit);
+REXCVAR_DEFINE_BOOL(gta4_temporal_begin_on_execution, true, "GTA IV/Graphics/Anti-Aliasing",
+                    "Start each temporal frame at its first executed scene draw; the scheduler's begin arrives "
+                    "after about half of the GBuffer, leaving those draws without jitter or motion");
 REXCVAR_DEFINE_BOOL(gta4_native_panel_resolution_cap, true, "GTA IV/Graphics/Display",
                     "With no resolution set, render at most at the display panel's native pixel "
                     "size rather than a scaled mode's larger backing store; Metal also presents at "

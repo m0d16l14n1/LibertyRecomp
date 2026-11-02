@@ -52,6 +52,30 @@ kernel void liberty_temporal_background_motion(
   motion.write(float4(velocity,0,0),pixel);
   previous_depth.write(float4(far_depth),pixel);
 }
+// Frame generation only, after the temporal scaler has read the motion: world
+// pixels whose draw had no object history get the camera's motion at their
+// own depth (moving objects then move with the world for one generated frame,
+// as MCLA's camera-only motion vectors do). Sky pixels are left to the
+// background kernel; history-tracked pixels keep their object motion.
+kernel void liberty_temporal_camera_motion_fill(
+    texture2d<float,access::read> depth [[texture(0)]],
+    texture2d<float,access::read_write> motion [[texture(1)]],
+    texture2d<float,access::read> previous_depth [[texture(2)]],
+    constant BackgroundMotionConstants& c [[buffer(0)]],
+    uint2 pixel [[thread_position_in_grid]]) {
+  if(any(pixel>=c.extent))return;
+  const float far_depth=c.reversed?0.0f:1.0f;
+  const float z=depth.read(pixel).r;
+  if(previous_depth.read(pixel).r>=0||z==far_depth||!isfinite(z)||z<0||z>1)return;
+  const float2 uv=(float2(pixel)+0.5f-c.jitter)/float2(c.extent);
+  const float2 current=(uv*2-1)*float2(1,-1)-c.half_pixel;
+  const float4 previous=c.reprojection*float4(current,z,1);
+  float2 velocity=float2(0);
+  if(all(isfinite(previous))&&previous.w>1.0e-6f)
+    velocity=(previous.xy/previous.w-current)*float2(c.extent)*float2(0.5f,-0.5f);
+  if(!all(isfinite(velocity))||any(abs(velocity)>65504.0f))velocity=float2(0);
+  motion.write(float4(velocity,0,0),pixel);
+}
 struct TemporalConstants {
   uint2 extent;float2 jitter;
   float near_plane,far_plane,history_weight,previous_pre_exposure;

@@ -10,6 +10,13 @@ thread_local Instance instance;
 std::atomic<bool> enabled{false};
 std::atomic<uint32_t> primary_view{0};
 TemporalCommand scene{};
+// The scene the render thread began itself (BeginOnExecution); the scheduler's later Begin
+// for the same frame only brings its camera.
+uint64_t execution_begun_sequence = 0;
+// The scheduler's latest decisions (title boundary admitted → jitter; depth direction),
+// taken by the next frame the render thread begins.
+uint32_t scheduled_flags = 0;
+constexpr uint32_t kScheduledFlags = kTemporalJitterApplied | kTemporalDepthReversed;
 uint64_t epoch = 1;
 std::mutex scene_mutex;
 class Scope {
@@ -82,10 +89,22 @@ void Begin(uint8_t* base, uint32_t device, uint32_t viewport) {
   next.flags = (boundary?kTemporalJitterApplied:0) | (camera->reversed ? kTemporalDepthReversed : 0);
   {
     std::lock_guard lock(scene_mutex);
+    scheduled_flags = next.flags & kScheduledFlags;
     // The scheduler may enter the same primary phase more than once while its
     // deferred scene executes. Keep that scene's jitter, time and history epoch
     // stable; the actual camera is adopted from its executed primary draws.
-    if (SameTemporalScene(next,scene))
+    if (SameTemporalScene(next,scene)) {
+      if (execution_begun_sequence == scene.sequence) {
+        // Begun by the render thread with the previous frame's camera: take this one.
+        scene.projection = next.projection; scene.view_inverse = next.view_inverse;
+        scene.near_plane = next.near_plane; scene.far_plane = next.far_plane;
+        scene.field_of_view = next.field_of_view; scene.aspect = next.aspect;
+        execution_begun_sequence = 0;
+      }
+      return;
+    }
+    // The render thread has already begun a later frame: this Begin is stale.
+    if (scene.sequence && next.device == scene.device && next.sequence < scene.sequence)
       return;
     if (scene.sequence &&
         (next.device != scene.device || next.sequence <= scene.sequence || next.view != scene.view))
@@ -131,6 +150,43 @@ void Event(TemporalEvent event) {
     }
   }
   SubmitNativeCommand(command);
+}
+// The scheduler's Begin for frame N reaches the command stream after the render
+// thread has drawn about half of N's GBuffer (always one frame behind at the first
+// scene draw, 243 of 243 samples), and after all of it in about a quarter of driving
+// frames: those draws got no jitter or motion and MetalFX dropped its history. The
+// render thread begins the frame itself at its first scene-geometry draw, from the
+// previous scene's settings; the camera comes from the executed draws as before.
+void BeginOnExecution(uint32_t device, uint64_t sequence) {
+  if (!rex::cvar::Query<bool>("gta4_temporal_begin_on_execution")) return;
+  const uint32_t exec_flags = TemporalExecutionFlags(gta4::gpu_pass::current.attributed(),
+                                                     gta4::gpu_pass::current.retail_phase);
+  if (!(exec_flags & kTemporalSceneGeometry)) return;
+  const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
+  if (upscaler == "fsr3" || upscaler == "dlss") return;  // their jitter comes from the provider
+  TemporalCommand next;
+  {
+    std::lock_guard lock(scene_mutex);
+    if (!scene.sequence || scene.device != device || sequence != scene.sequence + 1) return;
+    next = scene;
+    next.sequence = sequence;
+    next.time_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count());
+    next.flags = (next.flags & ~(kTemporalCameraCut | kScheduledFlags)) | scheduled_flags;
+    next.jitter = (next.flags & kTemporalJitterApplied)
+        ? rex::graphics::gta4_metal::temporal::Jitter(sequence) : std::array<float, 2>{};
+    {
+      std::lock_guard resolution(g_native_resolution_mutex);
+      if (g_native_resolution.render_width != next.width ||
+          g_native_resolution.render_height != next.height) return;
+    }
+    scene = next;
+    execution_begun_sequence = sequence;
+  }
+  static std::atomic<uint64_t> begun{0};
+  if (begun.fetch_add(1, std::memory_order_relaxed) < 2 || sequence % 600 == 0)
+    REXLOG_INFO("gta4-temporal-execution-begin frame={} count={}", sequence, begun.load());
+  SubmitNativeCommand(next);
 }
 void Draw(uint8_t* base, uint32_t device) {
   if (!enabled.load(std::memory_order_acquire) || !device)
@@ -183,6 +239,7 @@ void Draw(uint8_t* base, uint32_t device) {
       }
     }
   }
+  BeginOnExecution(device, c.sequence);
   c.flags = TemporalExecutionFlags(gta4::gpu_pass::current.attributed(),gta4::gpu_pass::current.retail_phase) |
             (classified_main ? kTemporalMainView : 0) |
             (classified_camera_valid ? kTemporalExecutionCamera : 0);

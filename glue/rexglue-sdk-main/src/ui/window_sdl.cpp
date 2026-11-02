@@ -637,9 +637,12 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       OnPaint(true);
       break;
     case SDL_EVENT_WINDOW_OCCLUDED:
+      // Paced at 2 fps on purpose while covered; logged so it doesn't read as a hang.
+      REXLOG_INFO("window covered: frames paced at 2 fps until it is visible again");
       if (presenter()) presenter()->SetWindowHiddenFromUIThread(true);
       break;
     case SDL_EVENT_WINDOW_MINIMIZED:
+      REXLOG_INFO("window minimized: frames paced at 2 fps until it is restored");
       if (presenter()) presenter()->SetWindowHiddenFromUIThread(true);
       OnMinimized(destruction_receiver);
       break;

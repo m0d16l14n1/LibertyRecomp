@@ -353,6 +353,20 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       registered_primary,temporal.execution_scene_geometry,temporal.execution_screen_space,
       execution_camera_matches,lighting);
   const bool world=scene_policy.world;
+  if((requested_colors&7u)==7u&&fixed.depth_enable&&fixed.depth_write_enable){
+    if(!temporal.active)++gbuffer_inactive;
+    else if(!temporal_extent){++gbuffer_off_extent;gbuffer_last_w=targets.width;gbuffer_last_h=targets.height;}
+    else ++gbuffer_active;
+  }
+  if(temporal.active&&temporal_extent&&(requested_colors&7u)==7u&&fixed.depth_enable&&fixed.depth_write_enable){
+    auto& a=temporal.gbuffer_audit;++a.total;
+    if(world)++a.world;
+    else if(temporal.ui_active)++a.ui;
+    else if(composite_draw)++a.composite;
+    else if(temporal::IsScreenExecution(temporal.execution_screen_space,lighting))++a.screen;
+    else if(!registered_primary)++a.not_primary;
+    else ++a.camera;
+  }
   bool scene_blending=false;
   for(size_t i=0;i<fixed.blend_controls.size();++i)
     if((requested_colors&(uint32_t{1}<<i))&&IsNativeBlendControlEnabled(fixed.blend_controls[i]))scene_blending=true;
@@ -752,7 +766,12 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   bool draw_encoded=false;
   auto encode_draw=[&]() -> bool {
   diagnostic_point="draw.pipeline-complete";
-  if (!CompletePipeline(*pipeline, error)) return false;
+  // Only scene geometry, drawn again every frame, may be left out while its
+  // pipeline compiles; post-processing, lights, the radar and UI always wait.
+  bool pipeline_deferred=false;
+  const bool may_defer=Phase()==gta4_native::RenderPhase::kSceneToGBuffer&&!fire_active;
+  if (!CompletePipeline(*pipeline, error, may_defer?&pipeline_deferred:nullptr)) return false;
+  if (pipeline_deferred) return true;
   FireBeforeDraw(targets,fixed,*pipeline,guest,type,count,base_vertex);
   if (fire_active) for (uint32_t stage=0; stage<sampled_images.size(); ++stage) {
     if (!sampled_images[stage]) continue;

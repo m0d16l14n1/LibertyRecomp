@@ -263,7 +263,8 @@ id<MTLFunction> Renderer::State::RecipeFunctionObject(const RecipeFunction& func
                          error,function.isolated_ui!=0);
 }
 
-bool Renderer::State::CompletePipeline(Pipeline& pipeline, std::string& error) {
+bool Renderer::State::CompletePipeline(Pipeline& pipeline, std::string& error, bool* deferred) {
+  if (deferred) *deferred = false;
   if (pipeline.state) return true;
   auto build = pipeline.build;
   if (!build) { error = "Missing Metal pipeline build"; return false; }
@@ -273,9 +274,26 @@ bool Renderer::State::CompletePipeline(Pipeline& pipeline, std::string& error) {
     else {
       ++pipeline_waits;
       const auto begin = std::chrono::steady_clock::now();
-      build->wake.wait(lock, [&] { return build->complete; });
-      pipeline_wait_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - begin).count());
+      const auto waited = [&] {
+        return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - begin).count());
+      };
+      // A draw that may be left out waits only within the frame's budget (as
+      // MCLA's Metal backend does); a cold pipeline costs 50-300 ms, which froze
+      // the game on first sight. The build keeps going and is used next frame.
+      const uint64_t budget = deferred ?
+          uint64_t(rex::cvar::Query<uint32_t>("gta4_metal_pipeline_wait_budget_ms")) * 1000000ull : 0;
+      if (budget) {
+        const uint64_t left = budget > pipeline_budget_used_ns ? budget - pipeline_budget_used_ns : 0;
+        if (left) build->wake.wait_for(lock, std::chrono::nanoseconds(left), [&] { return build->complete; });
+        const uint64_t spent = waited();
+        pipeline_wait_ns += spent; pipeline_budget_used_ns += spent;
+        if (!build->complete) { ++pipeline_deferred_draws; *deferred = true; return true; }
+      } else {
+        build->wake.wait(lock, [&] { return build->complete; });
+        const uint64_t spent = waited();
+        pipeline_wait_ns += spent; pipeline_budget_used_ns += spent;
+      }
     }
     pipeline.state = build->state;
     if (!pipeline.state) { error = build->error; return false; }

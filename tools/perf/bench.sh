@@ -26,6 +26,8 @@ caffeinate -dimsu /usr/bin/time -l "$app" --diagnostics=true --diagnostics_categ
   --gta4_pad_script="$out/run.pad" --gta4_pad_marks="$out/marks.csv" --gta4_pad_exit_on_end=true \
   ${args[@]+"${args[@]}"} > "$out/stdout.log" 2>&1 || true
 python3 "$here/bench_windows.py" "$out" > "$out/summary.txt"
+# What reached the screen every 10 s (real and MetalFX-generated frames, interval spread).
+grep -o 'gta4-metal-display shown-fps.*' "$out/game.log" | sed 's/^gta4-metal-display /display: /' >> "$out/summary.txt" || true
 # Process CPU over the whole run (from /usr/bin/time -l), for comparing CPU-side changes.
 awk '/real/ && /user/ && /sys/ {printf "process: %s s wall, %s s user, %s s sys\n", $1, $3, $5}' "$out/stdout.log" >> "$out/summary.txt"
 cat "$out/summary.txt"

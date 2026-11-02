@@ -33,6 +33,8 @@ REXCVAR_DEFINE_STRING(gta4_metal_gpu_pass_log, "", "GPU/Diagnostics", "Append av
 REXCVAR_DEFINE_STRING(gta4_metal_frame_log, "", "GPU/Diagnostics", "Per-frame Metal timing CSV, appended every 600 frames; {session} = launch time (empty = off)");
 REXCVAR_DEFINE_BOOL(gta4_metal_pipeline_archive, true, "GPU", "Record pipelines and precompile them into a Metal binary archive at launch");
 REXCVAR_DEFINE_BOOL(gta4_metal_async_pipelines, true, "GPU", "Overlap title pipeline creation with draw resource preparation");
+REXCVAR_DEFINE_UINT32(gta4_metal_pipeline_wait_budget_ms, 4, "GPU", "Per frame, how long scene draws wait for a pipeline still compiling before being left out of that frame (0 = always wait)");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_camera_motion, true, "GPU", "MetalFX frame generation: give world pixels without object motion history the camera's motion instead of skipping the frame");
 REXCVAR_DEFINE_BOOL(gta4_metal_prepare_textures, true, "GPU", "Decode owned texture snapshots on bounded workers");
 REXCVAR_DEFINE_STRING(gta4_metal_capture_path, "", "GPU/Diagnostics", "Optional Xcode .gputrace destination for one title submission");
 REXCVAR_DEFINE_UINT32(gta4_metal_capture_delay_seconds, 60, "GPU/Diagnostics", "Delay before the opt-in Xcode Metal GPU capture");

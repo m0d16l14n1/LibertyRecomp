@@ -7,12 +7,47 @@
 
 #include <Foundation/Foundation.h>
 
+#include <algorithm>
+#include <cstdio>
+#include <vector>
 #include <bit>
 #include <chrono>
 #include <iterator>
 
+REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_dump, "", "GPU/Diagnostics",
+                      "Folder for MetalFX frame generation checks: every 120th generated frame and the real "
+                      "frame after it, as PPM, at most 6 pairs (empty = off)");
+
 namespace rex::graphics::gta4_metal {
 namespace {
+
+// Copies a finished frame (RGBA16Float, display-perceptual) into a shared
+// buffer and writes it as an 8-bit PPM once the command buffer completes.
+void DumpFrameImage(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::string path) {
+  if (!image || image.pixelFormat != MTLPixelFormatRGBA16Float) return;
+  const NSUInteger w = image.width, h = image.height, pitch = w * 8;
+  auto buffer = [commands.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+  auto blit = [commands blitCommandEncoder];
+  if (!buffer || !blit) { [blit endEncoding]; return; }
+  blit.label = @"Liberty frame generation dump";
+  [blit copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(w, h, 1) toBuffer:buffer destinationOffset:0
+        destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+  [blit endEncoding];
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    if (done.status != MTLCommandBufferStatusCompleted) return;
+    std::vector<uint8_t> rgb(size_t(w) * h * 3);
+    const auto* half = static_cast<const __fp16*>(buffer.contents);
+    for (size_t i = 0; i < size_t(w) * h; ++i)
+      for (size_t c = 0; c < 3; ++c)
+        rgb[i * 3 + c] = uint8_t(std::clamp(float(half[i * 4 + c]), 0.0f, 1.0f) * 255.0f + 0.5f);
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+      std::fprintf(f, "P6\n%lu %lu\n255\n", (unsigned long)w, (unsigned long)h);
+      std::fwrite(rgb.data(), 1, rgb.size(), f);
+      std::fclose(f);
+    }
+  }];
+}
 
 // A fanless Mac slows its CPU and GPU after some minutes of play; without this the log shows only
 // the frame times rising. Serious and critical are warnings, so the quiet errors log has them too.
@@ -100,7 +135,10 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   temporal::InterpolationOutput generated_pair;
   if(generation_enabled){
     std::string generation_error;
-    if (temporal.NeedsMotionCoverage()) {
+    // With the camera fill, every pixel without object motion gets the camera's, so
+    // the coverage check (a GPU readback and a full wait for the GPU) is not needed.
+    if (temporal.NeedsMotionCoverage() &&
+        !rex::cvar::Query<bool>("gta4_metalfx_frame_generation_camera_motion")) {
       // Interpolation has no reactive mask: validate this frame's GPU-written
       // motion before admitting it to MetalFX history. AA-only and known
       // incomplete frames retain the normal asynchronous submission path.
@@ -114,6 +152,19 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     if(!temporal.Generate(commands,generated_pair,generation_error))REXLOG_WARN("gta4-metal-frame-generation: frame={} skipped: {}",present.submitted_frame,generation_error);
     if(generated_pair.real&&!temporal.Compose(commands,temporal.final_scene,generated_pair.real,error))return false;
     if(generated_pair.generated&&!temporal.ComposeInPlace(commands,generated_pair.generated,error))return false;
+    if(generated_pair.generated){
+      static uint64_t generated_count=0,dumped=0;
+      const auto folder=rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_dump");
+      ++generated_count;
+      // The real frame before the generated one, so each check has both neighbours.
+      if(!folder.empty()&&generated_count%120==119&&dumped<6)
+        DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_before.ppm",folder,present.submitted_frame+1));
+      if(!folder.empty()&&generated_count%120==0&&dumped<6){
+        ++dumped;
+        DumpFrameImage(commands,generated_pair.generated,fmt::format("{}/framegen_{}_generated.ppm",folder,present.submitted_frame));
+        DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_real.ppm",folder,present.submitted_frame));
+      }
+    }
   }
   // An unsupported affine HUD still exists in the original guest composite.
   // Preserve it through the normal final transfer at the requested extent;
@@ -185,11 +236,24 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     }
   }
   if(temporal.active&&(present.submitted_frame<=6||present.submitted_frame%60==0))
-    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={}",
+    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} camera-filled={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={}",
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
-      temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.geometry.owned_bytes(),
+      temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
       temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason);
+  if(temporal.active&&present.submitted_frame%60==0)
+    REXLOG_INFO("gta4-metal-temporal-gbuffer-frame frame={} world={} gbuffer-active={} gbuffer-before-begin={} gbuffer-other-size={} other={}x{} input={}x{}",
+        present.submitted_frame,temporal.world_draws,gbuffer_active,gbuffer_inactive,gbuffer_off_extent,gbuffer_last_w,gbuffer_last_h,
+        temporal.config.input_width,temporal.config.input_height);
+  gbuffer_active=gbuffer_inactive=gbuffer_off_extent=0;
+  if(temporal.active&&!temporal.world_draws&&temporal.gbuffer_audit.total&&temporal.gbuffer_audit_logs<40){
+    ++temporal.gbuffer_audit_logs;
+    const auto& a=temporal.gbuffer_audit;
+    REXLOG_INFO("gta4-metal-temporal-gbuffer-audit frame={} gbuffer-draws={} world={} ui-active={} composite={} screen={} not-primary={} camera={} adopted={} camera-valid={} jitter-decided={}",
+        present.submitted_frame,a.total,a.world,a.ui,a.composite,a.screen,a.not_primary,a.camera,
+        temporal.adopted_camera,temporal.execution_camera_valid,temporal.jitter_decided);
+  }
   temporal.End();
+  pipeline_budget_used_ns = 0;
   modern.EndGuestFrame();
   FireAdvance(present.submitted_frame);
   fusion_cloud_ready = false;
@@ -198,9 +262,9 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed);
-    REXLOG_INFO("gta4-metal-pipeline-lookup frame={} lookups={} memo-hits={} compiled={} ready={} waited={} wait-ms={:.1f}",
+    REXLOG_INFO("gta4-metal-pipeline-lookup frame={} lookups={} memo-hits={} compiled={} ready={} waited={} wait-ms={:.1f} deferred-draws={}",
         present.submitted_frame, pipeline_lookups, pipeline_lookup_hits,
-        pipeline_creations, pipeline_ready, pipeline_waits, double(pipeline_wait_ns) / 1e6);
+        pipeline_creations, pipeline_ready, pipeline_waits, double(pipeline_wait_ns) / 1e6, pipeline_deferred_draws);
     const auto texture_cache = resources.texture_cache_statistics();
     const auto vertex_cache = resources.vertex_conversion_statistics();
     REXLOG_INFO("gta4-metal-vertex-cache frame={} bytes={} charged={} budget={} entries={} hits={} misses={} evictions={}",

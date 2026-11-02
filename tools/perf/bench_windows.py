@@ -21,7 +21,7 @@ def main():
             marks[row[0]] = (int(row[1]) - origin) / 1e6
     frames = list(csv.DictReader(open(folder / "frames.csv")))
     print(f"{'window':<10} {'s':>5} {'fps':>6} {'p50ms':>6} {'p95ms':>6} {'p99ms':>6} {'>25ms':>6} "
-          f"{'gpu':>5} {'gpu95':>6} {'submit':>6} {'draws':>5} {'pipes':>5}")
+          f"{'gpu':>5} {'gpu95':>6} {'submit':>6} {'draws':>5} {'pipes':>5} {'pwait':>6}")
     for name, start in marks.items():
         end = marks.get(name + "_end")
         if end is None:
@@ -37,7 +37,8 @@ def main():
         print(f"{name:<10} {span:5.1f} {(len(rows) - 1) / span:6.1f} {pct(iv, .5):6.1f} {pct(iv, .95):6.1f} "
               f"{pct(iv, .99):6.1f} {sum(v > 25 for v in iv):6d} {statistics.mean(gpu):5.2f} {pct(gpu, .95):6.2f} "
               f"{statistics.mean(sub):6.2f} {statistics.mean(int(f['draws']) for f in rows):5.0f} "
-              f"{sum(int(f['pipelines_built']) for f in rows):5d}")
+              f"{sum(int(f['pipelines_built']) for f in rows):5d} "
+              f"{sum(float(f['pipeline_wait_ms']) for f in rows):6.1f}")
 
 
 if __name__ == "__main__":

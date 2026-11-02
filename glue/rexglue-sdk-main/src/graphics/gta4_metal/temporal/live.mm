@@ -1,4 +1,5 @@
 #include "live.h"
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <algorithm>
 #include <cmath>
@@ -30,6 +31,7 @@ bool Live::Initialize(std::shared_ptr<ui::metal::MetalContext> c, std::string& e
          pipeline(@"liberty_temporal_copy_color", color_copy_) &&
          pipeline(@"liberty_temporal_exposure_hint", exposure_hint_) &&
          pipeline(@"liberty_temporal_background_motion", background_motion_) &&
+         pipeline(@"liberty_temporal_camera_motion_fill", camera_motion_fill_) &&
          pipeline(@"liberty_temporal_affine_ui", compose_) &&
          pipeline(@"liberty_temporal_affine_ui_inplace", compose_inplace_);
 }
@@ -209,6 +211,27 @@ bool Live::CompleteBackgroundMotion(id<MTLCommandBuffer> cb, std::string& error)
   [e setTexture:inputs.previous_depth atIndex:2];
   [e setBytes:&p length:sizeof(p) atIndex:0];
   Dispatch(e,background_motion_,config.input_width,config.input_height);
+  [e endEncoding];
+  return true;
+}
+bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error) {
+  struct Parameters {
+    std::array<float,16> transform;
+    std::array<float,2> jitter, half_pixel;
+    uint32_t width, height, reversed, padding;
+  };
+  static_assert(sizeof(Parameters)==96);
+  const Parameters p{camera_transform_,metadata.jitter,camera_half_pixel,
+                      config.input_width,config.input_height,config.depth_reversed,0};
+  auto e=[cb computeCommandEncoder];
+  if(!e){error="camera motion fill encoder creation failed";return false;}
+  e.label=@"Liberty frame generation camera motion fill";
+  [e setComputePipelineState:camera_motion_fill_];
+  [e setTexture:inputs.depth atIndex:0];
+  [e setTexture:inputs.motion atIndex:1];
+  [e setTexture:inputs.previous_depth atIndex:2];
+  [e setBytes:&p length:sizeof(p) atIndex:0];
+  Dispatch(e,camera_motion_fill_,config.input_width,config.input_height);
   [e endEncoding];
   return true;
 }
@@ -457,14 +480,25 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
     interpolation_.Reset();
     return true;
   }
-  if (!motion_coverage_complete || !world_draws) {
+  bool camera_filled = false;
+  const bool camera_fill = rex::cvar::Query<bool>("gta4_metalfx_frame_generation_camera_motion");
+  if (camera_fill && world_draws && camera_transform_valid_ && !metadata.camera_cut) {
+    // Covers pixels whose draw had no object history (only those are written).
+    if (!FillCameraMotion(cb, error)) return false;
+    camera_filled = true;
+    if (!motion_coverage_complete) ++camera_filled_frames;
+  } else if (!motion_coverage_complete || !world_draws) {
     // A zero vector denotes a stationary point. Missing object history must
     // not be forwarded as zero motion to an effect without a reactive input.
+    // With the camera fill (default), those pixels take the camera's motion
+    // instead; GTA IV leaves about half its world draws without history, so
+    // the strict rule generated no frame at all in play.
     generation_skip_reason = "untracked scene motion or camera coverage is unavailable";
     interpolation_.Reset();
     return true;
   }
-  if (!motion_coverage_.Complete()) {
+  // With the fill on, the coverage readback is skipped, so its result is stale.
+  if (!camera_filled && (camera_fill || !motion_coverage_.Complete())) {
     generation_skip_reason = "complete per-pixel motion is unavailable";
     interpolation_.Reset();
     return true;
@@ -498,6 +532,10 @@ bool Live::AdoptExecutionCamera() {
                                                    previous_projection_,previous_camera_);
       background_history_valid_=transform.has_value();
       if(transform)background_transform_=*transform;
+      const auto full=CameraReprojection(actual_projection,actual_inverse,
+                                         previous_projection_,previous_camera_,false);
+      camera_transform_valid_=full.has_value();
+      if(full)camera_transform_=*full;
     }
     previous_camera_=actual_inverse;
     previous_projection_=actual_projection;
@@ -532,7 +570,7 @@ void Live::ResetHistory() {
   interpolation_.Reset();
   geometry.Reset();
   camera_history_.Reset();
-  background_history_valid_=false;
+  background_history_valid_=camera_transform_valid_=false;
 }
 void Live::End() {
   motion_coverage_.Invalidate();
@@ -547,7 +585,7 @@ void Live::End() {
   if (active && (!resolved || !composite_ready_)) ResetHistory();
   active = ui_active = resolved = depth_captured = adopted_camera = execution_camera_valid = false;
   spatial_fallback = composite_seen = composite_ready_ = false;
-  background_history_valid_=false;
+  background_history_valid_=camera_transform_valid_=false;
   camera_half_pixel={};
   composite_shader = 0;
   composite_scene_stage = 0;
@@ -562,6 +600,7 @@ void Live::End() {
   execution_composite = execution_final_composite = false;
   execution_composite_scope = active_composite_scope = 0;
   diagnostic_depth_draws = 0;
+  gbuffer_audit = {};
   diagnostic_missing_motion = 0;
   world_draws = history_draws = reactive_draws = ui_draws = jittered_draws = 0;
   instance = drawable = pose = 0;

@@ -62,6 +62,8 @@ class Live {
            reactive_draws = 0, ui_draws = 0, jittered_draws = 0;
   std::string fallback_reason, generation_skip_reason;
   uint64_t composite_shader = 0, filtered_composites = 0;
+  // Frames generated with camera motion filled in for untracked world pixels.
+  uint64_t camera_filled_frames = 0;
   uint32_t composite_scene_stage = 0;
   Frame metadata{};
   Configuration config{};
@@ -72,6 +74,11 @@ class Live {
   uint64_t last_depth_serial = 0, presentation_interval_ns = 0, observed_view = 0,
            observed_sequence = 0;
   uint32_t diagnostic_depth_draws = 0;
+  // Scene-sized 3-target (GBuffer) draws this frame, and why they were not world
+  // draws: UI already active, a composite, screen work, not the registered
+  // primary, the execution camera not adopted/matching.
+  struct GbufferAudit { uint32_t total=0, ui=0, composite=0, screen=0, not_primary=0, camera=0, world=0; } gbuffer_audit;
+  uint32_t gbuffer_audit_logs = 0;
   uint32_t diagnostic_missing_motion = 0;
 
  private:
@@ -79,7 +86,8 @@ class Live {
   id<MTLLibrary> library_ = nil;
   id<MTLFunction> depth_motion_fragment_ = nil;
   id<MTLComputePipelineState> depth_export_ = nil, color_copy_ = nil, compose_ = nil,
-                              compose_inplace_ = nil, exposure_hint_ = nil, background_motion_ = nil;
+                              compose_inplace_ = nil, exposure_hint_ = nil, background_motion_ = nil,
+                              camera_motion_fill_ = nil;
   id<MTLTexture> converted_ = nil, half_scene_ = nil, spatial_output_ = nil;
   id<MTLTexture> exposure_ = nil;
   id<MTLTexture> recovered_composite_ = nil;
@@ -90,9 +98,9 @@ class Live {
   Output resolved_;
   bool previous_camera_valid_ = false, composite_ready_ = false;
   std::array<float, 16> previous_camera_{};
-  std::array<float, 16> previous_projection_{}, background_transform_{};
+  std::array<float, 16> previous_projection_{}, background_transform_{}, camera_transform_{};
   History camera_history_;
-  bool background_history_valid_ = false;
+  bool background_history_valid_ = false, camera_transform_valid_ = false;
   uint64_t last_time_ns_ = 0, last_epoch_ = 0, last_view_ = 0, smoothed_interval_ns_ = 0;
   uint64_t uncovered_frames_ = 0;
   bool CreateImage(__strong id<MTLTexture>&, MTLPixelFormat, uint32_t, uint32_t, NSString*,
@@ -100,5 +108,6 @@ class Live {
   bool Clear(id<MTLCommandBuffer>, id<MTLTexture>, double, std::string&);
   void ResetHistory();
   bool CompleteBackgroundMotion(id<MTLCommandBuffer>, std::string&);
+  bool FillCameraMotion(id<MTLCommandBuffer>, std::string&);
 };
 }  // namespace rex::graphics::gta4_metal::temporal

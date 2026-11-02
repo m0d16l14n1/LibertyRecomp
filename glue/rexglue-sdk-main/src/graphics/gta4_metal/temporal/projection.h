@@ -48,11 +48,14 @@ inline bool CameraDiscontinuity(const std::array<float, 16>& old,
 }
 // Title matrices use row vectors and row-major storage. Metal's column-major
 // matrix load transposes this product, so the shader multiplies matrix * clip.
-inline std::optional<std::array<float, 16>> BackgroundReprojection(
+// Current clip (x, y, depth) to previous clip. infinite=true drops camera
+// translation (cleared depth is an infinitely distant environment); false
+// keeps it, for world geometry at its own depth.
+inline std::optional<std::array<float, 16>> CameraReprojection(
     const std::array<float, 16>& current_projection,
     std::array<float, 16> current_inverse_view,
     const std::array<float, 16>& previous_projection,
-    std::array<float, 16> previous_inverse_view) {
+    std::array<float, 16> previous_inverse_view, bool infinite) {
   const auto inverse = [](const std::array<float,16>& input)
       -> std::optional<std::array<float,16>> {
     double a[4][8]{};
@@ -90,7 +93,7 @@ inline std::optional<std::array<float, 16>> BackgroundReprojection(
   };
   // Cleared depth represents an infinite environment. Camera translation
   // must not move that environment; rotation and projection still do.
-  for(size_t i=12;i<15;++i)current_inverse_view[i]=previous_inverse_view[i]=0;
+  if(infinite)for(size_t i=12;i<15;++i)current_inverse_view[i]=previous_inverse_view[i]=0;
   const auto inverse_projection=inverse(current_projection);
   const auto previous_view=inverse(previous_inverse_view);
   if(!inverse_projection||!previous_view)return {};
@@ -98,5 +101,11 @@ inline std::optional<std::array<float, 16>> BackgroundReprojection(
                                 *previous_view),previous_projection);
   for(float v:result)if(!std::isfinite(v))return {};
   return result;
+}
+inline std::optional<std::array<float, 16>> BackgroundReprojection(
+    const std::array<float, 16>& current_projection, const std::array<float, 16>& current_inverse_view,
+    const std::array<float, 16>& previous_projection, const std::array<float, 16>& previous_inverse_view) {
+  return CameraReprojection(current_projection, current_inverse_view, previous_projection,
+                            previous_inverse_view, true);
 }
 }  // namespace rex::graphics::gta4_metal::temporal
