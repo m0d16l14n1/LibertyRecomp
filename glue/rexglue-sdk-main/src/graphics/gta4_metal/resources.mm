@@ -82,8 +82,7 @@ bool ResourceStore::State::AdmitTexture(size_t bytes, uint32_t handle, bool surf
   std::vector<uint32_t> victims;
   for (uint32_t candidate : texture_lru) {
     const auto& texture = textures.at(candidate);
-    if ((!surface && candidate == handle) || texture->gpu_produced ||
-        virtuals.Find(candidate) || reflections.contains(candidate)) continue;
+    if ((!surface && candidate == handle) || !ReloadableTexture(candidate, *texture)) continue;
     victims.push_back(candidate);
     cached -= texture->image.allocatedSize;
     if (cached <= limit) break;
@@ -378,8 +377,31 @@ void ResourceStore::State::InstallTexture(uint32_t handle, std::shared_ptr<Textu
   EraseTexture(handle);
   texture_lru.push_back(handle);
   value->recency = std::prev(texture_lru.end());
+  value->last_used_frame = frame;
   textures.emplace(handle, value);
   resident_texture_bytes += value->image.allocatedSize;
+}
+// Textures the title stops using without releasing them stayed cached until the 2 GB budget forced
+// evictions: an 18-minute drive ended with 28,000 textures and 1.1 GB, growing at a steady rate.
+// Every ten seconds, drop reloadable textures that have not been bound for three minutes, oldest
+// first, once the cache holds more than 512 MB. A texture that is wanted again is reloaded from
+// guest memory, as after a budget eviction. One pass per interval keeps the material-binding
+// invalidation (InvalidateBindings) rare.
+void ResourceStore::State::TrimIdleTextures() {
+  constexpr uint64_t kInterval = 600, kIdleFrames = 180 * 60;
+  constexpr size_t kFloor = 512ull * 1024 * 1024, kMaxScan = 8192;
+  if (frame % kInterval || frame < kIdleFrames || resident_texture_bytes <= kFloor) return;
+  std::vector<uint32_t> victims;
+  size_t remaining = resident_texture_bytes, scanned = 0;
+  for (uint32_t candidate : texture_lru) {
+    const auto& texture = *textures.at(candidate);
+    if (texture.last_used_frame + kIdleFrames > frame || remaining <= kFloor || ++scanned > kMaxScan) break;
+    if (!ReloadableTexture(candidate, texture)) continue;
+    victims.push_back(candidate);
+    remaining -= texture.image.allocatedSize;
+  }
+  for (uint32_t victim : victims) EraseTexture(victim);
+  texture_idle_trims += victims.size();
 }
 void ResourceStore::State::InstallSurface(uint32_t handle, std::shared_ptr<SurfaceResource> value) {
   EraseSurface(handle);
@@ -423,6 +445,6 @@ ResourceStore::VertexConversionStatistics ResourceStore::vertex_conversion_stati
 }
 ResourceStore::TextureCacheStatistics ResourceStore::texture_cache_statistics() const {
   return {state_->resident_texture_bytes, state_->texture_budget, state_->textures.size(),
-          state_->texture_evictions, state_->texture_rejections};
+          state_->texture_evictions, state_->texture_rejections, state_->texture_idle_trims};
 }
 }  // namespace rex::graphics::gta4_metal

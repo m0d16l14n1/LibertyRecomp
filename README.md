@@ -183,7 +183,9 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
   mode the Metal drawables were sized for the 3840x2486 backing store and then shrunk to the
   2880x1864 panel by the compositor; with `gta4_native_panel_resolution_cap` on they are now the
   panel's size (drawables 111 MB → 62 MB). What remains is mostly the guest's 512 MB, about 1 GB of
-  Metal textures, targets and buffers, and MetalFX's own networks (about 130 MB).
+  Metal textures, targets and buffers, and MetalFX's own networks (about 130 MB). Over a long session
+  the texture cache kept textures the game had stopped using (1.1 GB after 18 minutes); textures not
+  bound for three minutes are now dropped once it holds more than 512 MB, and reloaded if wanted again.
 - **MetalFX upscaling is the default on Apple Silicon.** `gta4_native_upscaler = "metalfx"` with
   `gta4_fsr1_quality = "quality"` (MetalFX uses FSR 1's four presets) renders at 2/3 of the output size (1483×959 for the
   Air's 2224×1440) and lets MetalFX's temporal scaler rebuild the full image; it also replaces SMAA

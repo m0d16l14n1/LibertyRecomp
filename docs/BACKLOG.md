@@ -99,3 +99,20 @@ comparisons are interleaved runs with 60–90 s rests; back-to-back runs lose up
 | 50 | 320 unused WMA Pro decoders | done | `XmaContext::Setup` allocated an FFmpeg codec context per hardware context (464 KB private state each) that `PrepareXmaDecoderForStream` never used, as it always opens a fresh one; and a released context kept its decoder. Now made on first decode, freed on release. Live malloc mid-drive 337 → 210 MB, peak footprint 2.26 → 2.17 GB, no XMA errors |
 | 51 | Drawables at the backing store's size in scaled modes | done | A "looks like 1920x1243" mode gives the window 3840x2486 pixels for a 2880x1864 panel. The presenter now sizes the drawable at the panel's density (`Presenter::AdjustPaintSurfaceSizeFromUIThread`, Metal only, under `gta4_native_panel_resolution_cap`); the HUD reported "Composited" before and after. IOSurface 111 → 62 MB, peak footprint 2.17 → 2.08 GB, same fps |
 | 52 | Launcher's size estimate | done | Mirrors the game: panel cap, Air cap, a preset's 16:9 budget, then the integer aspect fit of `gta4_aspect_policy.h` (2224x1440 → 2224x1439 for a 3840x2486 drawable) and `upscaling_policy.h` rounding (1483x959) |
+
+## First long play session (2026-11-02, 18.5 min, 15-inch M5 MacBook Air, macOS 27.2)
+
+Logs: `~/Library/Application Support/LibertyRecomp/sessions/play-20261102-083235/` (`tools/perf/play.sh`):
+full game log, per-frame times, memory and CPU every 30 s. Exit was clean; peak footprint 3.86 GB
+(bench route: 2.08 GB).
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 53 | Temporal AA, MetalFX TAA, MetalFX upscaling and MetalFX frame generation could not be chosen in the pause menu | done | `SetConfiguredAntiAliasingMode` refused temporal modes unless the `gpu_plugin` setting read `gta4-metal`; it is empty when the default renderer is used. It now checks the renderer this launch runs on (set in `OnPreSetup`). Checked through the pad pipe: MetalFX → Native → FSR 1 → Native → MetalFX is accepted |
+| 54 | Pause-menu changes were lost on quit | done | They were written only by the Advanced page's Save row; the player changed upscaler, AA and aspect and quit with no `native.toml`. Each change now saves at once (the Save row stays and does the same). Saved values that only the command line set are still left out |
+| 55 | Texture cache grew all session | done | 525 MB / 6,000 textures at 3 min to 1.14 GB / 28,000 at 18 min, no evictions (budget 2 GB). Every 10 s, reloadable textures unbound for 3 min are dropped once the cache is over 512 MB (`TrimIdleTextures`, `texture-idle-trims` in the stats line). Reloading checked with 5 s / 32 MB thresholds: 490 trims while walking, textures correct, no errors. Not yet seen over a long session at the real thresholds |
+| 56 | Thermal state was not logged | done | The presenter logs `thermal state <nominal/fair/serious/critical>` when it changes (serious and critical as warnings, so they reach the errors log) |
+| 57 | Frame rate fell over the session | to check with 56 | 61 fps in minutes 1-3 to 43-50 in minutes 15-17 at similar draw counts (3,000-3,500): GPU p50 11.8 → 18-20 ms and submit p50 8 → 13-15 ms together, which points at the fanless Air throttling rather than a cache cost |
+| 58 | Two resolves rejected every frame | open | "Resolve source has no produced content" for sources 741x479 and 185x119 (guest 4x MSAA, phase 6, callers 828DA898 / 828DA8E0), also in the pause menu. Already cheap (the detailed report is built only for logged lines); no visible fault found yet |
+| 59 | First-sight pipeline hitches | partly | 875 pipelines built in 18 min, 828 waited on (4.6 s in all), 100-300 ms frames. They are recorded and built behind the loading screen next launch; refreshing the bundled seed (P4) from a long session would spare a first launch |
+| 60 | A covered windowed game barely runs | note | Unfocused and behind other windows, frames 300-600 took 97 s (macOS throttles the hidden window). Scripted tests in a window need it in front |

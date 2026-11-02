@@ -1672,6 +1672,8 @@ void SwitchDisplayPage(PPCContext& ctx, uint8_t* base, gta4::frontend_menu::poli
               selected_row);
 }
 
+void SaveGraphicsSettings();
+
 void ChangeSetting(const Setting& source, int32_t delta) {
   const Setting setting = ResolveSetting(source);
   if (delta == 0 || setting.binding == SettingBinding::kTouchLayoutEditor) {
@@ -1693,6 +1695,7 @@ void ChangeSetting(const Setting& source, int32_t delta) {
         "direction={} apply=live",
         ++g_menu_trace_sequence, setting.key, setting.cvar, previous,
         CurrentDrawDistanceScale(), delta);
+    SaveGraphicsSettings();
     return;
   }
   const std::string old_value = CurrentSettingValue(setting);
@@ -1803,6 +1806,9 @@ void ChangeSetting(const Setting& source, int32_t delta) {
       "direction={} apply={}",
       ++g_menu_trace_sequence, setting.key, setting.cvar, old_value, applied_value, delta,
       restart_required ? "restart" : "live");
+  // Saved straight away: a change that applies on the next launch was lost when the player quit
+  // without choosing Save, which nothing on the page asked them to do.
+  SaveGraphicsSettings();
 }
 
 void SaveGraphicsSettings() {

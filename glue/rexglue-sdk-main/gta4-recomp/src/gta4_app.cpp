@@ -252,6 +252,9 @@ std::atomic<rex::graphics::gta4_native::AntiAliasingMode>
     g_active_anti_aliasing_mode{rex::graphics::gta4_native::AntiAliasingMode::kSmaa};
 std::mutex g_hdr_controller_mutex;
 std::atomic<bool> g_hdr_controller_initialized{false};
+// The renderer this launch runs on, set in OnPreSetup. Not the gpu_plugin setting: that is empty
+// when the default renderer is used, and a pause-menu change to it applies only after a restart.
+std::atomic<bool> g_metal_backend{gta4::kDefaultGpuPlugin == "gta4-metal"};
 std::atomic<rex::graphics::gta4_native::HdrMode> g_configured_hdr_mode{
     rex::graphics::gta4_native::HdrMode::kOff};
 
@@ -477,7 +480,7 @@ AntiAliasingApplyResult SetConfiguredAntiAliasingMode(std::string_view value) {
     return AntiAliasingApplyResult::kRejected;
   }
 
-  if(UsesTemporalAntiAliasing(*requested)&&rex::cvar::GetFlagByName("gpu_plugin")!="gta4-metal"){
+  if(UsesTemporalAntiAliasing(*requested)&&!g_metal_backend.load(std::memory_order_acquire)){
     REXLOG_WARN("GTA4AAPolicy: {} requires the Metal renderer",value);
     return AntiAliasingApplyResult::kRejected;
   }
@@ -768,6 +771,7 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   // its active scene configuration. A pending frontend choice cannot change
   // the active render graph until the next launch.
   const bool metal_backend=config.gpu_plugin=="gta4-metal";
+  g_metal_backend.store(metal_backend, std::memory_order_release);
   const bool vendor_temporal_requested = REXCVAR_GET(gta4_native_upscaler) == "fsr3" ||
                                         REXCVAR_GET(gta4_native_upscaler) == "dlss";
   if (vendor_temporal_requested && config.gpu_plugin != "gta4-native") {

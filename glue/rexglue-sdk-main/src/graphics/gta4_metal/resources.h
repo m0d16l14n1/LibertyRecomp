@@ -38,6 +38,7 @@ struct TextureResource {
   TextureInfo info{};
   uint64_t generation = 0;
   uint64_t use_serial = 0;
+  uint64_t last_used_frame = 0;  // ResourceStore's frame count when last bound or installed
   // Valid only while this generation belongs to ResourceStore's named cache.
   std::list<uint32_t>::iterator recency;
   bool gpu_produced = false;
@@ -146,7 +147,7 @@ class ResourceStore {
   VertexConversionStatistics vertex_conversion_statistics() const;
   struct TextureCacheStatistics {
     size_t bytes, budget, entries;
-    uint64_t evictions, rejections;
+    uint64_t evictions, rejections, idle_trims;
   };
   TextureCacheStatistics texture_cache_statistics() const;
   static MTLPixelFormat TextureFormat(xenos::TextureFormat format);

@@ -23,6 +23,8 @@ MTLSamplerAddressMode Address(xenos::ClampMode mode) {
 }
 void ResourceStore::BeginFrame() {
   state_->preparation.BeginFrame(); // Revalidate retained immutable jobs at their next consumption.
+  ++state_->frame;
+  state_->TrimIdleTextures();
   const auto fonts=rex::cvar::Query<bool>("gta4_native_vector_fonts");
   const auto filtering=rex::cvar::GetFlagByName("gta4_texture_filtering");
   const auto anisotropy=rex::cvar::GetFlagByName("gta4_anisotropic_filtering");

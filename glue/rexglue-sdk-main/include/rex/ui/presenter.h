@@ -695,8 +695,8 @@ class Presenter {
   // The size to paint a surface of this size at. An implementation may paint smaller than a surface
   // whose backing store is denser than its screen can show (a macOS scaled display mode); the output
   // layout then uses the adjusted size too.
-  virtual void AdjustPaintSurfaceSizeFromUIThread(Surface& surface, uint32_t& width,
-                                                  uint32_t& height) {}
+  virtual void AdjustPaintSurfaceSizeFromUIThread(Surface& /*surface*/, uint32_t& /*width*/,
+                                                  uint32_t& /*height*/) {}
   // Releases resources referencing the surface in the implementation if they
   // are held by it. Call through DisconnectPaintingFromSurfaceFromUIThread to
   // ensure the implementation is only called while the connection is active.

@@ -80,7 +80,7 @@ Rules carried over from MCLA:
 | P6 | Lock-free guest atomics (MCLA `rexglue-guest-atomics-lock-free.patch`) | low value: the region check is clean (0 violations), but the global lock is barely contended here (BACKLOG 40) |
 | P7 | `CAMetalDisplayLink` pacing check on ProMotion panels | to do (needs a 120 Hz display) |
 | P11 | Memory: XMA decoders made on first use, drawables at the panel's density in scaled modes | done: peak footprint 2.26 → 2.08 GB on the bench route, same fps (BACKLOG 50, 51) |
-| P12 | Memory: the ~1 GB of Metal textures, targets and buffers (750 MB GPU-private, 320 MB shared) | to do: break down by kind (render targets at output vs render size, the 2 GB texture budget) |
+| P12 | Memory: the ~1 GB of Metal textures, targets and buffers (750 MB GPU-private, 320 MB shared) | partly: textures idle for 3 min are trimmed above 512 MB (BACKLOG 55); still to break down render targets (output vs render size) and the ~730 MB of captured and index buffers |
 | P8 | Above-panel output (MetalFX to 2880x1864 on the Air) costs 17-21 ms GPU: only for Pro/Max chips; the launcher's suggestion should pick it by GPU core count | to do |
 | P9 | HDR / EDR on the Air's panel | the 80-vs-203 nits mismatch was a menu display bug, fixed (BACKLOG 45); whether HDR looks better than SDR on the Air's limited EDR headroom is still to judge by eye |
 | P10 | Dense-traffic city benchmark route (the docks route is light) | needs a story save in Algonquin to load; open-loop driving from a new game cannot reach it reproducibly (BACKLOG 46) |

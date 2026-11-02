@@ -50,10 +50,16 @@ struct ResourceStore::State {
       gta4_native::GuestPlacementKeyHash> color_views;
   std::unordered_map<uint32_t, std::shared_ptr<TextureResource>> textures;
   std::list<uint32_t> texture_lru;
-  uint64_t texture_evictions = 0, texture_rejections = 0;
+  uint64_t texture_evictions = 0, texture_rejections = 0, texture_idle_trims = 0;
+  uint64_t frame = 0;
   void TouchTexture(TextureResource& texture) {
     texture_lru.splice(texture_lru.end(), texture_lru, texture.recency);
+    texture.last_used_frame = frame;
   }
+  bool ReloadableTexture(uint32_t handle, const TextureResource& texture) const {
+    return !texture.gpu_produced && !virtuals.Find(handle) && !reflections.contains(handle);
+  }
+  void TrimIdleTextures();
   std::unordered_map<uint32_t, Buffer> buffers;
   std::unordered_map<uint32_t, uint32_t> font_ids;
   bool vector_fonts = true;

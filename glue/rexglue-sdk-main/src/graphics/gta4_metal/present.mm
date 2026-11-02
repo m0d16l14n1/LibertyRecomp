@@ -5,10 +5,31 @@
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
 
+#include <Foundation/Foundation.h>
+
 #include <bit>
 #include <chrono>
+#include <iterator>
 
 namespace rex::graphics::gta4_metal {
+namespace {
+
+// A fanless Mac slows its CPU and GPU after some minutes of play; without this the log shows only
+// the frame times rising. Serious and critical are warnings, so the quiet errors log has them too.
+void LogThermalStateChange(uint32_t frame) {
+  static NSProcessInfoThermalState last = NSProcessInfoThermalStateNominal;
+  const NSProcessInfoThermalState state = NSProcessInfo.processInfo.thermalState;
+  if (state == last) return;
+  last = state;
+  static constexpr const char* kNames[] = {"nominal", "fair", "serious", "critical"};
+  const char* name = size_t(state) < std::size(kNames) ? kNames[state] : "unknown";
+  if (state >= NSProcessInfoThermalStateSerious)
+    REXLOG_WARN("gta4-metal: thermal state {} at frame {}; macOS is limiting CPU and GPU speed", name, frame);
+  else
+    REXLOG_INFO("gta4-metal: thermal state {} at frame {}", name, frame);
+}
+
+}  // namespace
 
 bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::string& error) {
   struct PresentTimer {
@@ -172,6 +193,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   modern.EndGuestFrame();
   FireAdvance(present.submitted_frame);
   fusion_cloud_ready = false;
+  if (present.submitted_frame % 60 == 0) LogThermalStateChange(present.submitted_frame);
   if (present.submitted_frame <= 3 || present.submitted_frame % 300 == 0) {
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
@@ -185,13 +207,14 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         present.submitted_frame, vertex_cache.bytes, vertex_cache.charged_bytes,
         vertex_cache.budget, vertex_cache.entries, vertex_cache.hits,
         vertex_cache.misses, vertex_cache.evictions);
-    REXLOG_INFO("gta4-metal: frame={} draws={} resolves={} clears={} published={} textures={} buffers={} uploads={} resolve-reuse={} resolve-init-merges={} resolve-deferred={} resolve-executed={} resolve-dropped={} clear-folds={} clear-materialized={} state-calls={} state-skips={} residency-calls={} residency-skips={} constant-last-hits={} constant-hash-hits={} constant-upload-bytes={} texture-budget={} texture-entries={} texture-evictions={} texture-rejections={}",
+    REXLOG_INFO("gta4-metal: frame={} draws={} resolves={} clears={} published={} textures={} buffers={} uploads={} resolve-reuse={} resolve-init-merges={} resolve-deferred={} resolve-executed={} resolve-dropped={} clear-folds={} clear-materialized={} state-calls={} state-skips={} residency-calls={} residency-skips={} constant-last-hits={} constant-hash-hits={} constant-upload-bytes={} texture-budget={} texture-entries={} texture-evictions={} texture-rejections={} texture-idle-trims={}",
         present.submitted_frame, frame_draws, frame_resolves, frame_clears, published,
         resources.texture_bytes(), resources.buffer_bytes(), frames.reserved_bytes(),
         resolve_skips, resolve_initializations_merged,frame_resolve_deferrals,frame_resolve_executions,frame_resolve_drops,clear_load_folds,clear_materializations,
         bindings.calls,bindings.skipped,bindings.residency_calls,bindings.residency_skipped,
         constant_last_hits,constant_hash_hits,constant_upload_bytes,
-        texture_cache.budget,texture_cache.entries,texture_cache.evictions,texture_cache.rejections);
+        texture_cache.budget,texture_cache.entries,texture_cache.evictions,texture_cache.rejections,
+        texture_cache.idle_trims);
   }
   frame_draws = frame_resolves = frame_clears = 0;
   frame_resolve_deferrals = frame_resolve_executions = frame_resolve_drops = 0;
