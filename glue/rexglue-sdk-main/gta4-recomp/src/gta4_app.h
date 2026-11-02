@@ -52,6 +52,7 @@ class GTA4App final : public rex::ReXApp {
   void OnShutdown() override;
   bool OnWindowCloseRequested() override;
   void OnConfigureFonts(ImFontAtlas* atlas) override;
+  [[noreturn]] void RunInstallOnly();
   void OnShaderPrecompileStarted(rex::system::IGraphicsSystem* graphics) override;
   void OnShaderPrecompileFinished() override;
   void QueueAchievementUpload(uint32_t achievement_id);

@@ -25,6 +25,8 @@ class MetalPresenter final : public Presenter {
   SurfacePaintConnectResult ConnectOrReconnectPaintingToSurfaceFromUIThread(
       Surface& surface, uint32_t width, uint32_t height, bool was_paintable,
       bool& implicit_vsync) override;
+  void AdjustPaintSurfaceSizeFromUIThread(Surface& surface, uint32_t& width,
+                                          uint32_t& height) override;
   void DisconnectPaintingFromSurfaceFromUIThreadImpl() override;
   bool RefreshGuestOutputImpl(uint32_t mailbox_index, uint32_t width, uint32_t height,
       std::function<bool(GuestOutputRefreshContext&)> refresher, bool& is_8bpc) override;

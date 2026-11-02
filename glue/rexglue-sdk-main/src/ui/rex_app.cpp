@@ -401,6 +401,8 @@ bool ReXApp::SetupPresentation() {
       return false;
     }
   }
+  // The renderer's cvars exist now, so a key nothing has claimed is really unknown.
+  rex::cvar::ReportConfigProblems();
 
   if (config_.graphics) {
     // Before the device exists; the cache root is final except on a first run, when there is

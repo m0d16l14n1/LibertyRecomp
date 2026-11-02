@@ -52,6 +52,26 @@ bool RequestedHdr() {
   const auto mode = rex::cvar::GetFlagByName("gta4_native_hdr_mode");
   return mode == "scrgb" || mode == "auto_hdr";
 }
+// A scaled display mode ("looks like 1920x1243" on a 2880x1864 panel) gives a window a backing store
+// 4/3 the panel's size each way, and the compositor shrinks the whole desktop to the panel. Drawing the
+// game's frame at that size only for it to be shrunk again costs drawable memory (3 x 38 MB at
+// 3840x2486) and a larger final pass. With gta4_native_panel_resolution_cap on, size the drawable at
+// the panel's density instead; Core Animation scales the layer to its bounds like any other window.
+void CapDrawableAtPanelDensity(CAMetalLayer* layer, uint32_t& width, uint32_t& height) {
+  if (!rex::cvar::GetFlagInfo("gta4_native_panel_resolution_cap") ||
+      !rex::cvar::Query<bool>("gta4_native_panel_resolution_cap")) return;
+  NSWindow* window = nil;
+  if (id delegate = layer.delegate; [delegate isKindOfClass:NSView.class]) window = ((NSView*)delegate).window;
+  NSScreen* screen = window.screen ?: NSScreen.mainScreen;
+  uint32_t panel_width = 0, panel_height = 0;
+  if (!screen || !rex::ui::NativeDisplayPixelSizeForWindow((__bridge void*)window, panel_width, panel_height))
+    return;
+  const double backing_width = screen.frame.size.width * screen.backingScaleFactor;
+  if (backing_width <= panel_width) return;
+  const double scale = panel_width / backing_width;
+  width = std::max(1u, uint32_t(width * scale));
+  height = std::max(1u, uint32_t(height * scale));
+}
 float HdrValue(const char* name, float fallback, float low, float high) {
   if (!rex::cvar::GetFlagInfo(name)) return fallback;
   const double value = rex::cvar::Query<double>(name);
@@ -336,6 +356,15 @@ void MetalPresenter::PollPresentationTiming() {
       state_->requested_rate = requested;
       state_->screen_rate = maximum;
     }
+  }
+}
+
+void MetalPresenter::AdjustPaintSurfaceSizeFromUIThread(Surface& surface, uint32_t& width,
+                                                       uint32_t& height) {
+  if (![NSThread isMainThread] || surface.GetType() != Surface::kTypeIndex_CAMetalLayer) return;
+  @autoreleasepool {
+    if (CAMetalLayer* layer = (__bridge CAMetalLayer*)static_cast<CAMetalLayerSurface&>(surface).layer())
+      CapDrawableAtPanelDensity(layer, width, height);
   }
 }
 

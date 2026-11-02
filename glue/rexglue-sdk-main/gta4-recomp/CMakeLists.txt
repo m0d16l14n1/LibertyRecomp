@@ -265,6 +265,33 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         )
     endif()
 
+    # The launcher (launcher/mac, SwiftUI) is the bundle's main program: a double-click opens it, and its
+    # Play starts the game, which stays beside it in Contents/MacOS under its own name. Off builds the
+    # app with the game as its main program, as before.
+    option(LIBERTY_MACOS_LAUNCHER "Build the SwiftUI launcher as the app's main program" ON)
+    set(LIBERTY_MACOS_BUNDLE_EXECUTABLE "Liberty Recompiled")
+    if(LIBERTY_MACOS_LAUNCHER)
+        set(LIBERTY_MACOS_BUNDLE_EXECUTABLE "Liberty Launcher")
+        set(LIBERTY_LAUNCHER_DIR "${LIBERTY_RECOMP_WORKSPACE_ROOT}/launcher/mac")
+        file(GLOB LIBERTY_LAUNCHER_SOURCES CONFIGURE_DEPENDS "${LIBERTY_LAUNCHER_DIR}/Sources/*.swift")
+        set(LIBERTY_LAUNCHER_BINARY "${CMAKE_BINARY_DIR}/launcher/Liberty Launcher")
+        add_custom_command(
+            OUTPUT "${LIBERTY_LAUNCHER_BINARY}"
+            COMMAND sh "${LIBERTY_LAUNCHER_DIR}/build.sh" "${LIBERTY_LAUNCHER_BINARY}" "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            DEPENDS ${LIBERTY_LAUNCHER_SOURCES} "${LIBERTY_LAUNCHER_DIR}/build.sh"
+            COMMENT "Building the macOS launcher (SwiftUI)..."
+            VERBATIM)
+        add_custom_target(liberty_launcher DEPENDS "${LIBERTY_LAUNCHER_BINARY}")
+        add_dependencies(LibertyRecomp liberty_launcher)
+        # A launcher-only change must rerun the copy and the signing below.
+        set_property(TARGET LibertyRecomp APPEND PROPERTY LINK_DEPENDS "${LIBERTY_LAUNCHER_BINARY}")
+        add_custom_command(TARGET LibertyRecomp POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LIBERTY_LAUNCHER_BINARY}"
+                "$<TARGET_BUNDLE_CONTENT_DIR:LibertyRecomp>/MacOS/Liberty Launcher"
+            COMMENT "Placing the launcher in the app bundle..."
+            VERBATIM)
+    endif()
+
     set_target_properties(LibertyRecomp PROPERTIES
         OUTPUT_NAME "Liberty Recompiled"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/LibertyRecomp"

@@ -76,7 +76,8 @@ REXCVAR_DECLARE(bool, gta4_modern_shaders);
 REXCVAR_DECLARE(uint32_t, gta4_drawable_reference_limit);
 REXCVAR_DEFINE_BOOL(gta4_native_panel_resolution_cap, true, "GTA IV/Graphics/Display",
                     "With no resolution set, render at most at the display panel's native pixel "
-                    "size rather than a scaled mode's larger backing store");
+                    "size rather than a scaled mode's larger backing store; Metal also presents at "
+                    "the panel's density");
 REXCVAR_DEFINE_BOOL(gta4_native_air_resolution_cap, true, "GTA IV/Graphics/Display",
                     "On a MacBook Air, with no resolution set, render at most 1440 pixels tall; "
                     "the fanless GPU cannot hold 60 fps at the panel's native size")

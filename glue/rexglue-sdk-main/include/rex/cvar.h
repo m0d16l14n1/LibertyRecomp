@@ -119,6 +119,10 @@ namespace rex::cvar {
 
 std::vector<std::string> Init(int argc, char** argv);
 void LoadConfig(const std::filesystem::path& config_path);
+/// Logs, and returns, what was wrong with the config file: values a cvar refused, a file that was not
+/// valid TOML, and keys no cvar has claimed. Call once every module's cvars are registered (after the
+/// GPU plugin loads); LoadConfig itself runs before logging is set up.
+std::vector<std::string> ReportConfigProblems();
 void ApplyEnvironment();
 void FinalizeInit();
 bool IsFinalized();

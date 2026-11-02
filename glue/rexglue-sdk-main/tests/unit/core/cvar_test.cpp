@@ -723,3 +723,62 @@ TEST_CASE("Untouched command-line values are not written back to the config", "[
   std::filesystem::remove(path);
   rex::cvar::testing::ResetAllForTesting();
 }
+
+TEST_CASE("Saved strings with quotes and backslashes load back unchanged", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+  auto config_path = std::filesystem::temp_directory_path() / "test_quoted_cvar.toml";
+
+  const std::string name = "Niko \"Q\" B\\ \tx";
+  REXCVAR_SET(test_string_flag, name);
+  REQUIRE(rex::cvar::SaveConfig(config_path));
+  REXCVAR_SET(test_string_flag, "default");
+  rex::cvar::LoadConfig(config_path);
+
+  CHECK(REXCVAR_GET(test_string_flag) == name);
+  CHECK(rex::cvar::ReportConfigProblems().empty());
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
+}
+
+TEST_CASE("Config problems are kept until logging can report them", "[cvar]") {
+  rex::cvar::testing::ResetAllForTesting();
+  auto config_path = std::filesystem::temp_directory_path() / "test_config_problems.toml";
+
+  SECTION("refused values and unknown keys") {
+    {
+      std::ofstream file(config_path);
+      file << "test_int32_flag = \"abc\"\n";
+      file << "test_bool_flag = true\n";
+      file << "zz_not_a_setting = 1\n";
+    }
+    char argv0[] = "cvar_test";
+    char* argv[] = {argv0};
+    rex::cvar::Init(1, argv);
+    rex::cvar::LoadConfig(config_path);
+
+    CHECK(REXCVAR_GET(test_bool_flag) == true);
+    auto problems = rex::cvar::ReportConfigProblems();
+    REQUIRE(problems.size() == 2);
+    CHECK(problems[0].find("test_int32_flag") != std::string::npos);
+    CHECK(problems[0].find("abc") != std::string::npos);
+    CHECK(problems[1].find("zz_not_a_setting") != std::string::npos);
+    // The refused value is reported once; the unclaimed key stays unclaimed.
+    CHECK(rex::cvar::ReportConfigProblems().size() == 1);
+  }
+
+  SECTION("a file that is not TOML") {
+    {
+      std::ofstream file(config_path);
+      file << "test_bool_flag = true\n";
+      file << "test_string_flag = \"unterminated\n";
+    }
+    rex::cvar::LoadConfig(config_path);
+    auto problems = rex::cvar::ReportConfigProblems();
+    REQUIRE(problems.size() == 1);
+    CHECK(problems[0].find("line 2") != std::string::npos);
+  }
+
+  std::filesystem::remove(config_path);
+  rex::cvar::testing::ResetAllForTesting();
+}

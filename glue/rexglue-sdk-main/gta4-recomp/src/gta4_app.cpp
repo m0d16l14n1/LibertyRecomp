@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -87,6 +89,11 @@ REXCVAR_DEFINE_STRING(install_game_source, "", "GTA IV/Installation",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_STRING(install_update_source, "", "GTA IV/Installation",
                       "Title Update 8 package or default.xexp for install_game_source")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(install_only, false, "GTA IV/Installation",
+                    "Install from install_game_source/install_update_source (when set), verify the "
+                    "installed files, print the result and exit without opening a window (for the "
+                    "launcher)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(gta4_performance_hud, false, "GTA IV/Graphics/Display",
                     "Show Apple's Metal Performance HUD (FPS, GPU time, frame-time graph); applies on restart")
@@ -695,7 +702,51 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
   return std::nullopt;
 }
 
+// --install_only: the launcher's Game Files page runs the installer and the integrity check
+// through this, windowless. Machine-readable lines on stdout: "[install] progress <copied>
+// <total>", "[install] ok" or "[install] failed: <reason>", then "[verify] ok" or
+// "[verify] failed: <reason>"; the exit status is 0 only when the install is launch-ready.
+[[noreturn]] void GTA4App::RunInstallOnly() {
+  const std::string game_source = REXCVAR_GET(install_game_source);
+  const std::string update_source = REXCVAR_GET(install_update_source);
+  if (!game_source.empty()) {
+    gta4::install::Selection selection;
+    selection.game_source = game_source;
+    selection.update_source = update_source;
+    gta4::install::Progress progress;
+    std::atomic<bool> done{false};
+    std::thread reporter([&] {
+      while (!done.load()) {
+        std::printf("[install] progress %llu %llu\n",
+                    static_cast<unsigned long long>(progress.copied_bytes.load()),
+                    static_cast<unsigned long long>(progress.total_bytes.load()));
+        std::fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+    });
+    const auto result = gta4::install::Install(selection, liberty_root_, progress);
+    done = true;
+    reporter.join();
+    if (result.success) {
+      std::printf("[install] ok\n");
+    } else {
+      std::printf("[install] failed: %s\n", result.error.c_str());
+      std::fflush(stdout);
+      std::_Exit(2);
+    }
+  }
+  const auto verification = gta4::install::VerifyInstall(liberty_root_ / "game", liberty_root_ / "dlc");
+  if (verification.success) {
+    std::printf("[verify] ok\n");
+  } else {
+    std::printf("[verify] failed: %s\n", verification.error.c_str());
+  }
+  std::fflush(stdout);
+  std::_Exit(verification.success ? 0 : 1);
+}
+
 void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
+  if (REXCVAR_GET(install_only)) RunInstallOnly();
   // Apple's Metal Performance HUD (FPS, GPU time, frame-interval graph). Metal reads
   // MTL_HUD_ENABLED while the framework loads, which for this binary is before main(), so a
   // setenv() here is too late and CAMetalLayer.developerHUDProperties does not help either

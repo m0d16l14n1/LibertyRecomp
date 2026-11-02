@@ -44,7 +44,10 @@ def verify(bundle: Path, architecture: str | None = None) -> dict:
     executable = bundle / 'Contents/MacOS' / info['CFBundleExecutable']
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise RuntimeError(f'Missing or non-executable app binary: {executable}')
-    binaries = sorted({executable, *(p.resolve() for p in (bundle / 'Contents').rglob('*.dylib'))})
+    # Every program in Contents/MacOS (the launcher is the main one; the game sits beside it) and every dylib.
+    programs = {p.resolve() for p in (bundle / 'Contents/MacOS').iterdir()
+                if p.is_file() and os.access(p, os.X_OK) and output('file', '-b', str(p)).startswith('Mach-O')}
+    binaries = sorted({executable, *programs, *(p.resolve() for p in (bundle / 'Contents').rglob('*.dylib'))})
     commands = {path: load_commands(path) for path in binaries}
 
     def expand(path: str, loader: Path) -> Path:
@@ -62,6 +65,9 @@ def verify(bundle: Path, architecture: str | None = None) -> dict:
             raise RuntimeError(f'Executable minimum {data["minimums"]} disagrees with Info.plist {minimum}')
         rpaths = [expand(p, binary) for p in data['rpaths']]
         rpaths += [expand(p, executable) for p in commands[executable]['rpaths']]
+        if binary in programs:
+            # A second program's @executable_path is its own folder (Contents/MacOS too).
+            rpaths += [Path(p.replace('@executable_path', str(binary.parent))).resolve() for p in data['rpaths']]
         for dependency in data['dependencies']:
             if dependency.startswith(('/usr/lib/', '/System/Library/')):
                 continue  # Apple libraries may exist only in dyld's shared cache.

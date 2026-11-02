@@ -106,7 +106,27 @@ Address matching, remapping and the XEX/TU/GOD tooling live in `tools/xex/` (see
 ## Installation
 
 Install directory on macOS: `~/Library/Application Support/LibertyRecomp/`
-(`game/`, `saves/`, `shader_cache/`, `native.toml`, `perf/`).
+(`game/`, `saves/`, `save-backups/`, `shader_cache/`, `native.toml`, `perf/`).
+
+### The launcher
+
+Opening `Liberty Recompiled.app` opens its launcher (SwiftUI, `launcher/mac`), modelled on MCLA's:
+
+| Page | What it does |
+|---|---|
+| Play | Checks the program, the game files and the story save; a summary of this run's settings, with the exact size the game will draw at (for example `2224×1439 · MetalFX Quality (from 1483×959)` on a 15-inch Air); Play and Quit the Game; the errors log's tail if the game crashes |
+| Game Files | Installs a Games-on-Demand package or a USA disc with its TU8 through the game's own installer, without opening the game's window (`--install_only=true`), with progress; Check Files runs the game's integrity check; the episode installer |
+| Saves | The story saves; dated backups of the whole saves folder, restore (what is there is backed up first), export as .zip |
+| Graphics | A suggestion for this Mac's chip; renderer; upscaling (Native, MetalFX or FSR 1 at four presets) with the render size each gives; quality, effects and world settings |
+| Display & HDR | Screens (panel pixels, refresh rate, EDR), full screen, aspect, the panel and Air caps, vertical sync, frame pacing, frame limit, HDR |
+| Game, Controls | Intro, quick save, the episode prompt, player name; mouse, trackpad and controller rows; the keyboard controller's 20 keys, each set by pressing the key |
+| Advanced | After Play (hide, stay, quit), extra options for the game, the settings file and logs, clearing the Metal shader cache, log level, reset to defaults |
+
+It writes `native.toml`, the file the pause menu saves to, and only the lines it changes; a setting at
+its default is no line at all. The game itself is `Contents/MacOS/Liberty Recompiled` and still runs on
+its own (benchmarks, launch arguments). A value the game refuses, a file that is not valid TOML or a
+misspelt key is reported in `logs/Liberty Recompiled-errors.log` (`Config:` lines): before this fork
+they were dropped, because the file is read before logging starts.
 
 ### Game files required
 
@@ -156,8 +176,16 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
   (`present_frames_ahead = 1`): with CPU and GPU both just under a 60 Hz tick, that cut frames shown
   for two vsyncs from 24% to 8% and raised the on-screen rate from 48 to 55 fps on the same route,
   at up to one frame of latency. Settings > **Frame Pacing** switches to Low Latency.
+- **Memory.** Peak footprint over the bench route went from 2.26 GB to 2.08 GB (2026-11-02, same
+  fps). The audio decoder made an FFmpeg WMA Pro decoder for each of the Xbox's 320 XMA contexts at
+  start (464 KB of state each, about 150 MB, none of it used: every stream opens a fresh one); they are
+  now made when a context first decodes and freed when the title releases it. In a scaled display
+  mode the Metal drawables were sized for the 3840x2486 backing store and then shrunk to the
+  2880x1864 panel by the compositor; with `gta4_native_panel_resolution_cap` on they are now the
+  panel's size (drawables 111 MB → 62 MB). What remains is mostly the guest's 512 MB, about 1 GB of
+  Metal textures, targets and buffers, and MetalFX's own networks (about 130 MB).
 - **MetalFX upscaling is the default on Apple Silicon.** `gta4_native_upscaler = "metalfx"` with
-  `gta4_temporal_upscaler_quality = "quality"` renders at 2/3 of the output size (1483×959 for the
+  `gta4_fsr1_quality = "quality"` (MetalFX uses FSR 1's four presets) renders at 2/3 of the output size (1483×959 for the
   Air's 2224×1440) and lets MetalFX's temporal scaler rebuild the full image; it also replaces SMAA
   as the anti-aliasing. Measured on the M5 Air (2026-11-01, driving window of the bench route, runs
   interleaved with rests because the Air has no fan):

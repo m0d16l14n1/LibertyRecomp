@@ -67,6 +67,35 @@ std::unordered_map<std::string, PendingValues>& GetPendingValuesStorage() {
   return pending;
 }
 
+// What was wrong with the config file. LoadConfig runs before logging is set up, so its warnings
+// would go nowhere; ReportConfigProblems logs these once it is.
+std::vector<std::string>& GetConfigProblemsStorage() {
+  static std::vector<std::string> problems;
+  return problems;
+}
+
+void AddConfigProblem(std::string message) {
+  std::lock_guard lock(GetRegistryMutex());
+  GetConfigProblemsStorage().push_back(std::move(message));
+}
+
+// A TOML basic string: SaveConfig must not write a file it cannot read back.
+std::string QuoteTomlString(std::string_view value) {
+  std::string out = "\"";
+  for (char c : value) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\t': out += "\\t"; break;
+      case '\r': out += "\\r"; break;
+      default: out += c;
+    }
+  }
+  out += '"';
+  return out;
+}
+
 // Explicit launch arguments survive the later application config load. This
 // is startup precedence only: normal frontend SetFlagByName remains writable.
 std::unordered_map<std::string, std::string>& GetCommandLineValuesStorage() {
@@ -101,7 +130,7 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
       } else if (value.is_string()) {
         value_str = value.as_string()->get();
       } else {
-        REXLOG_WARN("Config: unsupported type for key '{}'", full_key);
+        AddConfigProblem(fmt::format("Config: unsupported type for key '{}'", full_key));
         continue;
       }
 
@@ -116,7 +145,7 @@ void ApplyTomlTable(const toml::table& table, const std::string& prefix) {
       } else if (SetFlagByName(full_key, value_str)) {
         REXLOG_DEBUG("Config: {} = {}", full_key, value_str);
       } else {
-        REXLOG_WARN("Config: invalid value for cvar '{}'", full_key);
+        AddConfigProblem(fmt::format("Config: invalid value for '{}': {}", full_key, value_str));
       }
     }
   }
@@ -232,8 +261,9 @@ std::optional<size_t> RegisterFlag(FlagEntry entry) {
       stored.setter(*env_value);
     }
     if (pending_it != pending.end()) {
-      if (pending_it->second.config) {
-        stored.setter(*pending_it->second.config);
+      if (pending_it->second.config && !stored.setter(*pending_it->second.config)) {
+        GetConfigProblemsStorage().push_back(fmt::format("Config: invalid value for '{}': {}",
+                                                         stored.name, *pending_it->second.config));
       }
       if (pending_it->second.cmdline && stored.setter(*pending_it->second.cmdline)) {
         GetCommandLineValuesStorage()[stored.name] = stored.getter();
@@ -518,7 +548,7 @@ std::string SerializeToTOML() {
   for (const auto& entry : GetRegistryStorage()) {
     if (entry.getter() != entry.default_value && !IsUntouchedCommandLineValue(entry)) {
       if (entry.type == FlagType::String) {
-        result += entry.name + " = \"" + entry.getter() + "\"\n";
+        result += entry.name + " = " + QuoteTomlString(entry.getter()) + "\n";
       } else {
         result += entry.name + " = " + entry.getter() + "\n";
       }
@@ -534,7 +564,7 @@ std::string SerializeToTOML(std::string_view category) {
     if (entry.category == category && entry.getter() != entry.default_value &&
         !IsUntouchedCommandLineValue(entry)) {
       if (entry.type == FlagType::String) {
-        result += entry.name + " = \"" + entry.getter() + "\"\n";
+        result += entry.name + " = " + QuoteTomlString(entry.getter()) + "\n";
       } else {
         result += entry.name + " = " + entry.getter() + "\n";
       }
@@ -636,8 +666,30 @@ void LoadConfig(const std::filesystem::path& config_path) {
     ApplyTomlTable(config, "");
     REXLOG_INFO("Loaded config from {}", config_path.string());
   } catch (const toml::parse_error& err) {
-    REXLOG_ERROR("Failed to parse config {}: {}", config_path.string(), err.what());
+    AddConfigProblem(fmt::format("Config: could not read {} (line {}): {}; its settings were not applied",
+                                 config_path.filename().string(), err.source().begin.line,
+                                 err.description()));
   }
+}
+
+std::vector<std::string> ReportConfigProblems() {
+  std::vector<std::string> out;
+  std::vector<std::string> unknown;
+  {
+    std::lock_guard lock(GetRegistryMutex());
+    out.swap(GetConfigProblemsStorage());
+    for (const auto& [name, values] : GetPendingValuesStorage()) {
+      if (values.config) unknown.push_back(name);
+    }
+  }
+  std::sort(unknown.begin(), unknown.end());
+  if (!unknown.empty()) {
+    std::string list;
+    for (const auto& name : unknown) list += (list.empty() ? "" : ", ") + name;
+    out.push_back(fmt::format("Config: no such setting (misspelt, or for the other renderer): {}", list));
+  }
+  for (const auto& message : out) REXLOG_WARN("{}", message);
+  return out;
 }
 
 void ApplyEnvironment() {
@@ -714,6 +766,7 @@ void ResetAllForTesting() {
   ClearPendingRestartFlags();
   GetPendingValuesStorage().clear();
   GetCommandLineValuesStorage().clear();
+  GetConfigProblemsStorage().clear();
   g_init_done = false;
   g_finalized = false;
 }

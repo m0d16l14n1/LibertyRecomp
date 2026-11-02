@@ -1664,6 +1664,9 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
       SurfacePaintConnectionState::kUnconnectedSurfaceReportedUnusable) {
     uint32_t surface_width = 0, surface_height = 0;
     bool surface_area_available = surface_->GetSize(surface_width, surface_height);
+    if (surface_area_available) {
+      AdjustPaintSurfaceSizeFromUIThread(*surface_, surface_width, surface_height);
+    }
     if (!surface_area_available) {
       // The surface is currently zero-area (or has become zero-area), try again
       // when it's resized.

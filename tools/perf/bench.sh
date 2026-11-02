@@ -2,7 +2,7 @@
 # Run one benchmark pass and print per-window frame statistics.
 # usage: tools/perf/bench.sh <label> [--pad=<file.pad>] [extra --flags...]
 #   tools/perf/bench.sh smaa
-#   tools/perf/bench.sh metalfx-q --gta4_native_upscaler=metalfx --gta4_temporal_upscaler_quality=quality
+#   tools/perf/bench.sh metalfx-b --gta4_native_upscaler=metalfx --gta4_fsr1_quality=balanced
 # Output: ~/Library/Application Support/LibertyRecomp/perf/bench-<date>-<label>/ (frames.csv, marks.csv,
 # game.log, end.png, summary.txt). The default pad script needs a profile with no story save, as it
 # expects the new-game intro (tools/perf/pads/dock-bench.pad).

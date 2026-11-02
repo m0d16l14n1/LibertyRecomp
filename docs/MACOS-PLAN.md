@@ -13,7 +13,8 @@ whose renderer (`gta4-metal`) already had MetalFX built in.
   temporal path.
 - **MetalFX did not need porting.** Upstream's renderer already has the MetalFX temporal scaler
   and frame interpolator (`src/graphics/gta4_metal/temporal/effects.mm`), selected by
-  `gta4_native_upscaler = "metalfx"` with `gta4_temporal_upscaler_quality`, or
+  `gta4_native_upscaler = "metalfx"` with `gta4_fsr1_quality` for its size
+  (`gta4_temporal_upscaler_quality` is FSR 3.1 and DLSS only), or
   `gta4_native_anti_aliasing = "metalfx_taa"` at native size. The pause menu already offers
   MetalFX on the Upscaling row and its quality on the row below. What this session added is the
   measurement (README, *Settings and performance*) and the default that follows from it.
@@ -27,7 +28,13 @@ whose renderer (`gta4-metal`) already had MetalFX built in.
   anisotropic filtering 16x, 482-recipe pipeline seed, CPU wait fixes; and a first-launch crash
   in the pipeline archive save is fixed (BACKLOG 34–42).
 
-## 1. Launcher (to do; model: `mcla-recomp/launcher/mac`)
+## 1. Launcher (done 2026-11-02: `launcher/mac`, see its README; model: `mcla-recomp/launcher/mac`)
+
+Built by CMake (`LIBERTY_MACOS_LAUNCHER`, on by default) into the app as `Contents/MacOS/Liberty
+Launcher`, the bundle's main program; the game installs and verifies headless for it
+(`--install_only=true`). Every value it writes was checked against the game's own config loader
+(all settings and keybinds load with no `Config:` warning). Not done from the plan below: the last
+session's fps line on Play, importing a .zip of saves, and greying restart-only rows while the game runs.
 
 A SwiftUI app with no Xcode project, compiled by `swiftc` into `Liberty Recompiled.app` as its main
 program, with the game executable beside it. MCLA's has the shape to copy:
@@ -72,6 +79,8 @@ Rules carried over from MCLA:
 | P5 | Remaining POSIX fixes from upstream (#531 lost wakeups, #538 timer clamp) | #538 done with a test (BACKLOG 43); #531 not ported: GTA IV never calls the path it fixes, and its `WaitUntil` can deadlock ping-pong `SignalAndWait` pairs (BACKLOG 44) |
 | P6 | Lock-free guest atomics (MCLA `rexglue-guest-atomics-lock-free.patch`) | low value: the region check is clean (0 violations), but the global lock is barely contended here (BACKLOG 40) |
 | P7 | `CAMetalDisplayLink` pacing check on ProMotion panels | to do (needs a 120 Hz display) |
+| P11 | Memory: XMA decoders made on first use, drawables at the panel's density in scaled modes | done: peak footprint 2.26 → 2.08 GB on the bench route, same fps (BACKLOG 50, 51) |
+| P12 | Memory: the ~1 GB of Metal textures, targets and buffers (750 MB GPU-private, 320 MB shared) | to do: break down by kind (render targets at output vs render size, the 2 GB texture budget) |
 | P8 | Above-panel output (MetalFX to 2880x1864 on the Air) costs 17-21 ms GPU: only for Pro/Max chips; the launcher's suggestion should pick it by GPU core count | to do |
 | P9 | HDR / EDR on the Air's panel | the 80-vs-203 nits mismatch was a menu display bug, fixed (BACKLOG 45); whether HDR looks better than SDR on the Air's limited EDR headroom is still to judge by eye |
 | P10 | Dense-traffic city benchmark route (the docks route is light) | needs a story save in Algonquin to load; open-loop driving from a new game cannot reach it reproducibly (BACKLOG 46) |
