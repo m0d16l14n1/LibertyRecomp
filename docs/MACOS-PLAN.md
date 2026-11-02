@@ -63,8 +63,10 @@ Rules carried over from MCLA:
   (`kHotReload`); restart-only rows (renderer, resolution, upscaler, reflections resolution, frame
   generation) move to the launcher, or stay marked *(RESTART)* until it exists.
 - On macOS hide what a Mac cannot run: FSR 3.1, DLSS and Vulkan frame generation rows.
-- MetalFX frame generation (`gta4_metalfx_frame_generation`) only on displays above 60 Hz
-  (ProMotion, external 120 Hz+); on the Air's 60 Hz panel it adds latency and nothing visible.
+- MetalFX frame generation (`gta4_metalfx_frame_generation`): off by default. On a 60 Hz panel
+  it renders up to 30 frames and shows 60 (about one frame more latency, about three quarters of
+  the GPU time); worth it only where the game cannot hold 45-60 on its own. On ProMotion or
+  external 120 Hz+ displays it can show up to 120 (not yet measured, P7). BACKLOG 66-67.
 - The Upscaling row's MetalFX entry shows the render size it implies (for example
   `METALFX QUALITY (1483x959)`), as MCLA's FSR rows do.
 

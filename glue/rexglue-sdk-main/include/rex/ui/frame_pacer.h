@@ -161,6 +161,7 @@ class FramePublicationGate {
   uint64_t Publish(uint32_t fps,bool paired=false,uint32_t ahead=0) {
     std::lock_guard lock(mutex_);
     limited_ = fps != 0 || paired;
+    previous_paired_ = paired;
     fps_ = fps;
     ahead_ = ahead;
     const auto result = ++published_;
@@ -198,14 +199,21 @@ class FramePublicationGate {
   // that rendered 60 frames a second and showed 30. Call before publishing: it
   // waits until the previous publication is admitted (shown), so the producer may
   // render the next frame meanwhile but never overwrites an unshown one.
+  // A generated pair is admitted when its generated frame is submitted, and accepted
+  // when its real frame is; a frame after a pair waits for the pair's real frame.
+  // With frame generation the producer used to wait after each publish until the
+  // generated frame was submitted (up to a refresh period, 12-18 ms median when
+  // CPU-bound) before it could start the next frame.
   bool WaitBeforePublish(uint32_t fps, bool paired, uint32_t ahead) {
     std::unique_lock lock(mutex_);
     // Hidden: the handoff wait after publishing already paces at its slow watchdog.
-    if (paired || !ahead || !fps || hidden_) return true;
+    if (!ahead || hidden_ || (!fps && !paired && !previous_paired_)) return true;
     const uint64_t epoch = epoch_, previous = published_;
+    const bool whole_pair = previous_paired_;
     const uint64_t watchdog = WatchdogNs(fps);
     return condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
-      return stopped_ || !available_ || epoch_ != epoch || admitted_ >= previous;
+      return stopped_ || !available_ || epoch_ != epoch ||
+             (whole_pair ? accepted_ : admitted_) >= previous;
     });
   }
   static constexpr uint64_t kHiddenWatchdogNs = 500'000'000;
@@ -237,6 +245,7 @@ class FramePublicationGate {
   uint64_t published_ = 0, accepted_ = 0, admitted_=0, epoch_ = 0;
   uint32_t fps_ = 0, ahead_ = 0;
   bool limited_ = false, available_ = false, stopped_ = false, hidden_ = false;
+  bool previous_paired_ = false;
 };
 
 }  // namespace rex::ui

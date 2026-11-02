@@ -671,18 +671,19 @@ bool Presenter::RefreshGuestOutput(
   }
 
   const bool paired_presentation = is_active && writable_properties.provenance.paired_presentation;
-  if (is_active && provenance.producer_backpressure && provenance.frame_rate_limit &&
-      !paired_presentation && std::this_thread::get_id() != ui_thread_id_) {
+  if (is_active && provenance.producer_backpressure &&
+      (provenance.frame_rate_limit || paired_presentation) &&
+      std::this_thread::get_id() != ui_thread_id_) {
     const uint64_t begin = FramePacerNowNs();
     const bool shown = frame_publication_gate_.WaitBeforePublish(
-        provenance.frame_rate_limit, false, REXCVAR_GET(present_frames_ahead));
+        provenance.frame_rate_limit, paired_presentation, REXCVAR_GET(present_frames_ahead));
     if (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
       REXLOG_INFO("FramePacer point=before-publish frame={} previous-shown={} wait-ns={}",
                   provenance.submitted_frame, shown, FramePacerNowNs() - begin);
   }
   const uint64_t publication_serial = frame_publication_gate_.Publish(
       is_active ? provenance.frame_rate_limit : 0, paired_presentation,
-      paired_presentation ? 0 : REXCVAR_GET(present_frames_ahead));
+      REXCVAR_GET(present_frames_ahead));
   writable_properties.provenance.publication_serial = publication_serial;
   host_frame_rate_limit_.store(is_active ? provenance.frame_rate_limit : 0,
                                std::memory_order_relaxed);
