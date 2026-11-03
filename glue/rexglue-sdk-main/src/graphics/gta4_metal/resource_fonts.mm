@@ -1,3 +1,5 @@
+#include <mutex>
+#include <set>
 #include "resource_state.h"
 #include "../gta4_native/core/font_atlas.h"
 #include <rex/graphics/pipeline/texture/conversion.h>
@@ -57,6 +59,16 @@ std::shared_ptr<TextureResource> ResourceStore::State::FontTexture(uint32_t hand
                                      source.data() + offset, block_bytes);
   }
   const uint64_t identity = StockFontIdentity(linear);
+  {
+    // Each release's font textures have their own identity; logged once each so a new release
+    // with another glyph layout can be added to StockFontMatchesAtlasLayout.
+    static std::mutex seen_mutex;
+    static std::set<std::pair<uint32_t, uint64_t>> seen;
+    std::lock_guard seen_lock(seen_mutex);
+    if (seen.emplace(font_id, identity).second) {
+      REXLOG_INFO("gta4-metal-fonts: font={} identity={:016X}", font_id, identity);
+    }
+  }
   if (!StockFontMatchesAtlasLayout(font_id - 1, identity)) {
     REXLOG_INFO("gta4-metal-fonts: font={} identity={:016X} has a different glyph layout; "
                 "keeping the stock texture", font_id, identity);

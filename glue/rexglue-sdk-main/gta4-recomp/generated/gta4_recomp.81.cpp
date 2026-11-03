@@ -17482,6 +17482,7 @@ loc_82A46120:
 	REX_MM_STORE_U32(ctx.r10.u32 + 24848, ctx.r11.u32);
 	// eieio 
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 loc_82A46130:
 	// mftb r10
 	ctx.r10.u64 = REX_QUERY_TIMEBASE();
@@ -17732,6 +17733,7 @@ loc_82A462DC:
 	REX_MM_STORE_U32(ctx.r11.u32 + 24848, ctx.r27.u32);
 	// eieio 
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// b 0x82a46310
 	goto loc_82A46310;
 loc_82A46304:
@@ -21726,6 +21728,7 @@ loc_82A47DA4:
 	// stw r11,13500(r31)
 	REX_STORE_U32(ctx.r31.u32 + 13500, ctx.r11.u32);
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// lwz r11,48(r31)
 	ctx.r11.u64 = REX_LOAD_U32(ctx.r31.u32 + 48);
 	// addi r11,r11,4
@@ -24158,12 +24161,14 @@ loc_82A48DFC:
 	// stw r29,10952(r26)
 	REX_STORE_U32(ctx.r26.u32 + 10952, ctx.r29.u32);
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// lis r11,32712
 	ctx.r11.s64 = 2143813632;
 	// stw r29,1812(r11)
 	REX_MM_STORE_U32(ctx.r11.u32 + 1812, ctx.r29.u32);
 	// eieio 
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// lwz r3,21516(r26)
 	ctx.r3.u64 = REX_LOAD_U32(ctx.r26.u32 + 21516);
 	// cmplwi r3,0
@@ -27975,6 +27980,7 @@ loc_82A4A6E8:
 	sub_82A4F740(ctx, base);
 loc_82A4A700:
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// addi r1,r1,128
 	ctx.r1.s64 = ctx.r1.s64 + 128;
 	// b 0x829ff818
@@ -31644,6 +31650,7 @@ DEFINE_REX_FUNC(sub_82A4BE70) {
 	// addis r29,r11,-16384
 	ctx.r29.s64 = ctx.r11.s64 + -1073741824;
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// mr r5,r27
 	ctx.r5.u64 = ctx.r27.u64;
 	// mr r4,r29
@@ -36802,6 +36809,7 @@ loc_82A4E0FC:
 	// stwx r3,r11,r9
 	REX_STORE_U32(ctx.r11.u32 + ctx.r9.u32, ctx.r3.u32);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// blr 
 	return;
 }
@@ -36924,6 +36932,7 @@ loc_82A4E188:
 	// blt cr6,0x82a4e188
 	if (ctx.cr6.lt) goto loc_82A4E188;
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// addi r1,r1,112
 	ctx.r1.s64 = ctx.r1.s64 + 112;
 	// lwz r12,-8(r1)
@@ -38606,6 +38615,7 @@ loc_82A4ED70:
 	__imp__KeUnlockL2(ctx, base);
 loc_82A4ED94:
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// li r11,0
 	ctx.r11.s64 = 0;
 	// li r3,-1
@@ -38736,6 +38746,7 @@ loc_82A4EE48:
 	// bne cr6,0x82a4ee1c
 	if (!ctx.cr6.eq) goto loc_82A4EE1C;
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// lwz r11,60(r30)
 	ctx.r11.u64 = REX_LOAD_U32(ctx.r30.u32 + 60);
 	// lwz r10,56(r30)
@@ -38752,6 +38763,7 @@ loc_82A4EE48:
 	ctx.lr = 0x82A4EE74;
 	sub_82A4E0B8(ctx, base);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// stw r28,0(r31)
 	REX_STORE_U32(ctx.r31.u32 + 0, ctx.r28.u32);
 loc_82A4EE7C:
@@ -38862,6 +38874,7 @@ loc_82A4EF1C:
 	// stw r11,24(r31)
 	REX_STORE_U32(ctx.r31.u32 + 24, ctx.r11.u32);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// b 0x82a4ef94
 	goto loc_82A4EF94;
 loc_82A4EF44:
@@ -38905,6 +38918,7 @@ loc_82A4EF70:
 	// stw r10,36(r31)
 	REX_STORE_U32(ctx.r31.u32 + 36, ctx.r10.u32);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// li r6,0
 	ctx.r6.s64 = 0;
 loc_82A4EF94:
@@ -39010,6 +39024,7 @@ loc_82A4F024:
 	// stw r5,36(r31)
 	REX_STORE_U32(ctx.r31.u32 + 36, ctx.r5.u32);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// stw r28,0(r31)
 	REX_STORE_U32(ctx.r31.u32 + 0, ctx.r28.u32);
 	// b 0x82a4f05c
@@ -39072,6 +39087,7 @@ loc_82A4F094:
 	// bne cr6,0x82a4f068
 	if (!ctx.cr6.eq) goto loc_82A4F068;
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// lwz r5,36(r31)
 	ctx.r5.u64 = REX_LOAD_U32(ctx.r31.u32 + 36);
 	// b 0x82a4f0c0
@@ -40143,6 +40159,7 @@ loc_82A4F7C8:
 	if (!ctx.cr0.eq) goto loc_82A4F7C8;
 loc_82A4F7D8:
 	// sync 
+	std::atomic_thread_fence(std::memory_order_seq_cst);
 	// blr 
 	return;
 }

@@ -31,14 +31,15 @@ bool build_attn(BuilderContext& ctx) {
 }
 
 bool build_sync(BuilderContext& ctx) {
-  // Memory barrier, x86 has strong ordering so this is a no-op
-  (void)ctx;
+  // PPC sync orders all memory accesses; a no-op only on x86. Apple silicon (ARM64) is weakly
+  // ordered, so keep the barrier (upstream rexglue PR #546).
+  ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
   return true;
 }
 
 bool build_lwsync(BuilderContext& ctx) {
-  // Lightweight memory barrier, x86 has strong ordering so this is a no-op
-  (void)ctx;
+  // PPC lwsync provides acquire/release ordering for guest memory accesses (lock releases).
+  ctx.println("\tstd::atomic_thread_fence(std::memory_order_acq_rel);");
   return true;
 }
 

@@ -42,3 +42,23 @@ Python tools need `pip install cryptography` (use a venv).
   ```
 - The PAL remap of the hook sources (8cc1b982, cde2efb3, 10a31883, 48a29b1c) was reversed onto the current tree;
   `check_us_addresses.py` then reports no PAL leftovers and no unknown addresses.
+
+## Result 2026-11-03 — Episodes from Liberty City, Games on Demand + its Title Update
+- GOD package `545407F2/00007000/9970C8C7FBA02C22AD5B` (kept in `GTAEFLC/`, gitignored): **GTA IV's title ID**
+  (`545407F2`, display name "GTA IV"), media `0x06759F9C`, version `0xA`, region `0xFFFFFFFF`, base XXH3
+  `7645622960967303310`, RSA-signature SHA-1 `db3e644b…`. Beside the GTA IV files the disc has `DLC1/` (The Lost
+  and Damned) and `DLC2/` (The Ballad of Gay Tony), each a `DLC/` folder plus `DLC.rpf` (setup2.xml, content.dat,
+  audio XML, textures, web pages), and an `update/` folder with the episodes' `rage_postfx_e1/e2` and `water_e2`
+  shaders, front-end menus and text.
+- TU `545407F2/000B0000/tu0000000A_00000000` ("Grand Theft Auto IV Title Update #8"): `0xA -> 0x80A`, image
+  `0x1300000`, 37 blocks SHA-1 verified, XEXP SHA-256 `223cacb6…`; the package holds only `default.xexp`.
+- **Patched image is byte-identical to the GOD TU8 image** (`cmp`: 0 bytes differ; `compare_callsites.py`: 141,148 /
+  141,148, shift 0). So the same recompiled code runs it: the executable probes `DLC1/DLC.rpf` (or
+  `DLC1/setup2.xml`) relative to its own folder (`sub_82219490`) and, when found, registers `DLC1/DLC` and
+  `DLC2/DLC` as episodes and boots into the episode menu instead of GTA IV.
+- Consequences in the installer and runtime: the release installs into `game-eflc/` (`--gta4_edition=eflc`, saves in
+  `saves-eflc/`), the TU is laid over the disc's `update/` instead of replacing it (without the episode shaders TLAD
+  selected a second post-FX pass the GTA IV shader lacks and called through uninitialised memory), and a
+  device-less guest path (`DLC1\DLC.rpf`) resolves under `game:\` as on the console.
+- Reproduce: as above with `GTAEFLC/…/9970C8C7FBA02C22AD5B` and `tu0000000A_00000000` into `local/eflc/`, then
+  `cmp local/eflc/patched_tu.bin local/god/patched_tu8.bin`.

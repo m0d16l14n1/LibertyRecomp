@@ -127,6 +127,23 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   auto it = std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
     return rex::string::utf8_starts_with_case(normalized_path, d->mount_path());
   });
+  // A path with no device and no root ("DLC1\DLC.rpf") is relative to the title's own folder,
+  // as on the console: GTA IV's disc-episode probe opens its archives this way.
+  if (it == devices_.cend() && !normalized_path.empty() && normalized_path.front() != '\\' &&
+      normalized_path.find(':') == std::string::npos) {
+    std::string title_relative = "game:\\" + normalized_path;
+    std::string linked;
+    if (ResolveSymbolicLink(title_relative, linked)) {
+      title_relative = std::move(linked);
+    }
+    auto title_device = std::find_if(devices_.cbegin(), devices_.cend(), [&](const auto& d) {
+      return rex::string::utf8_starts_with_case(title_relative, d->mount_path());
+    });
+    if (title_device != devices_.cend()) {
+      normalized_path = std::move(title_relative);
+      it = title_device;
+    }
+  }
   if (it == devices_.cend()) {
     REXFS_WARN("VFS: '{}' -> [no device]", path);
     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is

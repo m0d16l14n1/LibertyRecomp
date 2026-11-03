@@ -14,6 +14,9 @@ struct Paths {
     var program: URL { programDir.appendingPathComponent("Liberty Recompiled") }
     var config: URL { support.appendingPathComponent("native.toml") }
     var game: URL { support.appendingPathComponent("game", isDirectory: true) }
+    /// Episodes from Liberty City, installed from its own Games-on-Demand package (it cannot share GTA IV's folder:
+    /// its DLC1/DLC.rpf switches the executable into the episode menu); run with --gta4_edition=eflc.
+    var gameEFLC: URL { support.appendingPathComponent("game-eflc", isDirectory: true) }
     var episodes: URL { support.appendingPathComponent("dlc", isDirectory: true) }
     var saves: URL { support.appendingPathComponent("saves", isDirectory: true) }
     var saveBackups: URL { support.appendingPathComponent("save-backups", isDirectory: true) }
@@ -177,6 +180,25 @@ final class Launcher: ObservableObject {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "afterLaunch"); objectWillChange.send() }
     }
 
+    /// Which game Play starts: GTA IV, or Episodes from Liberty City when its package is installed.
+    enum Edition: String, CaseIterable, Identifiable {
+        case gta4, eflc
+        var id: String { rawValue }
+        var label: String { self == .gta4 ? "Grand Theft Auto IV" : "Episodes from Liberty City" }
+    }
+
+    var edition: Edition {
+        get { Edition(rawValue: UserDefaults.standard.string(forKey: "edition") ?? "") ?? .gta4 }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "edition"); objectWillChange.send() }
+    }
+
+    var eflcInstalled: Bool {
+        FileManager.default.fileExists(atPath: paths.gameEFLC.appendingPathComponent("default.xex").path)
+    }
+
+    /// The edition Play runs: the chosen one, or GTA IV when Episodes from Liberty City is not installed.
+    var playEdition: Edition { edition == .eflc && eflcInstalled ? .eflc : .gta4 }
+
     /// Extra command-line options for the game, as typed (split on spaces; quotes keep spaces).
     var extraArguments: String {
         get { UserDefaults.standard.string(forKey: "extraArguments") ?? "" }
@@ -211,7 +233,8 @@ final class Launcher: ObservableObject {
         let process = Process()
         process.executableURL = paths.program
         process.currentDirectoryURL = paths.programDir
-        process.arguments = arguments + Launcher.splitArguments(extraArguments)
+        let editionArguments = playEdition == .eflc ? ["--gta4_edition=eflc"] : []
+        process.arguments = editionArguments + arguments + Launcher.splitArguments(extraArguments)
         // The game logs to its own files (logs/, and the errors log always); what it prints goes nowhere.
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

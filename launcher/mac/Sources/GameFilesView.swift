@@ -13,7 +13,8 @@ struct GameFilesView: View {
 
     var body: some View {
         Page(title: "Game Files", subtitle: "Liberty Recompiled runs your own copy of GTA IV for Xbox 360: the Games on Demand "
-             + "package or the USA disc, each with its Title Update 8. The installer checks the release by its media ID and "
+             + "package or the USA disc, each with its Title Update 8, and Episodes from Liberty City from its own Games on Demand package. "
+             + "The installer checks the release by its media ID and "
              + "hashes; other releases (PAL disc, other updates) are refused.") {
             statusCard
             installCard
@@ -37,7 +38,7 @@ struct GameFilesView: View {
                     Label(v ? "Checked: launch-ready" : "Check failed", systemImage: v ? "checkmark.seal.fill" : "xmark.seal.fill")
                         .foregroundStyle(v ? .green : .red)
                 }
-                Button("Check Files") { files.verify(launcher.paths) }
+                Button("Check Files") { files.verify(launcher.paths, edition: launcher.playEdition) }
                     .disabled(files.busy != nil || !launcher.programPresent || launcher.running != nil)
                     .help("The game's own integrity check: the executables against the supported releases' hashes, "
                           + "and the episodes' layout. Takes about a second.")
@@ -64,7 +65,7 @@ struct GameFilesView: View {
     private var installCard: some View {
         Card(title: files.status.looksReady ? "Install again" : "Install",
              footer: "Games on Demand: choose the package's header file (545407F2/00007000/<id>, with its <id>.data folder "
-             + "beside it) and the TU from Content/0000000000000000/545407F2/000B0000/ (tu00000006_00000000). USA disc: "
+             + "beside it) and the TU from Content/0000000000000000/545407F2/000B0000/ (tu00000006_00000000; tu0000000A_00000000 for Episodes from Liberty City, which installs into game-eflc beside GTA IV). USA disc: "
              + "an .iso or the extracted disc folder, and its TU8 package or a bare default.xexp. About 6.6 GB is copied "
              + "into Application Support.") {
             sourceRow("Game", gameSource, prompt: "Choose the GOD header file, a disc image or a disc folder") { gameSource = $0 }
@@ -94,12 +95,15 @@ struct GameFilesView: View {
     private var episodesCard: some View {
         let s = files.status
         return Card(title: "Episodes from Liberty City") {
+            row(s.eflc, "Episodes from Liberty City (disc package, both episodes)",
+                s.eflc ? launcher.paths.gameEFLC.path + " · choose it on the Play page" : "Not installed: install its package above")
+            Divider()
             row(s.tlad, "The Lost and Damned", s.tlad ? launcher.paths.episodes.appendingPathComponent("TLAD").path : "Not installed")
             Divider()
             row(s.tbogt, "The Ballad of Gay Tony", s.tbogt ? launcher.paths.episodes.appendingPathComponent("TBOGT").path : "Not installed")
             Divider()
             HStack {
-                Text("Episodes are installed from their Xbox 360 content packages by the game's episode installer.")
+                Text("Downloadable episodes for GTA IV are installed from their Xbox 360 content packages by the game's episode installer.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button("Install Episodes…") { launcher.play(["--install_dlc=true"]) }

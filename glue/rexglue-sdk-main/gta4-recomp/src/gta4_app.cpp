@@ -75,6 +75,12 @@ REXCVAR_DEFINE_STRING(gta4_episode_startup_prompt, "retail", "GTA IV/Episodes",
     .allowed({"retail", "new_only", "always", "off"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(gta4_edition, "gta4", "GTA IV/Installation",
+                      "Game to run: gta4 (Grand Theft Auto IV, installed in game/) or eflc "
+                      "(Episodes from Liberty City, installed from its own package in game-eflc/, "
+                      "with its saves in saves-eflc/)")
+    .allowed({"gta4", "eflc"})
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(install, false, "GTA IV/Installation", "Run the full game installation wizard")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(install_dlc, false, "GTA IV/Installation",
@@ -631,7 +637,7 @@ struct GTA4App::TitleProfileSyncState {
 std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
     const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) {
   auto paths = defaults;
-  paths.game_data_root = liberty_root_ / "game";
+  paths.game_data_root = liberty_root_ / game_directory_;
   paths.marketplace_content_root = liberty_root_ / "dlc";
   paths.config_path = native_config_path_;
 
@@ -690,7 +696,7 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
   }
   const bool dlc_only = ready && force_dlc && !force_install;
   new gta4::install::InstallDialog(
-      imgui_drawer(), liberty_root_, dlc_only, ui_fonts_,
+      imgui_drawer(), liberty_root_, dlc_only, game_directory_, ui_fonts_,
       [paths = std::move(paths), resume = std::move(resume)]() mutable {
         std::error_code error;
         const auto update_root = paths.game_data_root / "update";
@@ -731,14 +737,18 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
     done = true;
     reporter.join();
     if (result.success) {
+      // The launcher verifies and shows the edition the package installed (game or game-eflc).
+      std::printf("[install] directory %s\n", result.game_directory.c_str());
       std::printf("[install] ok\n");
+      game_directory_ = result.game_directory;
     } else {
       std::printf("[install] failed: %s\n", result.error.c_str());
       std::fflush(stdout);
       std::_Exit(2);
     }
   }
-  const auto verification = gta4::install::VerifyInstall(liberty_root_ / "game", liberty_root_ / "dlc");
+  const auto verification =
+      gta4::install::VerifyInstall(liberty_root_ / game_directory_, liberty_root_ / "dlc");
   if (verification.success) {
     std::printf("[verify] ok\n");
   } else {
@@ -747,6 +757,8 @@ std::optional<rex::PathConfig> GTA4App::OnFinalizePaths(
   std::fflush(stdout);
   std::_Exit(verification.success ? 0 : 1);
 }
+
+bool GTA4App::RunsEpisodesFromLibertyCity() { return REXCVAR_GET(gta4_edition) == "eflc"; }
 
 void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   if (REXCVAR_GET(install_only)) RunInstallOnly();
@@ -932,7 +944,12 @@ void GTA4App::OnPostSetup() {
           "available");
     }
   }
-  LogEpisodeInstallState(runtime()->marketplace_content_root());
+  if (game_directory_ == "game") {
+    LogEpisodeInstallState(runtime()->marketplace_content_root());
+  } else {
+    REXLOG_INFO("Running Episodes from Liberty City from '{}' (episodes on its disc)",
+                game_data_root().string());
+  }
   gta4::button_prompts::PrepareAndMount(*runtime(), game_data_root(), cache_root());
 
   achievement_service_ = live && live->config().backend == rex::system::xam::LiveBackend::kCommunity

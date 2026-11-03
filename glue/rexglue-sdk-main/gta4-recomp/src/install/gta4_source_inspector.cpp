@@ -38,7 +38,7 @@ using namespace rex::literals;
 constexpr uint32_t kGta4TitleId = 0x545407F2;
 // The full-file XXH3-64 complements the XEXP signature digest: retaining a valid header/signature
 // is not sufficient if the XEX body changed.
-constexpr std::array<SupportedRelease, 2> kSupportedReleases = {{
+constexpr std::array<SupportedRelease, 3> kSupportedReleases = {{
     {
         .label = "Retail 1.00",
         .media_id = 0x6AC07221,
@@ -62,6 +62,23 @@ constexpr std::array<SupportedRelease, 2> kSupportedReleases = {{
                                0xCC, 0xC4, 0x7F, 0x68, 0x75, 0x33, 0xF5, 0x6E, 0xEA, 0x44},
         .target_version = 0x00000806,
         .patch_sha256 = "158c18bab6d59058f388d10d0dfb9e51f803c3725888cb7f769e41b5484fd31a",
+    },
+    {
+        // Measured 2026-11-03 from the Episodes from Liberty City 00007000 package: GTA IV's
+        // title ID and executable, with both episodes on the disc (DLC1 = TLAD, DLC2 = TBoGT,
+        // each a DLC/ folder plus DLC.rpf; their shaders and menus in update/). Its TU
+        // (tu0000000A, "Title Update #8") takes base 0xA to 0x80A, and the patched image is
+        // byte-identical to the 0x806 one, so the same recompiled code runs it. Region: all.
+        .label = "Episodes from Liberty City",
+        .media_id = 0x06759F9C,
+        .region = 0xFFFFFFFF,
+        .base_version = 0x0000000A,
+        .base_xex_xxh3 = 7645622960967303310ULL,
+        .rsa_signature_sha1 = {0xDB, 0x3E, 0x64, 0x4B, 0x81, 0xEA, 0x83, 0xAE, 0xC8, 0x36,
+                               0x81, 0xA8, 0x8F, 0x37, 0x7F, 0xC0, 0x27, 0x22, 0xA9, 0x28},
+        .target_version = 0x0000080A,
+        .patch_sha256 = "223cacb673d8676e425106a21c5d4bf1b1d17ab1f82dacb454de4d37a88fa866",
+        .game_directory = "game-eflc",
     },
 }};
 constexpr size_t kMaximumMetadataFileSize = 64_MiB;

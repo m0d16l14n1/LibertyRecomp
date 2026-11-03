@@ -58,6 +58,22 @@ are never committed; the folders are in `.gitignore`.
 | Patched version | **0.0.8.6** (`0x806`) | 0.0.8.5 (`0x805`) |
 | Patched image | `0x1300000`, same compile as US TU8 | `0x1300000` |
 
+**Episodes from Liberty City** (both episodes on one disc) is supported from its own Games-on-Demand
+package (kept in `GTAEFLC/`, also gitignored). It shares GTA IV's title ID and, once its own TU is
+applied, GTA IV's executable byte for byte, so the same recompiled code runs it:
+
+| | Episodes from Liberty City (Games on Demand) |
+|---|---|
+| Title ID / media ID | `545407F2` / `0x06759F9C` |
+| Base version, region | 10 (0.0.0.10), `0xFFFFFFFF` |
+| Title update | `tu0000000A_00000000` ("Title Update #8", only `default.xexp`) |
+| Patched version | 0.0.8.10 (`0x80A`); image identical to the GOD 0.0.8.6 one |
+| Installed to | `game-eflc/` beside GTA IV's `game/`, saves in `saves-eflc/`; run with `--gta4_edition=eflc` (the launcher's Play page has a picker once it is installed) |
+
+The disc's `DLC1/` (The Lost and Damned) and `DLC2/` (The Ballad of Gay Tony) make the executable
+boot into the episode menu, which is why it cannot share GTA IV's folder. Details in
+`tools/xex/README.md`.
+
 **Why the US code runs it:** with TU8 applied, all 141,148 recompiled call sites in `generated/` find
 the same `bl` at the same address with the same target (`tools/xex/compare_callsites.py`, 100%, zero
 drift). Without TU8 the GOD base is a different compile (5.6% match), so **TU8 is required**. The PAL
@@ -137,7 +153,7 @@ the PAL disc and other releases are rejected.
 | Input | What to provide |
 |---|---|
 | Base game | GOD: the header file `545407F2/00007000/<id>` (keep `<id>.data/` next to it). USA: disc image (`.iso`) or extracted disc folder |
-| Title Update 8 | The TU package from the console's `Content/0000000000000000/545407F2/000B0000/` (for GOD: `tu00000006_00000000`), or a bare `default.xexp`. Each release needs its own TU8 |
+| Title Update 8 | The TU package from the console's `Content/0000000000000000/545407F2/000B0000/` (for GOD: `tu00000006_00000000`; for Episodes from Liberty City: `tu0000000A_00000000`), or a bare `default.xexp`. Each release needs its own TU8 |
 | Episodes | Optional: The Lost and Damned / The Ballad of Gay Tony XContent packages |
 
 See the [Dumping Guide](docs/DUMPING-en.md) for extraction and `tools/xex/README.md` for how the

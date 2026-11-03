@@ -53,6 +53,7 @@ class GTA4App final : public rex::ReXApp {
   bool OnWindowCloseRequested() override;
   void OnConfigureFonts(ImFontAtlas* atlas) override;
   [[noreturn]] void RunInstallOnly();
+  static bool RunsEpisodesFromLibertyCity();
   void OnShaderPrecompileStarted(rex::system::IGraphicsSystem* graphics) override;
   void OnShaderPrecompileFinished() override;
   void QueueAchievementUpload(uint32_t achievement_id);
@@ -70,16 +71,22 @@ class GTA4App final : public rex::ReXApp {
     const bool uses_default_user_root = paths.user_data_root == default_user_root;
     const bool uses_default_cache_root = paths.cache_root == default_user_root / "cache";
 
+    // Episodes from Liberty City shares GTA IV's title ID and executable but needs its own game
+    // folder (its DLC1/DLC.rpf switches the executable into the episode menu); its saves are
+    // kept apart from the GTA IV career too.
+    const bool eflc = RunsEpisodesFromLibertyCity();
+    game_directory_ = eflc ? "game-eflc" : "game";
+    const char* saves_directory = eflc ? "saves-eflc" : "saves";
     if (paths.game_data_root.empty()) {
-      const auto installed_game_root = liberty_root / "game";
+      const auto installed_game_root = liberty_root / game_directory_;
       paths.game_data_root = installed_game_root;
     }
 
     if (uses_default_user_root) {
-      paths.user_data_root = liberty_root / "saves";
+      paths.user_data_root = liberty_root / saves_directory;
     }
     if (paths.saved_game_root.empty()) {
-      paths.saved_game_root = liberty_root / "saves";
+      paths.saved_game_root = liberty_root / saves_directory;
     }
     if (uses_default_cache_root) {
       paths.cache_root = liberty_root / "shader_cache";
@@ -109,6 +116,8 @@ class GTA4App final : public rex::ReXApp {
   std::shared_ptr<TitleProfileSyncState> title_profile_sync_state_;
   std::thread title_profile_sync_worker_;
   std::filesystem::path liberty_root_;
+  // "game" (GTA IV) or "game-eflc" (Episodes from Liberty City, --gta4_edition=eflc).
+  std::string game_directory_ = "game";
   std::filesystem::path native_config_path_;
   std::unique_ptr<gta4::input::UserMusicPlayer> user_music_player_;
   std::unique_ptr<gta4::input::TextChatDialog> text_chat_dialog_;

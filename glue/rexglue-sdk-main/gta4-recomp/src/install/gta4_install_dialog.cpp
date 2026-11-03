@@ -61,11 +61,12 @@ constexpr ImVec2 kSecondarySize(150.0f, 44.0f);
 }  // namespace
 
 InstallDialog::InstallDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path install_root,
-                             bool dlc_only, gta4::ui::UiFonts fonts, CompleteCallback complete,
-                             CancelCallback cancel)
+                             bool dlc_only, std::string game_directory, gta4::ui::UiFonts fonts,
+                             CompleteCallback complete, CancelCallback cancel)
     : ImGuiDialog(drawer),
       install_root_(std::move(install_root)),
       dlc_only_(dlc_only),
+      game_directory_(std::move(game_directory)),
       fonts_(fonts),
       complete_(std::move(complete)),
       cancel_(std::move(cancel)),
@@ -270,6 +271,7 @@ void InstallDialog::StartInstall() {
       }
       selection.game_source = picker_state_->game;
       selection.update_source = picker_state_->update;
+      selection.required_game_directory = game_directory_;
     }
     if (!picker_state_->tlad.empty()) {
       selection.dlc_sources.push_back({Episode::kTlad, picker_state_->tlad});
@@ -373,7 +375,7 @@ void InstallDialog::OnDraw(ImGuiIO& io) {
       ImGui::TextWrapped(
           "Select your legally obtained Xbox 360 GTA IV source (USA disc or Games on Demand "
           "package) and its Title Update 8. The update may be an STFS package or a raw "
-          "default.xexp.");
+          "default.xexp. Episodes from Liberty City installs from the launcher.");
     } else {
       ImGui::TextWrapped("Add either or both episodes to the existing GTA IV installation.");
     }

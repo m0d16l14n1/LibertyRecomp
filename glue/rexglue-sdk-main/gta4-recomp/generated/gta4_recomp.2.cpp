@@ -51210,6 +51210,7 @@ loc_821947E0:
 	ctx.lr = 0x82194800;
 	rexcrt_memcpy(ctx, base);
 	// lwsync 
+	std::atomic_thread_fence(std::memory_order_acq_rel);
 	// addi r1,r1,96
 	ctx.r1.s64 = ctx.r1.s64 + 96;
 	// lwz r12,-8(r1)

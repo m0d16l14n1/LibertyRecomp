@@ -199,6 +199,28 @@ TEST_CASE("GTA IV source classifier accepts the Games-on-Demand base 6 identity"
   }
 }
 
+TEST_CASE("GTA IV source classifier accepts the Episodes from Liberty City base 0xA identity",
+          "[gta4][installer][source-inspection]") {
+  auto metadata = RetailMetadata();
+  metadata.media_id = 0x06759F9C;
+  metadata.xex_version = 0x0000000A;
+  metadata.base_version = 0x0000000A;
+  metadata.region = 0xFFFFFFFF;
+  metadata.rsa_signature_sha1 = {0xDB, 0x3E, 0x64, 0x4B, 0x81, 0xEA, 0x83, 0xAE, 0xC8, 0x36,
+                                 0x81, 0xA8, 0x8F, 0x37, 0x7F, 0xC0, 0x27, 0x22, 0xA9, 0x28};
+  const GameSourceInspection result = ClassifyGameSourceMetadata(metadata);
+  REQUIRE(result.supported());
+  CHECK(result.release_label == "Episodes from Liberty City");
+  CHECK(gta4::install::FindSupportedRelease(0x06759F9C)->game_directory == "game-eflc");
+  CHECK(gta4::install::FindSupportedRelease(0x06759F9C)->target_version == 0x0000080A);
+
+  SECTION("Games-on-Demand signature on the Episodes from Liberty City media") {
+    metadata.rsa_signature_sha1 = {0xA2, 0x4D, 0xFE, 0x5C, 0x65, 0x1F, 0xF8, 0x53, 0x83, 0x55,
+                                   0xCC, 0xC4, 0x7F, 0x68, 0x75, 0x33, 0xF5, 0x6E, 0xEA, 0x44};
+    CHECK(ClassifyGameSourceMetadata(metadata).status == GameSourceStatus::kWrongSignature);
+  }
+}
+
 TEST_CASE("GTA IV source classifier rejects mismatched identity fields",
           "[gta4][installer][source-inspection]") {
   SECTION("title") {

@@ -878,8 +878,8 @@ bool ValidateInstalledPair(const std::filesystem::path& game_root, std::string& 
 
   const SupportedRelease* release = FindSupportedRelease(base.media_id);
   if (!release || XXH3_64bits(base_bytes.data(), base_bytes.size()) != release->base_xex_xxh3) {
-    reason = "default.xex does not match a supported GTA IV release (USA retail 1.00 or Games "
-             "on Demand).";
+    reason = "default.xex does not match a supported GTA IV release (USA retail 1.00, Games "
+             "on Demand, or Episodes from Liberty City).";
     return false;
   }
 
@@ -947,6 +947,18 @@ Result Install(const Selection& selection, const std::filesystem::path& install_
     }
     game = PrepareGameSource(selection.game_source, result.error);
     if (!game) {
+      return result;
+    }
+    const SupportedRelease* release = FindSupportedRelease(game->xex_info.media_id);
+    result.game_directory = release ? std::string(release->game_directory) : "game";
+    if (!selection.required_game_directory.empty() &&
+        selection.required_game_directory != result.game_directory) {
+      result.error = result.game_directory == "game-eflc"
+                         ? "This is the Episodes from Liberty City package. Install it from the "
+                           "launcher's Game Files page, or start the game with "
+                           "--gta4_edition=eflc."
+                         : "This is a GTA IV package. Install it from the launcher's Game Files "
+                           "page, or start the game without --gta4_edition=eflc.";
       return result;
     }
   } else {
@@ -1066,13 +1078,13 @@ Result Install(const Selection& selection, const std::filesystem::path& install_
 
   if (update) {
     if (!update->raw_patch) {
+      // The title update is laid over the disc's own update folder, not in place of it: the
+      // console reads update:\ first and falls back to game:\update\, and the Episodes from
+      // Liberty City disc keeps the episodes' post-processing and water shaders, menus and text
+      // there (its TU carries only default.xexp). Without them TLAD asked for a second post-FX
+      // pass that the fallback shader lacks and called through uninitialised memory.
       const auto staged_update = staged_game / "update";
-      std::filesystem::remove_all(staged_update, fs_error);
-      if (fs_error || !CopyTree(update->payload_root, staged_update, progress, result.error)) {
-        if (result.error.empty()) {
-          result.error =
-              "Could not prepare the staged title-update directory: " + fs_error.message();
-        }
+      if (!CopyTree(update->payload_root, staged_update, progress, result.error)) {
         return fail(std::move(result.error));
       }
     }
@@ -1102,7 +1114,8 @@ Result Install(const Selection& selection, const std::filesystem::path& install_
 
   std::vector<PublishItem> publish;
   if (game) {
-    publish.push_back({staged_game, install_root / "game", install_root / ".game-backup"});
+    publish.push_back({staged_game, install_root / result.game_directory,
+                       install_root / ("." + result.game_directory + "-backup")});
   }
   for (auto& episode : dlc) {
     const auto staged_episode = staging_root / "dlc" / EpisodeDirectory(episode.episode);

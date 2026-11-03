@@ -414,8 +414,13 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 class MetalCompiler:
-    def __init__(self, work: Path, sdk: str, deployment: str):
+    # "safe" is -fno-fast-math (the shipped archive). "relaxed" lets the compiler reassociate and use
+    # reciprocals but keeps Inf/NaN semantics, which the translated Xenos code tests with isnan().
+    MATH_FLAGS = {"safe": ["-fno-fast-math"], "relaxed": ["-fmetal-math-mode=relaxed"]}
+
+    def __init__(self, work: Path, sdk: str, deployment: str, math_mode: str = "safe"):
         self.work = work
+        self.math_flags = self.MATH_FLAGS[math_mode]
         self.sdk = sdk
         self.deployment = deployment
         self.metal = subprocess.check_output(["xcrun", "--find", "metal"], text=True).strip()
@@ -425,7 +430,9 @@ class MetalCompiler:
         self.work.mkdir(parents=True, exist_ok=True)
 
     def compile(self, source: str) -> bytes:
-        recipe = (self.version + "\0" + self.sdk_path + "\0" + self.deployment + "\0" + source).encode()
+        # The safe flags keep the original recipe, so existing compiled libraries stay valid.
+        flags = "" if self.math_flags == self.MATH_FLAGS["safe"] else " ".join(self.math_flags) + "\0"
+        recipe = (self.version + "\0" + self.sdk_path + "\0" + self.deployment + "\0" + flags + source).encode()
         fingerprint = hashlib.sha256(recipe).hexdigest()
         output = self.work / (fingerprint + ".metallib")
         sidecar = self.work / (fingerprint + ".json")
@@ -442,7 +449,7 @@ class MetalCompiler:
             metal_file.write_text(source, encoding="utf-8")
             command = [self.metal, "-c", str(metal_file), "-o", str(air_file),
                        "-isysroot", self.sdk_path, "-std=metal3.0", "-D__air__", "-DGTA4_RECOMP",
-                       "-fno-fast-math", "-Wno-unused-variable", f"-mmacosx-version-min={self.deployment}"]
+                       *self.math_flags, "-Wno-unused-variable", f"-mmacosx-version-min={self.deployment}"]
             completed = subprocess.run(command, text=True, capture_output=True, timeout=180)
             if completed.returncode:
                 error = self.work / (fingerprint + ".failed.metal")
@@ -461,7 +468,8 @@ class MetalCompiler:
 
 def build_from_repo(root: Path, output: Path, work: Path, jobs: int = 2,
                     compile_source: Callable[[str], bytes] | None = None,
-                    zstd_library: str | None = None, emit_only: bool = False) -> dict:
+                    zstd_library: str | None = None, emit_only: bool = False,
+                    math_mode: str = "safe") -> dict:
     cache_path = root / "LibertyRecompLib/shader/shader_cache.cpp"
     source_bytes = cache_path.read_bytes()
     cache_fingerprint = hashlib.sha256(source_bytes).hexdigest()
@@ -503,7 +511,7 @@ def build_from_repo(root: Path, output: Path, work: Path, jobs: int = 2,
         if late:
             _atomic_write(source_directory / f"{entry.shader_hash:016X}.late.metal", late.encode())
     if compile_source is None and not emit_only:
-        compile_source = MetalCompiler(work / "compiled", "macosx", "26.0").compile
+        compile_source = MetalCompiler(work / "compiled", "macosx", "26.0", math_mode).compile
     result = {"schema": VERSION, "stock_cache_sha256": cache_fingerprint,
               "coverage_header_sha256": hashlib.sha256(header.encode()).hexdigest(),
               "entries": len(entries), "late_variants": sum(bool(item[2]) for item in recovered),
@@ -539,6 +547,7 @@ def main() -> int:
     parser.add_argument("--zstd-library")
     parser.add_argument("--emit-only", action="store_true")
     parser.add_argument("--verify", type=Path)
+    parser.add_argument("--math-mode", choices=sorted(MetalCompiler.MATH_FLAGS), default="safe")
     args = parser.parse_args()
     if args.verify:
         shaders = parse_archive(args.verify.read_bytes())
@@ -547,7 +556,8 @@ def main() -> int:
     if args.output is None or args.work is None:
         parser.error("--output and --work are required for generation")
     result = build_from_repo(args.repo.resolve(), args.output, args.work, args.jobs,
-                             zstd_library=args.zstd_library, emit_only=args.emit_only)
+                             zstd_library=args.zstd_library, emit_only=args.emit_only,
+                             math_mode=args.math_mode)
     print(json.dumps({key: value for key, value in result.items() if key != "sources"}, indent=2))
     return 0
 

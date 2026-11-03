@@ -10,6 +10,7 @@ struct InstallStatus {
     var size: Int64 = 0
     var tlad = false
     var tbogt = false
+    var eflc = false            // game-eflc/default.xex and default.xexp
     var verified: Bool?         // the game's own check, when it has run
     var problem: String?
 
@@ -33,6 +34,8 @@ final class GameFilesModel: ObservableObject {
         s.titleUpdate = fm.fileExists(atPath: paths.game.appendingPathComponent("default.xexp").path)
         s.tlad = fm.fileExists(atPath: paths.episodes.appendingPathComponent("TLAD").path)
         s.tbogt = fm.fileExists(atPath: paths.episodes.appendingPathComponent("TBOGT").path)
+        s.eflc = fm.fileExists(atPath: paths.gameEFLC.appendingPathComponent("default.xex").path)
+            && fm.fileExists(atPath: paths.gameEFLC.appendingPathComponent("default.xexp").path)
         s.verified = status.verified
         s.problem = status.problem
         status = s
@@ -55,11 +58,14 @@ final class GameFilesModel: ObservableObject {
 
     /// The game's integrity check (the same as --install_check): the executables against the supported
     /// releases' hashes, and the episodes' layouts.
-    func verify(_ paths: Paths) {
-        run(paths, title: "Checking the game files…", arguments: ["--install_only=true"])
+    func verify(_ paths: Paths, edition: Launcher.Edition = .gta4) {
+        var args = ["--install_only=true"]
+        if edition == .eflc { args.append("--gta4_edition=eflc") }
+        run(paths, title: "Checking the game files…", arguments: args)
     }
 
-    /// Installs from a Games-on-Demand package header or a USA disc image / folder, with its Title Update 8.
+    /// Installs from a Games-on-Demand package header or a USA disc image / folder, with its Title Update 8. The game
+    /// picks the folder from the release: game/ for GTA IV, game-eflc/ for Episodes from Liberty City.
     func install(_ paths: Paths, game: URL, update: URL?) {
         var args = ["--install_only=true", "--install_game_source=\(game.path)"]
         if let update { args.append("--install_update_source=\(update.path)") }

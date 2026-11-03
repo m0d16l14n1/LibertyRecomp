@@ -13,8 +13,9 @@
 namespace gta4::install {
 
 // A base release whose Title Update 8 produces the executable the recompiled code was generated
-// from. The USA disc (base 5) and the Games-on-Demand package (base 6) are both delta-patched by
-// their own TU8 into the same compile; see tools/xex/README.md.
+// from. The USA disc (base 5), the Games-on-Demand package (base 6) and the Episodes from Liberty
+// City package (base 0xA) are each delta-patched by their own TU8 into the same compile; see
+// tools/xex/README.md.
 struct SupportedRelease {
   std::string_view label;
   uint32_t media_id;
@@ -26,6 +27,10 @@ struct SupportedRelease {
   std::array<uint8_t, 20> rsa_signature_sha1;
   uint32_t target_version;
   std::string_view patch_sha256;
+  // Folder under the Liberty root the release installs into. Episodes from Liberty City boots
+  // into its episode menu whenever DLC1/DLC.rpf sits beside default.xex, so it cannot share
+  // GTA IV's folder; --gta4_edition=eflc runs it.
+  std::string_view game_directory = "game";
 };
 
 std::span<const SupportedRelease> SupportedReleases();

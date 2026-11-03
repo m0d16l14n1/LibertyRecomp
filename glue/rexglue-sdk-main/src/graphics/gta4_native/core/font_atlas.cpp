@@ -32,6 +32,9 @@ bool StockFontMatchesAtlasLayout(size_t index, uint64_t hash) {
   if (index == 0 && hash == 0x13F4419414EA9CB9ull) return false;
   if (index == 1 && hash == 0x601543F27E876E31ull) return false;
   if (index == 2 && hash == 0x9F5EF825DDB933B4ull) return false;
+  // Episodes from Liberty City package (media 06759F9C): the same multi-language layout.
+  if (index == 0 && hash == 0x6AA0BBBEF93EF77Eull) return false;
+  if (index == 2 && hash == 0x98F4203E24158ABEull) return false;
   return true;
 }
 uint64_t StockFontIdentity(std::span<const uint8_t> bytes) {

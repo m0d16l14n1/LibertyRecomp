@@ -16,6 +16,16 @@ struct PlayView: View {
                 if let problem = launcher.configProblem {
                     Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
+                if launcher.eflcInstalled {
+                    Card(title: "Game") {
+                        Picker("Game", selection: Binding(get: { launcher.edition }, set: { launcher.edition = $0 })) {
+                            ForEach(Launcher.Edition.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(launcher.running != nil)
+                    }
+                }
                 Card(title: "Ready to play?") {
                     check(launcher.programPresent, "The game's program",
                           launcher.programPresent ? launcher.paths.program.path
@@ -114,6 +124,10 @@ struct PlayView: View {
         let s = files.status
         if files.busy != nil {
             HStack { ProgressView().controlSize(.small); Text(files.busy ?? "") }
+        } else if launcher.playEdition == .eflc {
+            check(s.eflc, "Game files", "Episodes from Liberty City · \(launcher.paths.gameEFLC.path)"
+                  + (s.verified == true ? " · checked" : ""),
+                  action: s.eflc ? nil : ("Install…", { launcher.section = .gameFiles }))
         } else if s.looksReady {
             check(s.verified != false, "Game files",
                   "\(launcher.paths.game.path) · \(formatSize(s.size))"

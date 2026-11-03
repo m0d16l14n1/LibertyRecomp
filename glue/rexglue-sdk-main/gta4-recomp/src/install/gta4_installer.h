@@ -23,6 +23,9 @@ struct Selection {
   std::filesystem::path game_source;
   std::filesystem::path update_source;
   std::vector<DlcSelection> dlc_sources;
+  // When set, a base game whose release installs elsewhere (SupportedRelease::game_directory) is
+  // refused: the in-game wizard can only install the edition it is about to run.
+  std::string required_game_directory;
 };
 
 struct Progress {
@@ -34,6 +37,8 @@ struct Progress {
 struct Result {
   bool success = false;
   std::string error;
+  // The folder under the install root the base game went to ("game" or "game-eflc").
+  std::string game_directory;
 };
 
 bool IsInstallReady(const std::filesystem::path& game_root, std::string* reason = nullptr);

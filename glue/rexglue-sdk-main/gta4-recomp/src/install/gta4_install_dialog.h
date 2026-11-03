@@ -21,7 +21,8 @@ class InstallDialog final : public rex::ui::ImGuiDialog {
   using CancelCallback = std::function<void()>;
 
   InstallDialog(rex::ui::ImGuiDrawer* drawer, std::filesystem::path install_root, bool dlc_only,
-                gta4::ui::UiFonts fonts, CompleteCallback complete, CancelCallback cancel);
+                std::string game_directory, gta4::ui::UiFonts fonts, CompleteCallback complete,
+                CancelCallback cancel);
 
  protected:
   void OnClose() override;
@@ -66,6 +67,7 @@ class InstallDialog final : public rex::ui::ImGuiDialog {
 
   std::filesystem::path install_root_;
   bool dlc_only_ = false;
+  std::string game_directory_;
   gta4::ui::UiFonts fonts_;
   CompleteCallback complete_;
   CancelCallback cancel_;
