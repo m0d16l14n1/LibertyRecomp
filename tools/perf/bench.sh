@@ -15,7 +15,8 @@ args=()
 for a in "$@"; do
   case "$a" in --pad=*) pad="${a#--pad=}" ;; *) args+=("$a") ;; esac
 done
-app="$repo/out/build/macos-release/LibertyRecomp/Liberty Recompiled.app/Contents/MacOS/Liberty Recompiled"
+# BENCH_APP=<path to the game binary> benches another build (a copied app for an A/B, say).
+app="${BENCH_APP:-$repo/out/build/macos-release/LibertyRecomp/Liberty Recompiled.app/Contents/MacOS/Liberty Recompiled}"
 out="$HOME/Library/Application Support/LibertyRecomp/perf/bench-$(date +%Y%m%d-%H%M%S)-$label"
 mkdir -p "$out"
 sed "s|{out}|$out|g" "$pad" > "$out/run.pad"

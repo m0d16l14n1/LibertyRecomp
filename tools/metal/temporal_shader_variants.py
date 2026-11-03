@@ -240,12 +240,13 @@ def main() -> None:
     parser.add_argument("--deployment", default="26.0")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--math-mode", choices=sorted(archive.MetalCompiler.MATH_FLAGS), default="safe")
     args = parser.parse_args()
     records = archive.parse_archive(args.archive.read_bytes())
     chosen = {int(value, 16) for value in args.hash}
     found: set[int] = set()
     compiled = []
-    compiler = None if args.audit_only else archive.MetalCompiler(args.work, "macosx", args.deployment)
+    compiler = None if args.audit_only else archive.MetalCompiler(args.work, "macosx", args.deployment, args.math_mode)
     selected = [r for r in records if not chosen or r.shader_hash in chosen]
     def prepare(record):
         variants = []
