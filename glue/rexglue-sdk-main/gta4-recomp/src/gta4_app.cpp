@@ -101,8 +101,11 @@ REXCVAR_DEFINE_BOOL(install_only, false, "GTA IV/Installation",
                     "installed files, print the result and exit without opening a window (for the "
                     "launcher)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(gta4_performance_hud, false, "GTA IV/Graphics/Display",
-                    "Show Apple's Metal Performance HUD (FPS, GPU time, frame-time graph); applies on restart")
+REXCVAR_DEFINE_STRING(gta4_performance_hud, "system", "GTA IV/Graphics/Display",
+                      "Apple's Metal Performance HUD (FPS, GPU time, frame-time graph): system (as macOS "
+                      "is set, MTL_HUD_ENABLED), off or on for this game; applies on restart. Its hooks "
+                      "cost the render thread time on every render pass")
+    .allowed({"system", "off", "on", "true", "false"})  // true/false: the setting's older toggle
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gta4_diagnostics_skip_user_music, false, "GTA IV/Diagnostics",
                     "Skip the host user-music player during isolated diagnostics")
@@ -766,12 +769,19 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   // MTL_HUD_ENABLED while the framework loads, which for this binary is before main(), so a
   // setenv() here is too late and CAMetalLayer.developerHUDProperties does not help either
   // (tried 2026-10-11). Restart the process with the variable in its environment instead; this
-  // runs before any window exists, and the variable stops the restart from repeating.
-  if (REXCVAR_GET(gta4_performance_hud) && !getenv("MTL_HUD_ENABLED")) {
-    setenv("MTL_HUD_ENABLED", "1", 1);
-    REXLOG_INFO("Metal performance HUD requested; restarting with MTL_HUD_ENABLED=1");
+  // runs before any window exists, and the variable stops the restart from repeating. "off"
+  // matters when the HUD is on for every app (launchctl setenv MTL_HUD_ENABLED 1): its hooks
+  // wrap each render encoder (libMetalMetricsInterpose), BACKLOG 74.
+  const std::string hud = REXCVAR_GET(gta4_performance_hud);
+  const char* hud_wanted = hud == "on" || hud == "true" ? "1" : hud == "off" ? "0" : nullptr;
+  const char* hud_now = getenv("MTL_HUD_ENABLED");
+  if (hud_wanted && (!hud_now || std::strcmp(hud_now, hud_wanted) != 0)) {
+    setenv("MTL_HUD_ENABLED", hud_wanted, 1);
+    REXLOG_INFO("Metal performance HUD {}; restarting with MTL_HUD_ENABLED={}", hud, hud_wanted);
     execv(*_NSGetArgv()[0] ? _NSGetArgv()[0][0] : "", *_NSGetArgv());
     REXLOG_WARN("Could not restart for the Metal performance HUD: {}", std::strerror(errno));
+  } else if (hud_now && std::strcmp(hud_now, "0") != 0) {
+    REXLOG_INFO("Metal performance HUD on (MTL_HUD_ENABLED={} from the environment)", hud_now);
   }
   rex::input::mnk::SetNativeControllerCompatibilityBindings(
       gta4::input::KeyboardControllerBindings());

@@ -171,8 +171,12 @@ enum Catalogue {
         c("400 nits (default)", d(400)), c("600 nits", d(600)), c("800 nits", d(800)), c("1000 nits", d(1000)),
         c("1500 nits", d(1500)), c("2000 nits", d(2000)),
     ]), d(400), live: true, "The brightest the screen can show; highlights are fitted under it.")
-    static let hud = Setting("gta4_performance_hud", "Metal performance HUD", .toggle, on(false),
-        "Apple's overlay with the frame rate, GPU time and a frame-time graph, in the top corner.")
+    static let hud = Setting("gta4_performance_hud", "Metal performance HUD", .choice([
+        c("As macOS is set (default)", s("system")), c("Off for this game", s("off")), c("On", s("on")),
+    ]), s("system"),
+        "Apple's overlay with the frame rate, GPU time and a frame-time graph, in the top corner. "
+        + "When it is on for every app, its hooks cost the game CPU time on every render pass; Off turns it "
+        + "off for this game only.")
 
     // MARK: Game
 

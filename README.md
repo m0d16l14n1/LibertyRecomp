@@ -170,7 +170,7 @@ Every setting in `native.toml` can be passed as `--name=value`. Useful ones:
 | `--install_check` | Verify file integrity |
 | `--gpu_plugin=gta4-metal` | Renderer (`gta4-metal`, `gta4-native`, `xenos`); restart required |
 | `--resolution=1440p` | Render resolution preset; `--video_mode_width/height` for an exact size |
-| `--gta4_performance_hud=true` | Apple's Metal Performance HUD (fps, GPU time, frame graph) |
+| `--gta4_performance_hud=on` | Apple's Metal Performance HUD (fps, GPU time, frame graph); `off` hides it for this game when it is on for every app (`MTL_HUD_ENABLED`), `system` (the default) leaves it as macOS is set |
 | `--diagnostics=true --diagnostics_categories=logging,presenter` | Text log plus the presenter/frame-pacer trace |
 
 ## Settings and performance
@@ -362,7 +362,7 @@ upstream's design.
 
 This fork, free-roam driving on a **MacBook Air (Apple M4, 16 GB, macOS 26.6)** with the native Metal
 renderer, `resolution = "1440p"` and the port's default draw-distance/population settings. The
-overlay is Apple's Metal Performance HUD (`gta4_performance_hud = true`). Its resolution line is the
+overlay is Apple's Metal Performance HUD (`gta4_performance_hud = "on"`). Its resolution line is the
 Metal layer the frame is presented on (the display's 3840×2486 backing store, a 2880×1864 panel in a
 scaled mode), not the render size: the game renders at 2224×1440 and the presenter upscales it.
 
