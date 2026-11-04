@@ -31,6 +31,11 @@
 #include "guest_output_context.h"
 #include "ui_draw_context.h"
 
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_even_pairs, false, "GPU/Metal",
+                    "Frame generation: show a pair's real image as long after its generated image as the "
+                    "generated one came after the previous real image (rounded to the nearest refresh), "
+                    "instead of on the fixed half-interval timeline, which shortens the pair after a late "
+                    "generated image");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_presented_image, true, "GPU/Metal",
     "Reuse the processed game image during repeated UI presentations");
 REXCVAR_DEFINE_BOOL(gta4_metal_fuse_hdr_output, true, "GTA IV/Metal",
@@ -164,6 +169,7 @@ struct MetalPresenter::State {
   GuestOutputProperties pending_properties{};
   GuestOutputPaintConfig pending_configuration{};
   uint64_t pending_surface_epoch=0,last_generated_publication=0;
+  uint64_t last_real_target_ns=0;  // display target of the last real image (even_pairs)
   std::atomic<uint64_t> generated_images{0};
   uint64_t next_output_version = 0;
   uint64_t last_extent_trace_frame = UINT64_MAX;
@@ -897,6 +903,23 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     state_->CancelPaintTimer();
     const uint64_t serial = properties.provenance.publication_serial;
     // Inactive/blank publications also need acknowledgment; screenshots do not.
+    // even_pairs: the generated image is the midpoint in game time, so the real image after it
+    // should stay as long after it as it came after the previous real one (a late generated image
+    // otherwise gets a long interval and its real image a short one). Bounded to [h, 2h] for the
+    // half interval h, and rounded to the nearest refresh (the slot is biased half a refresh early,
+    // and the first opportunity at or after it is taken).
+    if(state_->vsync&&state_->display_target_ns&&rex::cvar::Query<bool>("gta4_metalfx_frame_generation_even_pairs")){
+      if(generated&&selected_pair->interval_ns){
+        const uint64_t h=selected_pair->interval_ns,target=state_->display_target_ns;
+        const uint64_t since=state_->last_real_target_ns&&target>state_->last_real_target_ns?
+            target-state_->last_real_target_ns:0;
+        uint64_t hold=since&&since<=3*h?std::clamp(since,h,2*h):h;
+        const uint64_t refresh=state_->screen_rate?1'000'000'000ull/state_->screen_rate:0;
+        if(refresh&&hold>refresh)hold-=refresh/2;
+        frame_pacer().SetNextFromDisplayTarget(hold);
+      }
+    }
+    if(!generated)state_->last_real_target_ns=state_->display_target_ns;
     if(generated){
       state_->pending_pair=selected_pair;state_->pending_properties=properties;state_->pending_configuration=configuration;
       state_->pending_surface_epoch=state_->surface_epoch;state_->last_generated_publication=serial;

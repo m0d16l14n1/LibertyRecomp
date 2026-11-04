@@ -149,6 +149,26 @@ Uncommitted batch, to build and bench together:
    - WindowServer used 83-95% of the GPU (ioreg `AppUsage` `accumulatedGPUTime`) with the game closed,
      from about 22:10. The fps numbers of these runs are void.
 
+10. **Pair pacing ("jitter").** `FramePacer::Queued` placed each slot one period after the planned
+    slot. A generated image shown late therefore got a long interval, and its real image a short one,
+    for example 50 ms then 16.7 ms on 60 Hz.
+    - CAMetalDisplayLink drawables cannot be presented at a set time, so the only levers are which
+      refresh shows which image and how the timeline advances.
+    - `gta4_metalfx_frame_generation_even_pairs` (off) holds the real image as long after the
+      generated one as that came after the previous real image. The hold is bounded to [h, 2h] and
+      rounded to the nearest refresh.
+    - Drive A/B under GPU contention, averaged over the frame-generation windows:
+
+      | even pairs | interval sd | interval mean | shown fps |
+      |---|---|---|---|
+      | off | 8.0 ms | 23.6 ms | 35.6 |
+      | on | 5.2 ms | 19.9 ms | 44.5 |
+
+      The base fps differed between the runs, so this needs a clean bench before it becomes the
+      default.
+    - The `long=` counter (> 1.5 refreshes) counts every correct interval below 30 real fps, so watch
+      the mean and sd instead.
+
 ## Measurements so far
 
 The action pad, windowed, 2026-11-04. Both runs were taken while the Mac had 60 GB in swap, from guest-memory
