@@ -3,7 +3,12 @@
 #include <rex/logging.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <simd/simd.h>
 #include "projection.h"
+#include "../raytracing/ambient_occlusion.h"
+#include "../raytracing/raytracing.h"
+#include "../../../ui/metal/metal4_queue.h"
 #include "pass_tags.h"
 // Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): "++" (verified,
 // BACKLOG 86) passes it unchanged; "--", "-+", "+-" negate x and/or y.
@@ -132,6 +137,12 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
     config.output_width = config.input_width;
     config.output_height = config.input_height;
   }
+  // MetalFX's denoised scaler in place of the temporal scaler: ray tracing on, Metal 4, asked for,
+  // and supported. The ray-tracing hook then hands it the raw signal (draw.mm).
+  config.denoised = method == Method::kMetalFx && raytracing::MetalFxDenoiserRequested() &&
+                    raytracing::CurrentMode() != raytracing::Mode::kOff && ui::metal::IsMetal4(cb) &&
+                    MetalFxDenoiserUsable(context_->device, config.input_width, config.input_height,
+                                          config.output_width, config.output_height);
   metadata = {};
   metadata.sequence = c.sequence;
   metadata.epoch = c.epoch;
@@ -361,8 +372,21 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
       [copy copyFromTexture:inputs.reactive toTexture:reactive_snapshot];
       [copy endEncoding];
     }
-    if (aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
-        aa_.Encode(cb, inputs, metadata, resolved_, error)) {
+    if (config.denoised) {
+      // Row-vector (D3D) matrices are the transposes of column-vector ones, so their 16 floats read
+      // as simd columns directly. actual_inverse is camera-to-world; world-to-view is its inverse.
+      simd_float4x4 camera_to_world, projection;
+      std::memcpy(&camera_to_world, actual_inverse.data(), sizeof(camera_to_world));
+      std::memcpy(&projection, actual_projection.data(), sizeof(projection));
+      const simd_float4x4 world_to_view = simd_inverse(camera_to_world);
+      std::memcpy(inputs.world_to_view.data(), &world_to_view, sizeof(world_to_view));
+      std::memcpy(inputs.view_to_clip.data(), &projection, sizeof(projection));
+    }
+    const bool anti_aliased =
+        aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
+        aa_.Encode(cb, inputs, metadata, resolved_, error);
+    if (std::string notice = aa_.TakeNotice(); !notice.empty()) REXLOG_INFO("{}", notice);
+    if (anti_aliased) {
       KeepUntilCompleted(cb, resolved_.lease);
       resolved = true;
       return resolved_.color;
@@ -669,6 +693,7 @@ void Live::End() {
   motion_coverage_complete = true;
   jitter_decided = jitter_eligible = false;
   inputs.exposure = nil;
+  inputs.diffuse_albedo = inputs.specular_albedo = inputs.normal = inputs.roughness = nil;
   ui_exact = true;
   main_view = false;
   execution_scene_geometry = execution_screen_space = execution_attributed = false;

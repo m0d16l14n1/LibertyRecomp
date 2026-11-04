@@ -12,8 +12,13 @@ Settings:
   - `multiply`: the whole global contribution is multiplied by AO, scaled by `_ao_strength`;
   - `show`: AO in grey instead of the lighting;
   - `debug`: world-position stripes, near hits and long-ray hit distance;
+  - `guides`: the MetalFX denoiser's guides in four half-size quadrants: diffuse albedo (top left),
+    normal * 0.5 + 0.5 (top right), specular albedo (bottom left), roughness (bottom right). Works with the
+    denoiser on or off;
   - `none`: trace only, for timing.
 - `gta4_metal_raytracing_ao_normals = depth | gbuffer | gbuffer-yx`: where surface normals come from.
+- `gta4_metal_raytracing_denoiser = native | metalfx` (default `native`): `metalfx` hands the AO to MetalFX's
+  denoised scaler instead of our filters (see "MetalFX denoised scaler" below).
 - `gta4_metal_raytracing_ao_radius` (2 m), `_ao_occlusion` (0.85, AO term darkness), `_ao_strength` (0.6, multiply only).
 - `gta4_metal_raytracing_shadow_view`:
   - `combine` (default): the lighting shader takes min(cascade, traced);
@@ -137,12 +142,37 @@ So ray tracing runs once the G-buffer is complete, just before that lighting dra
 3. `rtao_atrous`: two edge-aware passes (steps 1 and 2). Short histories are filtered harder.
 4. `rtao_upsample`: depth-aware 2x2 upsample to input resolution.
 
-`MTLFXTemporalDenoisedScaler` (macOS 26) denoises and upscales noisy *lit colour*. It needs
-colour, depth, motion, diffuse and specular albedo, normals and roughness, plus the view and
-projection matrices. It would replace `MTLFXTemporalScaler` rather than sit beside it. Our own
-AO denoiser keeps the existing scaler and frame-generation path unchanged and also works with
-MetalFX off. Trying the denoised scaler as the upscaler when ray tracing is on is a later,
-measured experiment.
+### MetalFX denoised scaler (`gta4_metal_raytracing_denoiser = metalfx`)
+
+`MTL4FXTemporalDenoisedScaler` (macOS 26) denoises and upscales noisy *lit colour*: it replaces the
+MetalFX temporal scaler, it does not filter an AO texture. So the AO goes into the lighting raw and the
+scaler gets the lit image with the noise inside, plus guides to tell texture detail from noise.
+
+It runs only when all of these hold, otherwise everything stays as above (our filters, the plain scaler):
+`gta4_native_anti_aliasing` resolves to the MetalFX upscaler, `gta4_metal_api = metal4`, ray tracing on,
+and `+[MTLFXTemporalDenoisedScalerDescriptor supportsMetal4FX:]` with the scale inside its range. A failed
+creation is logged once (`gta4-metal-denoiser: ... creation failed`) and latches the plain scaler.
+
+- AO: `rtao_trace_full`, one cosine ray per *input* pixel (4x today's half-resolution rays), written
+  straight to the AO texture. No temporal, a-trous or upsample pass. The ambient AO variant applies it.
+- Guides, `rt_denoise_guides` at the lighting hook, from the lighting draw's G-buffer (input resolution):
+  - diffuse albedo RGBA8Unorm: `t0.zyx`;
+  - specular albedo RGBA8Unorm: `t2.rrr` (the specular intensity, grey);
+  - normal RGBA16Float: `t1 * 2 - 1`, world space, Z up, the same `_ao_normals` swizzle as the trace;
+  - roughness R16Float: Blinn-Phong exponent `n = 512 * t2.g^2`, the decode in the lighting PS
+    `7B14CAC2A31D4199` (`r4.y * r4.y * c248.z`, c248.z = 512); `alpha^2 = 2 / (n + 2)`, perceptual
+    roughness `alpha^0.5`.
+  Frames without the hook (no lighting draw) use neutral guides: grey albedo, no specular, +Z, rough.
+- Matrices: `worldToViewMatrix` = inverse of the camera-to-world (`actual_inverse`), `viewToClipMatrix` =
+  `actual_projection`. Both are row-vector D3D matrices, so their 16 floats are the column-major simd form.
+- Everything else as the temporal scaler: depth, motion, reactive mask, exposure, jitter, history reset.
+- Log: `gta4-metal-denoiser frames= neutral-guide-frames= reset=` on the first two frames and every 300th.
+- Sun shadows keep our own filters for now (their upsample carries the replace flag).
+
+To check on a drive: the creation line, `neutral-guide-frames` staying near 0 in the city, AO contact
+detail without crawling, and the GPU time against `native` (4x AO rays, one MetalFX pass instead of
+four of ours plus the scaler). Things to tune if the image is wrong (check with `_ao_view = guides`): the normal
+swizzle, and the matrix handedness (D3D view space looks down +z).
 
 ## Open questions (need a diagnostic run)
 

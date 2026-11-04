@@ -10,7 +10,8 @@
 
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing_ao_view, "apply", "GPU",
     "Ray-traced AO output: apply (darken the lit image), show (AO in grey instead of lighting), "
-    "debug (r = world x / 10, g = hit within radius, b = long-ray hit distance) or none (trace only)");
+    "debug (r = world x / 10, g = hit within radius, b = long-ray hit distance), guides (the MetalFX "
+    "denoiser's guides: diffuse | normal over specular | roughness) or none (trace only)");
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing_ao_normals, "gbuffer", "GPU",
     "Ray-traced AO surface normals: depth (reconstructed), gbuffer (GBufferTextureSampler1 rgb) or gbuffer-yx");
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_radius, 2.0, "GPU", "Ray-traced AO ray length in metres")
@@ -18,6 +19,10 @@ REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_radius, 2.0, "GPU", "Ray-traced A
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_occlusion, 0.85, "GPU",
     "Ray-traced AO: how dark a contact hit is in the AO term (0-1)")
     .range(0.0, 1.0);
+REXCVAR_DEFINE_STRING(gta4_metal_raytracing_denoiser, "native", "GPU",
+    "Ray-traced lighting denoiser: native (our temporal + a-trous filters) or metalfx (Metal 4 only: "
+    "MTL4FXTemporalDenoisedScaler replaces the MetalFX temporal scaler and takes the raw signal; needs "
+    "gta4_native_anti_aliasing on MetalFX and gta4_metal_api = metal4, otherwise native)");
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_strength, 0.6, "GPU",
     "Ray-traced AO: how much of the AO term darkens the lit image (0-1)")
     .range(0.0, 1.0);
@@ -28,13 +33,18 @@ AoSettings CurrentAoSettings() {
   AoSettings settings;
   const auto view = rex::cvar::GetFlagByName("gta4_metal_raytracing_ao_view");
   settings.view = view == "show" ? AoView::kShow : view == "debug" ? AoView::kDebug
-                : view == "none" ? AoView::kNone : view == "multiply" ? AoView::kMultiply : AoView::kApply;
+                : view == "none" ? AoView::kNone : view == "multiply" ? AoView::kMultiply
+                : view == "guides" ? AoView::kGuides : AoView::kApply;
   const auto normals = rex::cvar::GetFlagByName("gta4_metal_raytracing_ao_normals");
   settings.normal_mode = normals == "gbuffer" ? 1u : normals == "gbuffer-yx" ? 2u : 0u;
   settings.radius = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_radius"));
   settings.occlusion = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_occlusion"));
   settings.apply_strength = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_strength"));
   return settings;
+}
+
+bool MetalFxDenoiserRequested() {
+  return rex::cvar::GetFlagByName("gta4_metal_raytracing_denoiser") == "metalfx";
 }
 
 namespace {
@@ -60,6 +70,8 @@ struct AmbientOcclusion::Impl {
   id<MTLDevice> device = nil;
   id<MTLLibrary> library = nil;
   id<MTLComputePipelineState> trace = nil, temporal = nil, atrous = nil, upsample = nil;
+  id<MTLComputePipelineState> trace_full = nil, guides = nil;  // the MetalFX denoiser's raw AO and guides
+  DenoiseGuides guide;                                          // input size
   id<MTLComputePipelineState> debug_trace = nil, debug_ao = nil, debug_positions = nil;
   id<MTLTexture> debug = nil;  // trace size, see rtao_debug_trace
   id<MTLTexture> no_normals = nil, no_motion = nil;  // bound where the kernels take an unused input
@@ -71,7 +83,7 @@ struct AmbientOcclusion::Impl {
   uint64_t frames = 0;
   CpuTime encode_time;
   simd_float4x4 previous_clip_to_world = matrix_identity_float4x4;
-  std::unordered_map<uint64_t, id<MTLRenderPipelineState>> apply;  // (format << 2) | view
+  std::unordered_map<uint64_t, id<MTLRenderPipelineState>> apply;  // (format << 3) | view
 
   id<MTLComputePipelineState> Kernel(NSString* name, std::string& error) {
     id<MTLFunction> function = [library newFunctionWithName:name];
@@ -99,13 +111,14 @@ struct AmbientOcclusion::Impl {
   }
   id<MTLRenderPipelineState> ApplyPipeline(MTLPixelFormat format, AoView view, std::string& error) {
     if (view == AoView::kMultiply) view = AoView::kApply;  // the same multiply pipeline
-    const bool show = view == AoView::kShow || view == AoView::kDebug;
-    const uint64_t key = uint64_t(format) << 2 | uint64_t(view);
+    const bool show = view == AoView::kShow || view == AoView::kDebug || view == AoView::kGuides;
+    const uint64_t key = uint64_t(format) << 3 | uint64_t(view);
     if (auto found = apply.find(key); found != apply.end()) return found->second;
     auto* descriptor = [MTLRenderPipelineDescriptor new];
     descriptor.label = show ? @"Liberty RTAO show" : @"Liberty RTAO apply";
     descriptor.vertexFunction = [library newFunctionWithName:@"rtao_apply_vertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:view == AoView::kDebug ? @"rtao_apply_debug"
+    descriptor.fragmentFunction = [library newFunctionWithName:view == AoView::kGuides ? @"rtao_apply_guides"
+                                                              : view == AoView::kDebug ? @"rtao_apply_debug"
                                                               : show ? @"rtao_apply_show" : @"rtao_apply_multiply"];
     auto* color = descriptor.colorAttachments[0];
     color.pixelFormat = format;
@@ -146,7 +159,8 @@ bool AmbientOcclusion::Initialize(id<MTLDevice> device, std::string& error) {
   if (!(s.trace = s.Kernel(@"rtao_trace", error)) || !(s.temporal = s.Kernel(@"rtao_temporal", error)) ||
       !(s.atrous = s.Kernel(@"rtao_atrous", error)) || !(s.upsample = s.Kernel(@"rtao_upsample", error)) ||
       !(s.debug_trace = s.Kernel(@"rtao_debug_trace", error)) || !(s.debug_ao = s.Kernel(@"rtao_debug_ao", error)) ||
-      !(s.debug_positions = s.Kernel(@"rtao_debug_positions", error)))
+      !(s.debug_positions = s.Kernel(@"rtao_debug_positions", error)) ||
+      !(s.trace_full = s.Kernel(@"rtao_trace_full", error)) || !(s.guides = s.Kernel(@"rt_denoise_guides", error)))
     return false;
   s.no_normals = Texture(device, MTLPixelFormatRGBA8Unorm, 1, 1, @"Liberty RTAO no normals");
   s.no_motion = Texture(device, MTLPixelFormatRG16Float, 1, 1, @"Liberty RTAO no motion");
@@ -190,6 +204,27 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
     [e endEncoding];
     return true;
   };
+  if (settings.raw) {
+    // MetalFX's denoised scaler filters the lit colour: one ray per pixel, nothing of ours.
+    id<MTLAccelerationStructure> scene = frame.scene;
+    id<MTLHeap> structures = frame.structures;
+    id<MTLTexture> depth = frame.depth, normals = frame.normals ? frame.normals : s.no_normals, ao = s.ao;
+    if (!pass(@"Liberty RTAO raw trace", s.trace_full, s.width, s.height, ^(id<MTLComputeCommandEncoder> e) {
+          if (structures) [e useHeap:structures];
+          [e useResource:scene usage:MTLResourceUsageRead];
+          [e setAccelerationStructure:scene atBufferIndex:1];
+          [e setTexture:depth atIndex:0];
+          [e setTexture:normals atIndex:1];
+          [e setTexture:ao atIndex:2];
+        })) {
+      error = "ray-traced AO compute encoder unavailable";
+      return nil;
+    }
+    std::memcpy(&s.previous_clip_to_world, frame.clip_to_world.data(), sizeof(s.previous_clip_to_world));
+    s.history_valid = false;  // our filters have no history of this run when they come back
+    ++s.frames;
+    return s.ao;
+  }
   const NSUInteger tw = s.raw.width, th = s.raw.height;
   id<MTLAccelerationStructure> scene = frame.scene;
   id<MTLHeap> structures = frame.structures;
@@ -311,7 +346,11 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   if (settings.view == AoView::kNone || !target || !ao || target.width != ao.width || target.height != ao.height ||
       target.sampleCount != 1)
     return true;
-  const bool show = settings.view == AoView::kShow || settings.view == AoView::kDebug;
+  const bool guides = settings.view == AoView::kGuides;
+  if (guides && (!s.guide.diffuse_albedo || s.guide.diffuse_albedo.width != target.width ||
+                 s.guide.diffuse_albedo.height != target.height))
+    return true;  // no guides of this size yet (EncodeGuides runs at the lighting hook)
+  const bool show = settings.view == AoView::kShow || settings.view == AoView::kDebug || guides;
   id<MTLRenderPipelineState> pipeline = s.ApplyPipeline(target.pixelFormat, settings.view, error);
   if (!pipeline) return false;
   auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -322,7 +361,12 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   if (!e) { error = "ray-traced AO apply pass unavailable"; return false; }
   e.label = show ? @"Liberty RTAO show" : @"Liberty RTAO apply";
   [e setRenderPipelineState:pipeline];
-  [e setFragmentTexture:settings.view == AoView::kDebug && s.debug ? s.debug : ao atIndex:0];
+  if (guides) {
+    id<MTLTexture> textures[4] = {s.guide.diffuse_albedo, s.guide.specular_albedo, s.guide.normal, s.guide.roughness};
+    [e setFragmentTextures:textures withRange:NSMakeRange(0, 4)];
+  } else {
+    [e setFragmentTexture:settings.view == AoView::kDebug && s.debug ? s.debug : ao atIndex:0];
+  }
   const float strength = settings.apply_strength;
   if (!show) [e setFragmentBytes:&strength length:sizeof(strength) atIndex:0];
   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -330,8 +374,57 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   return true;
 }
 
+bool AmbientOcclusion::EncodeGuides(id<MTLCommandBuffer> commands, id<MTLTexture> albedo, id<MTLTexture> normals,
+                                    id<MTLTexture> specular, const AoSettings& settings, DenoiseGuides& guides,
+                                    std::string& error) {
+  auto& s = *impl_;
+  guides = {};
+  if (!s.guides || !albedo || !normals || !specular) return false;
+  const NSUInteger w = albedo.width, h = albedo.height;
+  for (id<MTLTexture> t : {albedo, normals, specular})
+    if (t.width != w || t.height != h || t.sampleCount != 1 || t.textureType != MTLTextureType2D ||
+        !(t.usage & MTLTextureUsageShaderRead))
+      return false;
+  if (!s.guide.diffuse_albedo || s.guide.diffuse_albedo.width != w || s.guide.diffuse_albedo.height != h) {
+    const auto make = [&](MTLPixelFormat format, NSString* label) {
+      auto* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:w height:h mipmapped:NO];
+      descriptor.storageMode = MTLStorageModePrivate;
+      descriptor.hazardTrackingMode = MTLHazardTrackingModeTracked;  // the temporal input contract
+      descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      id<MTLTexture> texture = [s.device newTextureWithDescriptor:descriptor];
+      texture.label = label;
+      return texture;
+    };
+    s.guide.diffuse_albedo = make(MTLPixelFormatRGBA8Unorm, @"Liberty denoise diffuse albedo");
+    s.guide.specular_albedo = make(MTLPixelFormatRGBA8Unorm, @"Liberty denoise specular albedo");
+    s.guide.normal = make(MTLPixelFormatRGBA16Float, @"Liberty denoise normals");
+    s.guide.roughness = make(MTLPixelFormatR16Float, @"Liberty denoise roughness");
+    if (!s.guide.diffuse_albedo || !s.guide.specular_albedo || !s.guide.normal || !s.guide.roughness) {
+      s.guide = {};
+      error = "denoiser guide allocation failed";
+      return false;
+    }
+  }
+  RtaoParams p{};
+  p.input_size = simd_make_uint2(uint32_t(w), uint32_t(h));
+  p.normal_mode = settings.normal_mode;
+  id<MTLComputeCommandEncoder> e = [commands computeCommandEncoder];
+  if (!e) { error = "denoiser guide encoder unavailable"; return false; }
+  e.label = @"Liberty denoise guides";
+  [e setComputePipelineState:s.guides];
+  [e setBytes:&p length:sizeof(p) atIndex:0];
+  id<MTLTexture> textures[7] = {albedo, normals, specular, s.guide.diffuse_albedo, s.guide.specular_albedo,
+                                s.guide.normal, s.guide.roughness};
+  [e setTextures:textures withRange:NSMakeRange(0, 7)];
+  Dispatch(e, s.guides, w, h);
+  [e endEncoding];
+  guides = s.guide;
+  return true;
+}
+
 void AmbientOcclusion::Reset() {
   auto& s = *impl_;
+  s.guide = {};
   s.raw = s.ao = s.debug = nil;
   s.history[0] = s.history[1] = s.filter[0] = s.filter[1] = nil;
   s.width = s.height = 0;

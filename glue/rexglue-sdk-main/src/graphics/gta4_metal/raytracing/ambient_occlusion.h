@@ -21,15 +21,31 @@ namespace rex::graphics::gta4_metal::raytracing {
 // fragment texture 0), or the multiply when that pipeline is not available.
 // multiply: always the full-screen multiply of the whole global contribution.
 // debug: r = fract(world.x / 10), g = AO ray hit within the radius, b = long-ray hit distance.
-enum class AoView : uint8_t { kApply, kShow, kDebug, kNone, kMultiply };
+// guides: the MetalFX denoiser's guides in four quadrants (diffuse, normal / specular, roughness).
+enum class AoView : uint8_t { kApply, kShow, kDebug, kNone, kMultiply, kGuides };
 struct AoSettings {
   AoView view = AoView::kApply;
   float radius = 2.0f;          // world units (metres)
   float occlusion = 0.85f;      // how dark a contact hit gets in the AO term
   float apply_strength = 0.6f;  // multiply apply only: how much of the AO term reaches the lit image
   uint32_t normal_mode = 0;     // gta4_metal_raytracing_ao_normals: 0 depth, 1 gbuffer, 2 gbuffer-yx
+  // The caller sets this while MetalFX's denoised scaler is the frame's temporal upscaler: one ray
+  // per input pixel and no filtering of our own (the scaler denoises the lit colour).
+  bool raw = false;
 };
 AoSettings CurrentAoSettings();  // the cvars; read once per frame by the caller
+
+// gta4_metal_raytracing_denoiser = native | metalfx. metalfx asks for MTL4FXTemporalDenoisedScaler
+// in place of the MetalFX temporal scaler (temporal::Live decides whether it can run).
+bool MetalFxDenoiserRequested();
+
+// Guides for MTLFXTemporalDenoisedScaler at input resolution (rt_denoise_guides in rtao.metal).
+struct DenoiseGuides {
+  id<MTLTexture> diffuse_albedo = nil;   // RGBA8Unorm
+  id<MTLTexture> specular_albedo = nil;  // RGBA8Unorm
+  id<MTLTexture> normal = nil;           // RGBA16Float, world space, Z up
+  id<MTLTexture> roughness = nil;        // R16Float, perceptual
+};
 
 struct AoFrame {
   id<MTLAccelerationStructure> scene = nil;  // Capture::EncodeScene()
@@ -67,6 +83,11 @@ class AmbientOcclusion {
   // kDebug draws the debug texture instead of `ao`.
   bool Apply(id<MTLCommandBuffer> commands, id<MTLTexture> target, id<MTLTexture> ao, const AoSettings& settings,
              std::string& error);
+  // Outside any encoder. The lighting draw's G-buffer (t0 albedo, t1 normals, t2 specular), all at
+  // one size. Returns guides of that size, or false (with `error` only on an encoder failure).
+  bool EncodeGuides(id<MTLCommandBuffer> commands, id<MTLTexture> albedo, id<MTLTexture> normals,
+                    id<MTLTexture> specular, const AoSettings& settings, DenoiseGuides& guides,
+                    std::string& error);
   void Reset();  // drops history and textures (device loss, mode change)
 
   uint64_t traced_frames() const;

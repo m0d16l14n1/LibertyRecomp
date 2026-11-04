@@ -1,6 +1,7 @@
 #pragma once
 #import <Metal/Metal.h>
 
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -19,6 +20,12 @@ struct Inputs {
   // Optional GPU-produced 1x1 R16Float MetalFX exposure. Scalar Frame::exposure
   // remains the fallback for callers without a title exposure texture.
   id<MTLTexture> exposure = nil;
+  // Denoised scaler only (Configuration::denoised), at input resolution: RGBA8Unorm diffuse and
+  // specular albedo, RGBA16Float world normal, R16Float perceptual roughness. Missing guides
+  // fall back to neutral ones (grey albedo, +Z normal, no specular, rough).
+  id<MTLTexture> diffuse_albedo = nil, specular_albedo = nil, normal = nil, roughness = nil;
+  // Column-major (simd) world-to-view and view-to-clip; the denoised scaler requires them.
+  std::array<float, 16> world_to_view{}, view_to_clip{};
 };
 // Keep the lease through the LAST consumer submission. Holding it prevents
 // output-slot recycling; KeepUntilCompleted transfers this duty to a command.
@@ -47,6 +54,10 @@ struct Capabilities {
   float minimum_scale = 1, maximum_scale = 1;
 };
 Capabilities QueryCapabilities(id<MTLDevice> device);
+// MTL4FXTemporalDenoisedScaler: the device supports it on Metal 4 for this scale, and no creation
+// has failed in this process (a failure latches: callers configure the plain scaler instead).
+bool MetalFxDenoiserUsable(id<MTLDevice> device, uint32_t input_width, uint32_t input_height,
+                           uint32_t output_width, uint32_t output_height);
 // Diagnostic: negate the jitter MetalFX receives along x and/or y (gta4_metalfx_jitter_sign).
 void SetMetalFxJitterSign(bool negate_x, bool negate_y);
 // Includes device alignment, not just texel payload. Keeps each effect within
@@ -67,10 +78,14 @@ class AntiAliasing {
   bool Encode(id<MTLCommandBuffer>, const Inputs&, const Frame&, Output&, std::string&);
   void Reset();
   size_t owned_bytes() const;
+  // A line for the caller to log (this library does not log): the denoised scaler's creation,
+  // its creation failure, and its periodic statistics. Empty when there is none.
+  std::string TakeNotice();
 
  private:
   struct State;
   std::unique_ptr<State> state_;
+  std::string notice_;
   id<MTLDevice> rejected_device_ = nil;
   id<MTLLibrary> rejected_library_ = nil;
   Configuration rejected_config_{};

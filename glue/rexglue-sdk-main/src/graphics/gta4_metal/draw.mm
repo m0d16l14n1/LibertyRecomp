@@ -1084,7 +1084,19 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         f.captured_positions=raytracing_capture.positions(f.captured_vertices);
         if(ao_lighting){
           raytracing_ao_settings=raytracing::CurrentAoSettings();
+          // MetalFX's denoised scaler is this frame's upscaler: the raw AO, and its guides.
+          raytracing_ao_settings.raw=temporal.active&&temporal.config.denoised;
           raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
+          raytracing::DenoiseGuides guides;
+          // Also for the guides view (gta4_metal_raytracing_ao_view = guides), denoiser on or off.
+          if((raytracing_ao_settings.raw||raytracing_ao_settings.view==raytracing::AoView::kGuides)&&rt_error.empty()&&
+             raytracing_ao.EncodeGuides(commands,sampled_images[0],sampled_images[1],sampled_images[2],
+                                        raytracing_ao_settings,guides,rt_error)){
+            if(raytracing_ao_settings.raw){
+            temporal.inputs.diffuse_albedo=guides.diffuse_albedo; temporal.inputs.specular_albedo=guides.specular_albedo;
+            temporal.inputs.normal=guides.normal; temporal.inputs.roughness=guides.roughness;
+            }
+          }
         }
         if(shadow_lighting&&rt_error.empty()){
           // gDirectionalLight is pixel c17 of this draw (lightShadowDirectional); lightNoDirectional
