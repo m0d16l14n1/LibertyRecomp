@@ -63,6 +63,9 @@ struct AccelerationStructureOp {
   id<MTLBuffer> scratch = nil;
   NSUInteger scratch_offset = 0;
   TriangleGeometry geometry;  // primitive ops
+  // Refits: the structure's own descriptor (Capture keeps one per structure and points it at
+  // this frame's positions); nil makes one from `geometry`.
+  MTLPrimitiveAccelerationStructureDescriptor* descriptor = nil;
   bool refittable = true;     // primitive builds: allow later refits
   bool fast_build = false;    // primitive builds: movers trade trace speed for build speed
   // kBuildInstances: MTLIndirectAccelerationStructureInstanceDescriptor array. Instances
@@ -88,6 +91,9 @@ MTLInstanceAccelerationStructureDescriptor* InstanceDescriptor(id<MTLBuffer> ins
 // An identity-transform, opaque instance of `structure` (captured positions are world space).
 // `mask`: kInstanceMask* (shadow_policy.h); rays test it against their own mask.
 void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, id<MTLAccelerationStructure> structure,
+                  uint32_t user_id, uint32_t mask = 0xFF);
+// The same from the structure's gpuResourceID, read once when it was made (no message per frame).
+void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, MTLResourceID structure,
                   uint32_t user_id, uint32_t mask = 0xFF);
 
 }  // namespace rex::graphics::gta4_metal::raytracing

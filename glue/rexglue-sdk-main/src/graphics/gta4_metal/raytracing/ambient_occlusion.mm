@@ -69,6 +69,7 @@ struct AmbientOcclusion::Impl {
   uint32_t current = 0;
   bool history_valid = false;
   uint64_t frames = 0;
+  CpuTime encode_time;
   simd_float4x4 previous_clip_to_world = matrix_identity_float4x4;
   std::unordered_map<uint64_t, id<MTLRenderPipelineState>> apply;  // (format << 2) | view
 
@@ -129,6 +130,7 @@ AmbientOcclusion::AmbientOcclusion() : impl_(std::make_unique<Impl>()) {}
 AmbientOcclusion::~AmbientOcclusion() = default;
 bool AmbientOcclusion::initialized() const { return impl_->upsample != nil; }
 uint64_t AmbientOcclusion::traced_frames() const { return impl_->frames; }
+const CpuTime& AmbientOcclusion::encode_time() const { return impl_->encode_time; }
 
 bool AmbientOcclusion::Initialize(id<MTLDevice> device, std::string& error) {
   auto& s = *impl_;
@@ -156,6 +158,7 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
                                         const AoSettings& settings, std::string& error) {
   auto& s = *impl_;
   if (!s.upsample || !frame.scene || !frame.depth || frame.depth.sampleCount != 1) return nil;
+  ScopedCpuTime timed(s.encode_time);
   if (!s.Resize(frame.depth.width, frame.depth.height)) { error = "ray-traced AO texture allocation failed"; return nil; }
 
   RtaoParams p{};

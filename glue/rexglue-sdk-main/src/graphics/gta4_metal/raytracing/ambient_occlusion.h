@@ -8,6 +8,7 @@
 // global contribution (sun, ambient and reflection), mixed by a strength below 1. The
 // override will put it on the ambient term only.
 #import <Metal/Metal.h>
+#include "cpu_time.h"
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -69,6 +70,7 @@ class AmbientOcclusion {
   void Reset();  // drops history and textures (device loss, mode change)
 
   uint64_t traced_frames() const;
+  const CpuTime& encode_time() const;  // Encode(), CPU
 
  private:
   struct Impl;

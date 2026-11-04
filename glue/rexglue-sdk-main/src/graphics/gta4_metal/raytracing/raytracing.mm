@@ -51,6 +51,11 @@ MTLInstanceAccelerationStructureDescriptor* InstanceDescriptor(id<MTLBuffer> ins
 
 void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, id<MTLAccelerationStructure> structure,
                   uint32_t user_id, uint32_t mask) {
+  FillInstance(instance, structure.gpuResourceID, user_id, mask);
+}
+
+void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, MTLResourceID structure,
+                  uint32_t user_id, uint32_t mask) {
   instance = {};
   for (int column = 0; column < 4; ++column)
     for (int row = 0; row < 3; ++row) instance.transformationMatrix.columns[column].elements[row] = column == row ? 1.0f : 0.0f;
@@ -58,7 +63,7 @@ void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, 
   instance.mask = mask;
   instance.intersectionFunctionTableOffset = 0;
   instance.userID = user_id;
-  instance.accelerationStructureID = structure.gpuResourceID;
+  instance.accelerationStructureID = structure;
 }
 
 namespace {
@@ -76,7 +81,8 @@ bool EncodeOps(id<MTLAccelerationStructureCommandEncoder> encoder, std::span<con
       case AccelerationStructureOp::Kind::kRefitPrimitive:
         // The descriptor must describe the same topology the structure was built with.
         [encoder refitAccelerationStructure:op.source ? op.source : op.destination
-                                 descriptor:PrimitiveDescriptor(op.geometry, true, op.fast_build)
+                                 descriptor:op.descriptor ? op.descriptor
+                                                          : PrimitiveDescriptor(op.geometry, true, op.fast_build)
                                 destination:op.destination
                               scratchBuffer:op.scratch
                         scratchBufferOffset:op.scratch_offset];

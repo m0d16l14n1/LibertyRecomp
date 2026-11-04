@@ -53,6 +53,7 @@ class SunShadows {
   void Reset();  // drops history and textures (device loss, mode change)
 
   uint64_t traced_frames() const;
+  const CpuTime& encode_time() const;  // Encode(), CPU
 
  private:
   struct Impl;

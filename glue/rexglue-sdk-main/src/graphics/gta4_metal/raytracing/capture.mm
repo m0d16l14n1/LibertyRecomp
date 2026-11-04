@@ -15,6 +15,8 @@ struct Blas {
   id<MTLBuffer> indices = nil;  // persistent relative triangle list
   uint32_t first_vertex = 0, vertex_count = 0, triangle_count = 0;
   NSUInteger refit_scratch = 0;
+  MTLResourceID resource_id{};  // structure.gpuResourceID, read once at the build
+  MTLPrimitiveAccelerationStructureDescriptor* refit_descriptor = nil;  // re-pointed at each refit's positions
   uint32_t mask = kInstanceMaskOpaque;  // InstanceMaskOf(alpha tested), fixed at the build
 };
 NSUInteger AlignUp(NSUInteger value, NSUInteger alignment) { return (value + alignment - 1) / alignment * alignment; }
@@ -63,6 +65,11 @@ struct Capture::Impl {
   std::deque<std::pair<uint64_t, Blas>> retiring;  // released once the GPU cannot use them
   std::unordered_set<uint64_t> rejected;            // identities that cannot be captured
   uint64_t captured = 0, rejected_draws = 0;
+  CpuTime draw_time, scene_time;
+  // The instance structure's sizes for instance counts up to scene_sizes_count (rounded up, so
+  // the query runs when the scene grows past a 256 boundary, not every frame).
+  MTLAccelerationStructureSizes scene_sizes{};
+  NSUInteger scene_sizes_count = 0;
 
   NSUInteger AllocatePositions(uint32_t vertices) {
     // Packed (16-byte float4s): no gaps, so the whole used range is captured positions.
@@ -109,6 +116,8 @@ id<MTLHeap> Capture::heap() const { return impl_->heap; }
 const AccelStatistics& Capture::statistics() const { return impl_->cache.statistics(); }
 uint64_t Capture::captured_draws() const { return impl_->captured; }
 uint64_t Capture::rejected_draws() const { return impl_->rejected_draws; }
+const CpuTime& Capture::draw_time() const { return impl_->draw_time; }
+const CpuTime& Capture::scene_time() const { return impl_->scene_time; }
 
 void Capture::BeginFrame() {
   auto& s = *impl_;
@@ -140,6 +149,7 @@ id<MTLBuffer> Capture::positions(NSUInteger& vertices) const {
 bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
                    const std::function<void()>& select_pipeline, std::string& error) {
   auto& s = *impl_;
+  ScopedCpuTime timed(s.draw_time);
   // After EncodeScene the frame's structures are encoded: later draws (forward geometry after
   // the lighting) are left out of the scene.
   if (!s.frame_active || s.encoded || !draw.identity || !draw.count) return true;
@@ -208,6 +218,8 @@ bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
     blas.structure = placement.size ? [s.heap newAccelerationStructureWithSize:sizes.accelerationStructureSize] : nil;
     if (!blas.structure) { s.cache.Abandon(slot); return true; }  // heap fragmented or full: retried later
     blas.refit_scratch = sizes.refitScratchBufferSize;
+    blas.resource_id = blas.structure.gpuResourceID;
+    blas.refit_descriptor = PrimitiveDescriptor(geometry, true, fast);
     pending.op.kind = AccelerationStructureOp::Kind::kBuildPrimitive;
     pending.op.destination = blas.structure;
     pending.op.fast_build = fast;
@@ -218,6 +230,13 @@ bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
     pending.op.kind = AccelerationStructureOp::Kind::kRefitPrimitive;
     pending.op.destination = pending.op.source = blas.structure;
     pending.op.fast_build = draw.placement.dynamic;
+    // The build's own descriptor (same topology and usage), pointed at this frame's positions.
+    if (auto* d = blas.refit_descriptor) {
+      auto* triangles = static_cast<MTLAccelerationStructureTriangleGeometryDescriptor*>(d.geometryDescriptors[0]);
+      triangles.vertexBuffer = geometry.vertices;
+      triangles.vertexBufferOffset = geometry.vertex_offset;
+      pending.op.descriptor = d;
+    }
     pending.scratch_size = blas.refit_scratch;
   }
 
@@ -242,13 +261,17 @@ id<MTLAccelerationStructure> Capture::EncodeScene(id<MTLCommandBuffer> commands,
   if (s.encoded) return s.encoded;  // once per frame
   const auto& scene = s.cache.scene();
   if (scene.empty()) return nil;
+  ScopedCpuTime timed(s.scene_time);
 
   // One scratch buffer for the frame: each op gets its own aligned range.
   NSUInteger scratch_need = 0;
   for (auto& p : s.pending) { p.op.scratch_offset = scratch_need; scratch_need = AlignUp(scratch_need + p.scratch_size, 256); }
   const NSUInteger instance_bytes = scene.size() * sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
-  auto* instances_descriptor = InstanceDescriptor(nil, 0, uint32_t(scene.size()));
-  const auto scene_sizes = [s.device accelerationStructureSizesWithDescriptor:instances_descriptor];
+  if (scene.size() > s.scene_sizes_count) {
+    s.scene_sizes_count = AlignUp(scene.size(), 256);
+    s.scene_sizes = [s.device accelerationStructureSizesWithDescriptor:InstanceDescriptor(nil, 0, uint32_t(s.scene_sizes_count))];
+  }
+  const auto scene_sizes = s.scene_sizes;
   const NSUInteger scene_scratch = AlignUp(scratch_need, 256);
   scratch_need = scene_scratch + scene_sizes.buildScratchBufferSize;
   if (!s.slot->scratch || s.slot->scratch.length < scratch_need) {
@@ -266,7 +289,7 @@ id<MTLAccelerationStructure> Capture::EncodeScene(id<MTLCommandBuffer> commands,
     if (!s.slot->scene) { error = "ray-tracing scene allocation failed"; return nil; }
   }
   auto* instances = static_cast<MTLIndirectAccelerationStructureInstanceDescriptor*>(s.slot->instances.contents);
-  for (size_t i = 0; i < scene.size(); ++i) FillInstance(instances[i], scene[i]->payload.structure, uint32_t(i), scene[i]->payload.mask);
+  for (size_t i = 0; i < scene.size(); ++i) FillInstance(instances[i], scene[i]->payload.resource_id, uint32_t(i), scene[i]->payload.mask);
 
   std::vector<AccelerationStructureOp> primitives;
   primitives.reserve(s.pending.size());
@@ -308,6 +331,7 @@ void Capture::Reset() {
   s.rejected.clear();
   s.pending.clear();
   for (auto& slot : s.slots) { slot.scene = nil; slot.scratch = nil; slot.instances = nil; slot.positions_used = 0; }
+  s.scene_sizes_count = 0;
   s.frame_open = s.frame_active = false;
 }
 

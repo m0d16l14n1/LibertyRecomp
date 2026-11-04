@@ -7,6 +7,7 @@
 // and the instance structure through EncodeAccelerationStructureWork.
 #import <Metal/Metal.h>
 #include "accel_cache.h"
+#include "cpu_time.h"
 #include "capture_policy.h"
 #include "raytracing.h"
 #include <functional>
@@ -79,6 +80,8 @@ class Capture {
   const AccelStatistics& statistics() const;
   uint64_t captured_draws() const;
   uint64_t rejected_draws() const;
+  const CpuTime& draw_time() const;   // Draw(): per offered draw, replay included
+  const CpuTime& scene_time() const;  // EncodeScene(): instance fill and structure encodes
 
  private:
   struct Impl;

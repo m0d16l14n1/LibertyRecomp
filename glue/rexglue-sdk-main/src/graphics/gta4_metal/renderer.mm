@@ -572,6 +572,19 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
                   s.raytracing_ao.traced_frames(),s.raytracing_ao_lighting_draws,s.raytracing_ao_applied,
                   s.raytracing_ao_ambient_draws,s.raytracing_shadows.traced_frames(),s.raytracing_shadow_draws,
                   s.raytracing_shadow_shown);
+              // CPU per frame over this window: capture (every offered draw), scene encode, traces.
+              static raytracing::CpuTime last_draw,last_scene,last_ao,last_shadow;
+              const auto window=[](const raytracing::CpuTime& now,raytracing::CpuTime& last){
+                const double us=double(now.ns-last.ns)/1000.0/300.0; const uint64_t calls=now.calls-last.calls;
+                last=now; return std::pair<double,uint64_t>{us,calls};
+              };
+              const auto draw=window(s.raytracing_capture.draw_time(),last_draw);
+              const auto scene=window(s.raytracing_capture.scene_time(),last_scene);
+              const auto ao=window(s.raytracing_ao.encode_time(),last_ao);
+              const auto shadow=window(s.raytracing_shadows.encode_time(),last_shadow);
+              REXLOG_INFO("gta4-metal-raytracing-cpu: frame={} capture-us={:.1f} capture-calls={} scene-us={:.1f} "
+                  "ao-encode-us={:.1f} shadow-encode-us={:.1f} (per frame, last 300 frames)",t.metadata.sequence,
+                  draw.first,draw.second/300,scene.first,ao.first,shadow.first);
             }
           }
           if(c.sequence%60==0)REXLOG_INFO("gta4-temporal-begin sequence={} epoch={} view={:X} previous-sequence={} previous-view={:X} previous-world={} phase={}",c.sequence,c.epoch,c.view,t.metadata.sequence,t.metadata.view,t.world_draws,uint32_t(s.Phase()));
