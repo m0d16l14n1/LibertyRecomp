@@ -966,6 +966,17 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.aspectRatio = frame.aspect;
     fx.depthReversed = s.config.depth_reversed;
     fx.shouldResetHistory = decision.reset;
+    if (@available(macOS 27.0, *)) {
+      // The interpolator derives camera-only motion from this pair; two identity matrices mean
+      // "not supplied" (the default, and what it gets with camera_matrices off).
+      simd_float4x4 world_to_view = matrix_identity_float4x4, view_to_clip = matrix_identity_float4x4;
+      if (in.camera_matrices) {
+        std::memcpy(&world_to_view, in.world_to_view.data(), sizeof(world_to_view));
+        std::memcpy(&view_to_clip, in.view_to_clip.data(), sizeof(view_to_clip));
+      }
+      fx.worldToViewMatrix = world_to_view;
+      fx.viewToClipMatrix = view_to_clip;
+    }
     if (native4) {
       // Native Metal 4: into the open MTL4 command buffer. The snapshot blit and the UI
       // composition above are earlier proxy encoders; EncodeMetal4's empty encoder waits for

@@ -35,6 +35,13 @@ REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_untracked_motion, "camera", 
                       "camera motion beyond)");
 REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_untracked_near, 15.0, "GPU",
                       "near-zero: view distance in metres within which untracked pixels get zero motion");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_camera_matrices, true, "GPU",
+                    "Frame generation: give MetalFX the camera's world-to-view and projection matrices "
+                    "(macOS 27), from which it derives camera-only motion");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_max_real_ms, 0.0, "GPU",
+                      "Frame generation: present real frames only while the smoothed real frame interval "
+                      "is above this many milliseconds (resumes below 85% of it; 0 off). Large real-frame "
+                      "motion is where the midpoint tears");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
                     "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
@@ -377,7 +384,8 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
       [copy copyFromTexture:inputs.reactive toTexture:reactive_snapshot];
       [copy endEncoding];
     }
-    if (config.denoised) {
+    if (config.denoised ||
+        (frame_generation && REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices))) {
       // Row-vector (D3D) matrices are the transposes of column-vector ones, so their 16 floats read
       // as simd columns directly. actual_inverse is camera-to-world; world-to-view is its inverse.
       simd_float4x4 camera_to_world, projection;
@@ -386,6 +394,7 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
       const simd_float4x4 world_to_view = simd_inverse(camera_to_world);
       std::memcpy(inputs.world_to_view.data(), &world_to_view, sizeof(world_to_view));
       std::memcpy(inputs.view_to_clip.data(), &projection, sizeof(projection));
+      camera_matrices_sequence_ = metadata.sequence;
     }
     const bool anti_aliased =
         aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
@@ -579,6 +588,22 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
     interpolation_.Reset();
     return true;
   }
+  // Too slow a real frame rate: the midpoint has to bridge large motion, where it tears (the
+  // road dragged under the player's car at 14 fps). The smoothed interval (8-frame average) with
+  // a 15% band keeps it from toggling every frame; an unknown interval keeps the last state.
+  if (const double max_ms = REXCVAR_GET(gta4_metalfx_frame_generation_max_real_ms); max_ms <= 0) {
+    slow_generation_ = false;
+  } else if (smoothed_interval_ns_) {
+    const double ms = double(smoothed_interval_ns_) * 1.0e-6;
+    if (ms > max_ms) slow_generation_ = true;
+    else if (ms < 0.85 * max_ms) slow_generation_ = false;
+  }
+  if (slow_generation_) {
+    generation_skip_reason = "real frame interval is above gta4_metalfx_frame_generation_max_real_ms";
+    ++slow_generation_skips;
+    interpolation_.Reset();
+    return true;
+  }
   bool camera_filled = false;
   const bool camera_fill = rex::cvar::Query<bool>("gta4_metalfx_frame_generation_camera_motion");
   if (camera_fill && world_draws && camera_transform_valid_ && !metadata.camera_cut) {
@@ -609,6 +634,8 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   f.color_domain = ColorDomain::kDisplayPerceptual;
   Inputs in = inputs;
   in.color = final_scene;
+  in.camera_matrices = REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices) &&
+                       camera_matrices_sequence_ == metadata.sequence;
   // present.mm composes the HUD over the scene into the real image (Compose writes every texel).
   UiInput ui{};
   ui.caller_writes_real = true;

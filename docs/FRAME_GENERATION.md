@@ -129,10 +129,21 @@ Uncommitted batch, to build and bench together:
      So it scales with the gap between real frames. Both slow runs were slow because of GPU contention
      (see below).
    - **The rotation limit** neither causes nor fixes this. It stays at 0 (off).
-   - **Mitigation candidates, untested:**
-     - skip interpolation when the real frame time is long, or when the motion's p99 is above a
-       threshold;
-     - mark large motion discontinuities as reactive.
+   - **Fix: give the interpolator the camera matrices** (`gta4_metalfx_frame_generation_camera_matrices`,
+     now on by default).
+     - `worldToViewMatrix`/`viewToClipMatrix` are new in macOS 27. The interpolator derives
+       camera-only motion from them; until now they stayed at identity, which means "not supplied".
+     - Same drive at 14-16 fps:
+       - without them, 5 of 18 dumps were bad (car-box p99 65-114);
+       - with them, 0 of 19 (worst p99 37).
+     - The bumper copy and the dragged block are gone. A faint smear under the bumper remains.
+   - **`gta4_metalfx_frame_generation_max_real_ms`** (0 = off): presents real frames only while the
+     smoothed real interval is above it. It resumes below 85% of the value, and the skips are counted
+     as `slow-skips=` in the `gta4-metal-temporal-frame` line. Verified: at 50 it skipped 430 frames
+     of a run at about 21 fps.
+   - The audit of the other interpolator inputs against `MTLFXFrameInterpolator.h` found no unit
+     errors: motion scale, deltaTime, near/far, the field of view in degrees, the aspect ratio and
+     the jitter are all right. The interpolator has no reactive-mask input.
    - `carmv.py` (motion magnitude in a fixed screen box) cannot see any of this: while driving, the box
      also holds the moving road.
    - WindowServer used 83-95% of the GPU (ioreg `AppUsage` `accumulatedGPUTime`) with the game closed,

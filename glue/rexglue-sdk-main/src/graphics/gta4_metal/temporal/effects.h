@@ -26,6 +26,9 @@ struct Inputs {
   id<MTLTexture> diffuse_albedo = nil, specular_albedo = nil, normal = nil, roughness = nil;
   // Column-major (simd) world-to-view and view-to-clip; the denoised scaler requires them.
   std::array<float, 16> world_to_view{}, view_to_clip{};
+  // world_to_view/view_to_clip hold this frame's camera: frame interpolation passes them too
+  // (gta4_metalfx_frame_generation_camera_matrices). False leaves the interpolator without them.
+  bool camera_matrices = false;
 };
 // Keep the lease through the LAST consumer submission. Holding it prevents
 // output-slot recycling; KeepUntilCompleted transfers this duty to a command.

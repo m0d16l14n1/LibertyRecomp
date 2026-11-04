@@ -65,6 +65,8 @@ class Live {
   uint64_t composite_shader = 0, filtered_composites = 0;
   // Frames generated with camera motion filled in for untracked world pixels.
   uint64_t camera_filled_frames = 0;
+  // Frames whose generation gta4_metalfx_frame_generation_max_real_ms refused (real frames too slow).
+  uint64_t slow_generation_skips = 0;
   uint32_t composite_scene_stage = 0;
   Frame metadata{};
   Configuration config{};
@@ -107,6 +109,8 @@ class Live {
   History camera_history_;
   bool background_history_valid_ = false, camera_transform_valid_ = false;
   uint64_t last_time_ns_ = 0, last_epoch_ = 0, last_view_ = 0, smoothed_interval_ns_ = 0;
+  uint64_t camera_matrices_sequence_ = 0;  // metadata.sequence whose matrices inputs holds
+  bool slow_generation_ = false;           // max_real_ms hysteresis state
   uint64_t uncovered_frames_ = 0;
   bool CreateImage(__strong id<MTLTexture>&, MTLPixelFormat, uint32_t, uint32_t, NSString*,
                    std::string&);
