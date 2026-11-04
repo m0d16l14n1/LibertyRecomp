@@ -15,7 +15,13 @@ void Initialize(id<MTLDevice> device, const std::string& csv_path);
 bool enabled();
 // Attach timestamp sampling to a render pass before its encoder is created.
 void Tag(MTLRenderPassDescriptor* pass, std::string category);
-// Hand every pass tagged since the previous commit to `commands`' completion handler.
+// The same for compute and blit passes (start and end of the encoder). The temporal passes
+// around MetalFX use these through temporal::SetPassTaggers, installed by Initialize.
+void Tag(MTLComputePassDescriptor* pass, std::string category);
+void Tag(MTLBlitPassDescriptor* pass, std::string category);
+// Hand every pass tagged since the previous commit to `commands`' completion handler. Also adds
+// the command buffer's whole GPU span ("#gpu-span") and the part of it no tagged pass covers
+// ("#gpu-untagged": MetalFX scaling and interpolation, which cannot be tagged, and idle gaps).
 void Commit(id<MTLCommandBuffer> commands);
 // Count an event (e.g. why a render pass ended); reported per frame alongside the pass timings.
 void Count(const std::string& key);

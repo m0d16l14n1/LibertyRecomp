@@ -38,12 +38,17 @@ enum class UiMode { kNone, kPremultipliedOverlay, kComposited };
 struct UiInput {
   UiMode mode = UiMode::kNone;
   id<MTLTexture> image = nil;
+  // kNone only: the caller overwrites every texel of the returned real image before anything
+  // reads it (the HUD composition does), so the scene is not also copied there first.
+  bool caller_writes_real = false;
 };
 struct Capabilities {
   bool temporal = false, interpolation = false;
   float minimum_scale = 1, maximum_scale = 1;
 };
 Capabilities QueryCapabilities(id<MTLDevice> device);
+// Diagnostic: negate the jitter MetalFX receives along x and/or y (gta4_metalfx_jitter_sign).
+void SetMetalFxJitterSign(bool negate_x, bool negate_y);
 // Includes device alignment, not just texel payload. Keeps each effect within
 // a bounded share of the device's recommended working set while admitting 4K.
 size_t OwnedTextureBudget(id<MTLDevice> device);

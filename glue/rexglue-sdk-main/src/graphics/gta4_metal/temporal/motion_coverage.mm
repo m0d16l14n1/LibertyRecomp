@@ -1,4 +1,5 @@
 #include "motion_coverage.h"
+#include "pass_tags.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -64,7 +65,7 @@ bool MotionCoverage::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
   }
   const uint32_t clear = 0;
   std::memcpy(result_.contents, &clear, sizeof(clear));
-  auto encoder = [commands computeCommandEncoder];
+  auto encoder = ComputeEncoder(commands, "framegen/motion-coverage");
   if (!encoder) {
     error = "motion coverage reduction encoder failed";
     return false;

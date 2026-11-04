@@ -268,6 +268,15 @@ struct Renderer::State {
   bool Begin(std::string& error);
   void EndRender(std::source_location caller = std::source_location::current());
   bool Flush(bool wait,std::string& error);
+  // Commits the encoded part of the frame so the GPU starts on it while the rest is encoded
+  // (gta4_metal_split_commit_draws). Only at a render-pass boundary and before any of the next
+  // draw's uploads: nothing pending is settled, no submission number changes.
+  bool CommitPart(std::string& error);
+  bool CommitEncoded(std::string& error);
+  bool PassContinues(const Targets&) const;
+  uint32_t split_commit_draws=0;
+  uint64_t part_first_draw=0, split_commits=0;
+  bool frame_split=false;
   bool CaptureTargets(std::span<const uint8_t>,uint32_t color_mask,bool depth,Targets&,std::string&);
   bool BeginRender(const Targets&,std::string& error);
   Pipeline* DrawPipeline(const Targets&,const FixedState&,const VertexDeclaration&,bool up,uint32_t stride,std::string&);

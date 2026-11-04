@@ -8,20 +8,18 @@
 #include <string>
 #include <utility>
 
-#include <rex/cvar.h>
-
-// Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): the renderer offsets
-// the projection by (+2jx/W, -2jy/H) for a jitter (jx, jy) in input pixels (y down), as DLSS
-// and FSR 2 take it. "++" passes (jx, jy) unchanged; "--", "-+", "+-" negate x and/or y.
-REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
-                      "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
+#include "pass_tags.h"
 
 namespace rex::graphics::gta4_metal::temporal {
 namespace {
+// Sign convention of the jitter handed to MetalFX (diagnostic): the renderer offsets the
+// projection by (+2jx/W, -2jy/H) for a jitter (jx, jy) in input pixels (y down), as DLSS and
+// FSR 2 take it. +1 passes a component unchanged. Set from gta4_metalfx_jitter_sign (live.mm):
+// this library does not link the cvar registry.
+std::atomic<uint32_t> g_jitter_sign_bits{0};  // bit 0: negate x, bit 1: negate y
 std::array<float, 2> MetalFxJitter(const std::array<float, 2>& jitter) {
-  const std::string sign = REXCVAR_GET(gta4_metalfx_jitter_sign);
-  return {sign.size() > 0 && sign[0] == '-' ? -jitter[0] : jitter[0],
-          sign.size() > 1 && sign[1] == '-' ? -jitter[1] : jitter[1]};
+  const uint32_t bits = g_jitter_sign_bits.load(std::memory_order_relaxed);
+  return {bits & 1 ? -jitter[0] : jitter[0], bits & 2 ? -jitter[1] : jitter[1]};
 }
 constexpr size_t kMaximumOwnedBytes = 1024u * 1024u * 1024u;
 struct FailureState {
@@ -150,6 +148,19 @@ bool Copy(id<MTLBlitCommandEncoder> encoder, id<MTLTexture> source, id<MTLTextur
   return true;
 }
 }  // namespace
+namespace {
+std::atomic<ComputePassTagger> g_compute_tagger{nullptr};
+std::atomic<BlitPassTagger> g_blit_tagger{nullptr};
+}  // namespace
+void SetMetalFxJitterSign(bool negate_x, bool negate_y) {
+  g_jitter_sign_bits.store((negate_x ? 1u : 0u) | (negate_y ? 2u : 0u), std::memory_order_relaxed);
+}
+void SetPassTaggers(ComputePassTagger compute, BlitPassTagger blit) {
+  g_compute_tagger.store(compute, std::memory_order_release);
+  g_blit_tagger.store(blit, std::memory_order_release);
+}
+ComputePassTagger CurrentComputePassTagger() { return g_compute_tagger.load(std::memory_order_acquire); }
+BlitPassTagger CurrentBlitPassTagger() { return g_blit_tagger.load(std::memory_order_acquire); }
 void KeepUntilCompleted(id<MTLCommandBuffer> commands, OutputLease lease) {
   if (!commands || !lease) return;
   // Release at completion, not when a retained command-buffer/capture object
@@ -386,7 +397,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       auto exposure = [s.device newBufferWithBytes:exposure_bytes.data()
                                             length:exposure_bytes.size()
                                            options:MTLResourceStorageModeShared];
-      auto transfer = [commands blitCommandEncoder];
+      auto transfer = BlitEncoder(commands, "temporal/exposure-upload");
       if (!exposure || !transfer) {
         error = "temporal exposure upload allocation failed";
         return false;
@@ -433,7 +444,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       const auto& previous_frame = decision.reset ? frame : s.history.previous();
       c.previous_near_plane = previous_frame.near_plane;
       c.previous_far_plane = previous_frame.far_plane;
-      auto encoder = [commands computeCommandEncoder];
+      auto encoder = ComputeEncoder(commands, "temporal/native-taa");
       if (!encoder) {
         error = "native TAA encoder creation failed";
         return false;
@@ -643,22 +654,25 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       error = "interpolation source aliases an output slot";
       return false;
     }
-    auto copy = [commands blitCommandEncoder];
+    auto copy = BlitEncoder(commands, "framegen/snapshot-blit");
     if (!copy) {
       error = "frame interpolation snapshot encoder failed";
       return false;
     }
     copy.label = @"Liberty immutable frame-generation inputs";
     const bool overlay = ui_input.mode == UiMode::kPremultipliedOverlay;
+    // With caller_writes_real the real image is written whole afterwards: a copy here would be a
+    // full-size image of traffic per real frame for nothing (2560x1440 RGBA16Float: 29 MB).
+    const bool skip_real = overlay || (ui_input.mode == UiMode::kNone && ui_input.caller_writes_real);
     const bool copied =
-        Copy(copy, in.color, slot.scene) && (overlay || Copy(copy, ui ? ui : in.color, slot.real));
+        Copy(copy, in.color, slot.scene) && (skip_real || Copy(copy, ui ? ui : in.color, slot.real));
     [copy endEncoding];
     if (!copied) {
       error = "frame interpolation snapshot mismatch";
       return false;
     }
     if (overlay) {
-      auto encoder = [commands computeCommandEncoder];
+      auto encoder = ComputeEncoder(commands, "framegen/ui-over");
       if (!encoder) {
         error = "temporal UI composition encoder failed";
         return false;
@@ -699,7 +713,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.shouldResetHistory = decision.reset;
     [fx encodeToCommandBuffer:commands];
     if (overlay && !decision.reset) {
-      auto encoder = [commands computeCommandEncoder];
+      auto encoder = ComputeEncoder(commands, "framegen/ui-after");
       if (!encoder) {
         s.history.Reset();
         error = "generated-frame UI encoder failed";

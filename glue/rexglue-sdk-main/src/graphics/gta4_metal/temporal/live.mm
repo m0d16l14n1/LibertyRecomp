@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <cmath>
 #include "projection.h"
+#include "pass_tags.h"
+// Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): "++" (verified,
+// BACKLOG 86) passes it unchanged; "--", "-+", "+-" negate x and/or y.
+REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
+                      "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
 namespace rex::graphics::gta4_metal::temporal {
 namespace {
 void Dispatch(id<MTLComputeCommandEncoder> e, id<MTLComputePipelineState> p, NSUInteger w,
@@ -157,7 +162,7 @@ bool Live::CaptureDepth(id<MTLCommandBuffer> cb, std::string& error) {
   // A resolve may clear this guest attachment after exporting it. Preserve
   // the pre-clear snapshot until a later actual scene depth write invalidates it.
   if (depth_captured) return true;
-  auto e = [cb computeCommandEncoder];
+  auto e = ComputeEncoder(cb, "temporal/depth-snapshot");
   if (!e) {
     error = "temporal depth export encoder failed";
     return false;
@@ -178,7 +183,7 @@ bool Live::CopyColor(id<MTLCommandBuffer> cb, id<MTLTexture> source, id<MTLTextu
     error = "invalid temporal color copy";
     return false;
   }
-  auto e = [cb computeCommandEncoder];
+  auto e = ComputeEncoder(cb, "temporal/color-convert");
   if (!e) {
     error = "temporal color copy encoder failed";
     return false;
@@ -202,7 +207,7 @@ bool Live::CompleteBackgroundMotion(id<MTLCommandBuffer> cb, std::string& error)
   static_assert(sizeof(Parameters)==96);
   const Parameters p{background_transform_,metadata.jitter,camera_half_pixel,
                       config.input_width,config.input_height,config.depth_reversed,0};
-  auto e=[cb computeCommandEncoder];
+  auto e=ComputeEncoder(cb, "temporal/background-motion");
   if(!e){error="background motion encoder creation failed";return false;}
   e.label=@"Liberty infinite-background camera motion";
   [e setComputePipelineState:background_motion_];
@@ -223,7 +228,7 @@ bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error) {
   static_assert(sizeof(Parameters)==96);
   const Parameters p{camera_transform_,metadata.jitter,camera_half_pixel,
                       config.input_width,config.input_height,config.depth_reversed,0};
-  auto e=[cb computeCommandEncoder];
+  auto e=ComputeEncoder(cb, "framegen/camera-motion-fill");
   if(!e){error="camera motion fill encoder creation failed";return false;}
   e.label=@"Liberty frame generation camera motion fill";
   [e setComputePipelineState:camera_motion_fill_];
@@ -264,7 +269,7 @@ bool Live::SetExposure(id<MTLCommandBuffer> cb, id<MTLTexture> adaptation, float
   }
   if (!CreateImage(exposure_, MTLPixelFormatR16Float, 1, 1,
                    @"Liberty title-adapted MetalFX exposure", error)) return false;
-  auto e = [cb computeCommandEncoder];
+  auto e = ComputeEncoder(cb, "temporal/exposure");
   if (!e) { error = "temporal exposure encoder creation failed"; return false; }
   e.label = @"Liberty exposure from title adaptation";
   const std::array<float, 2> factors{exposure, tone_scale};
@@ -282,6 +287,10 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
   if (resolved) return resolved_.color;
   if (spatial_fallback) return spatial_output_;
   composite_seen = true;
+  {
+    const std::string sign = REXCVAR_GET(gta4_metalfx_jitter_sign);
+    SetMetalFxJitterSign(sign.size() > 0 && sign[0] == '-', sign.size() > 1 && sign[1] == '-');
+  }
   if (!scene || scene.textureType != MTLTextureType2D || scene.sampleCount != 1 ||
       scene.width != config.input_width || scene.height != config.input_height) {
     ResetHistory();
@@ -393,7 +402,7 @@ bool Live::RecoverComposite(id<MTLCommandBuffer> cb,
   // Keep the guest target coherent too, including for HUD blend modes which
   // cannot be represented by our optional separated UI path. A blit requires
   // no shader-write usage on the original render target.
-  auto copy = [cb blitCommandEncoder];
+  auto copy = BlitEncoder(cb, "temporal/composite-recovery");
   if (!copy) { error = "executed composite recovery copy failed"; return false; }
   copy.label = @"Liberty scene recovery before original HUD";
   [copy copyFromTexture:recovered_composite_ sourceSlice:0 sourceLevel:0
@@ -423,7 +432,7 @@ bool Live::StartUi(id<MTLCommandBuffer> cb, std::string& error) {
 bool Live::Compose(id<MTLCommandBuffer> cb, id<MTLTexture> scene, id<MTLTexture> dest,
                    std::string& error) {
   if (!scene || !dest || !ui_active) return false;
-  auto e = [cb computeCommandEncoder];
+  auto e = ComputeEncoder(cb, "temporal/hud-compose");
   if (!e) {
     error = "temporal UI composition encoder failed";
     return false;
@@ -451,7 +460,7 @@ id<MTLTexture> Live::ResampleHalf(id<MTLCommandBuffer> cb, id<MTLTexture> source
   return half_scene_;
 }
 bool Live::ComposeInPlace(id<MTLCommandBuffer> cb, id<MTLTexture> image, std::string& error) {
-  auto e = [cb computeCommandEncoder];
+  auto e = ComputeEncoder(cb, "framegen/hud-on-generated");
   if (!e) {
     error = "generated HUD composition encoder failed";
     return false;
@@ -510,7 +519,10 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   f.color_domain = ColorDomain::kDisplayPerceptual;
   Inputs in = inputs;
   in.color = final_scene;
-  return interpolation_.Encode(cb, in, {}, f, output, error);
+  // present.mm composes the HUD over the scene into the real image (Compose writes every texel).
+  UiInput ui{};
+  ui.caller_writes_real = true;
+  return interpolation_.Encode(cb, in, ui, f, output, error);
 }
 bool Live::AdoptExecutionCamera() {
   if (!active || !execution_camera_valid) return false;

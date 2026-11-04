@@ -25,6 +25,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_constant_sources, true, "GPU", "Keep bounde
 REXCVAR_DEFINE_BOOL(gta4_metal_track_guest_constants, true, "GPU", "Reuse float banks while the guest reports no changes");
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_pipeline_lookup, true, "GPU", "Reuse recent exact pipeline keys before the full cache lookup");
+REXCVAR_DEFINE_UINT32(gta4_metal_split_commit_draws, 0, "GPU", "Commit the frame's first part to the GPU once this many draws are encoded (at a render-pass break; once a frame; 0 = one command buffer a frame)");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_encoder_state, true, "GPU", "Reuse unchanged state in one Metal encoder");
 REXCVAR_DEFINE_BOOL(gta4_metal_foreground_qos, true, "GPU", "Bound recording work to foreground QoS");
 REXCVAR_DEFINE_BOOL(gta4_metal_fold_full_clears, true, "GPU", "Fold full clears into the next attachment use");
@@ -206,6 +207,8 @@ bool Renderer::State::Begin(std::string& error) {
       rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeProfiler);
   resolve_profile.Begin();
   constants.Clear();
+  part_first_draw = draws;
+  split_commit_draws = rex::cvar::Query<uint32_t>("gta4_metal_split_commit_draws");
   cache_constant_sources = rex::cvar::Query<bool>("gta4_metal_cache_constant_sources");
   cache_material_bindings=rex::cvar::Query<bool>("gta4_metal_cache_material_bindings");
   track_guest_constants = rex::cvar::Query<bool>("gta4_metal_track_guest_constants");
@@ -241,6 +244,24 @@ bool Renderer::State::Flush(bool wait,std::string& error) {
   if(!commands) frame_qos.End();
   if(!commands) return !wait || frames.WaitIdle(error);
   auto committed=commands;
+  if(!CommitEncoded(error)) return false;
+  ++submitted; frame_split=false;
+  if(wait) {
+    [committed waitUntilCompleted];
+    if(committed.status!=MTLCommandBufferStatusCompleted) {error=ui::metal::MetalError(committed.error,"Metal GPU submission failed"); return false;}
+  }
+  return true;
+}
+bool Renderer::State::CommitPart(std::string& error) {
+  if(!commands) return true;
+  EndRender();
+  FinishResolveProfile();
+  if(!CommitEncoded(error)) return false;
+  frame_split=true; ++split_commits;
+  return Begin(error);
+}
+bool Renderer::State::CommitEncoded(std::string& error) {
+  auto committed=commands;
   if(modern_diagnostics.enabled()) {
     const auto diagnostic_frame=modern_diagnostics.frame(), command=diagnostic_command, submission=submitted;
     [committed addCompletedHandler:^(id<MTLCommandBuffer> completed) {
@@ -264,11 +285,7 @@ bool Renderer::State::Flush(bool wait,std::string& error) {
     REXLOG_INFO("gta4-metal-capture: saved title submission {}", submitted);
   }
   frame_qos.End();
-  commands=nil; frame=nullptr; constants.Clear(); ++submitted;
-  if(wait) {
-    [committed waitUntilCompleted];
-    if(committed.status!=MTLCommandBufferStatusCompleted) {error=ui::metal::MetalError(committed.error,"Metal GPU submission failed"); return false;}
-  }
+  commands=nil; frame=nullptr; constants.Clear();
   return true;
 }
 ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, bool swap, std::string& error) {

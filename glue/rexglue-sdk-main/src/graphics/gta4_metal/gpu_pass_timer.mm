@@ -11,6 +11,8 @@
 
 #include <rex/logging.h>
 
+#include "temporal/pass_tags.h"
+
 namespace rex::graphics::gta4_metal::gpu_pass_timer {
 namespace {
 
@@ -79,6 +81,9 @@ void Initialize(id<MTLDevice> device, const std::string& csv_path) {
   g->buffers = std::move(buffers);
   g->path = csv_path;
   g->ns_per_tick = CalibrateNsPerTick(device);
+  temporal::SetPassTaggers(
+      [](MTLComputePassDescriptor* pass, const char* category) { Tag(pass, std::string(category)); },
+      [](MTLBlitPassDescriptor* pass, const char* category) { Tag(pass, std::string(category)); });
   // ms_per_frame is inclusive: Apple GPUs overlap the vertex work of one pass with the fragment
   // work of the previous one, so categories do NOT add up (post-processing once read 25 ms of a
   // 13 ms frame). exclusive_ms_per_frame shares every overlapped interval equally between the
@@ -89,6 +94,35 @@ void Initialize(id<MTLDevice> device, const std::string& csv_path) {
 }
 
 bool enabled() { return g != nullptr; }
+
+namespace {
+// Two consecutive sample indices in the current buffer, rotating buffers as they fill.
+NSUInteger Reserve(std::string category) {
+  if (g->next + 2 > kSamples) { g->next = 0; g->buffer = (g->buffer + 1) % kBuffers; }
+  const NSUInteger first = g->next;
+  g->pending.push_back({g->buffers[g->buffer], first, std::move(category)});
+  g->next += 2;
+  return first;
+}
+}  // namespace
+
+void Tag(MTLComputePassDescriptor* pass, std::string category) {
+  if (!g || !pass) return;
+  auto attachment = pass.sampleBufferAttachments[0];
+  const NSUInteger first = Reserve(std::move(category));
+  attachment.sampleBuffer = g->pending.back().buffer;
+  attachment.startOfEncoderSampleIndex = first;
+  attachment.endOfEncoderSampleIndex = first + 1;
+}
+
+void Tag(MTLBlitPassDescriptor* pass, std::string category) {
+  if (!g || !pass) return;
+  auto attachment = pass.sampleBufferAttachments[0];
+  const NSUInteger first = Reserve(std::move(category));
+  attachment.sampleBuffer = g->pending.back().buffer;
+  attachment.startOfEncoderSampleIndex = first;
+  attachment.endOfEncoderSampleIndex = first + 1;
+}
 
 void Tag(MTLRenderPassDescriptor* pass, std::string category) {
   if (!g || !pass) return;
@@ -104,11 +138,11 @@ void Tag(MTLRenderPassDescriptor* pass, std::string category) {
 }
 
 void Commit(id<MTLCommandBuffer> commands) {
-  if (!g || g->pending.empty() || !commands) return;
+  if (!g || !commands) return;
   auto passes = std::make_shared<std::vector<State::Pass>>(std::move(g->pending));
   g->pending.clear();
   State* state = g.get();
-  [commands addCompletedHandler:^(id<MTLCommandBuffer>) {
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> completed) {
     std::map<std::string, Totals> local;
     struct Interval { uint64_t begin, end; const std::string* category; };
     std::vector<Interval> intervals;
@@ -137,8 +171,10 @@ void Commit(id<MTLCommandBuffer> commands) {
     std::sort(events.begin(), events.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<size_t> active;
     uint64_t previous = events.empty() ? 0 : events.front().first;
+    double covered_ns = 0;
     for (const auto& [time, which] : events) {
       if (time > previous && !active.empty()) {
+        covered_ns += double(time - previous) * state->ns_per_tick;
         const double share = double(time - previous) * state->ns_per_tick / double(active.size());
         for (size_t index : active) local[*intervals[index].category].exclusive_ns += share;
       }
@@ -146,6 +182,15 @@ void Commit(id<MTLCommandBuffer> commands) {
       const size_t index = size_t(std::abs(which)) - 1;
       if (which > 0) active.push_back(index);
       else active.erase(std::find(active.begin(), active.end(), index));
+    }
+    const double span_ns = (completed.GPUEndTime - completed.GPUStartTime) * 1e9;
+    if (span_ns > 0) {
+      auto& span = local["#gpu-span"];
+      span.ns += span_ns; span.exclusive_ns += span_ns; ++span.passes;
+      auto& untagged = local["#gpu-untagged"];
+      untagged.ns += std::max(0.0, span_ns - covered_ns);
+      untagged.exclusive_ns = untagged.ns;
+      ++untagged.passes;
     }
     std::lock_guard lock(state->mutex);
     for (const auto& [category, t] : local) {

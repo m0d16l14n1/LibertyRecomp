@@ -123,13 +123,17 @@ bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t col
   return true;
 }
 
-bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
+bool Renderer::State::PassContinues(const Targets& target) const {
   bool same = bool(render) && active_targets.depth == target.depth &&
       active_targets.width == target.width && active_targets.height == target.height &&
       active_targets.samples == target.samples &&
       active_targets.temporal_motion==target.temporal_motion&&active_targets.temporal_reactive==target.temporal_reactive&&active_targets.temporal_ui==target.temporal_ui;
   for(size_t i=0;i<target.colors.size();++i) same&=active_targets.colors[i]==target.colors[i];
-  if(same) return true;
+  return same;
+}
+
+bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
+  if(PassContinues(target)) return true;
   if (gpu_pass_timer::enabled() && render) {
     uint32_t why = 0;
     for (size_t i = 0; i < target.colors.size(); ++i)
@@ -394,6 +398,12 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         fixed.blend_controls[0],shaders.find(vertex_shader)!=shaders.end()?shaders.find(vertex_shader)->second.hash:0,pixel!=shaders.end()?pixel->second.hash:0);
       temporal.ui_exact=false;targets.temporal_ui=false;
     }
+  }
+  // Hand the GPU what is encoded so far once the frame is big enough, at a pass break this draw
+  // causes anyway, before any of its uploads (they land in the next part's arena).
+  if(split_commit_draws&&!frame_split&&draws-part_first_draw>=split_commit_draws&&!PassContinues(targets)&&
+     !sky_visibility&&!capture_active&&!fire_active){
+    if(!CommitPart(error))return false;
   }
   diagnostic_point="draw.pipeline";
   auto* pipeline=DrawPipeline(targets,fixed,vdecl->second,up,up_stride,error);
