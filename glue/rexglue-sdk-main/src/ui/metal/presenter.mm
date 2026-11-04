@@ -158,6 +158,9 @@ struct MetalPresenter::State {
   std::atomic<uint64_t> submitted_frames{0}, new_game_images{0}, repeated_game_images{0};
   uint64_t last_submitted_publication = 0;
   std::shared_ptr<MetalGeneratedFrame> pending_pair;
+  // Set when the display buffer of pending_pair's generated image completes. Its real image is
+  // painted only after that (see PaintAndPresentImpl).
+  std::shared_ptr<std::atomic<bool>> pending_generated_done;
   GuestOutputProperties pending_properties{};
   GuestOutputPaintConfig pending_configuration{};
   uint64_t pending_surface_epoch=0,last_generated_publication=0;
@@ -498,6 +501,7 @@ void MetalPresenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
   state_->drawable = nil; state_->layer = nil;
   state_->hdr_source = nil; state_->intermediates = {};
   state_->pending_pair.reset();
+  state_->pending_generated_done.reset();
   frame_pacer().SetMinimumInterval(0);
   state_->game_image_cache.Reset();
   ++state_->surface_epoch;
@@ -527,10 +531,14 @@ bool MetalPresenter::RefreshGuestOutputImpl(uint32_t index, uint32_t width, uint
       output.version = ++state_->next_output_version;
     }
     output.pair.reset();
+    // A failed refresh may never signal its ready value: keep the last one, or the next paint of
+    // this output would wait on the GPU until a later frame signals a higher value.
+    const uint64_t previous_ready_value=output.ready_value;
     output.ready_value=++state_->next_ready_value;
     MetalGuestOutputRefreshContext context(is_8bpc,output.texture,output.version,&output.pair,
         state_->render_ready,output.ready_value,state_->display_done,output.read_value);
     const bool updated=refresher(context);
+    if(!updated)output.ready_value=previous_ready_value;
     if(updated&&!context.synchronization_encoded()){
       REXLOG_ERROR("gta4-metal: cross-queue mailbox writer omitted its synchronization");return false;
     }
@@ -562,6 +570,16 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
       return PaintResult::kNotPresented;
     }
     const auto cancel = [&]() { state_->frames.Cancel(*frame); return PaintResult::kNotPresentedRetry; };
+    // Frame generation: the generated and the real image of a pair wait on the same render_ready
+    // value. If the render queue finishes late, both display buffers would be released together,
+    // present in one refresh, and the generated drawable would be replaced (not-displayed). So the
+    // real image is painted only once the generated image's display buffer has completed; its
+    // drawable then goes out at the next display-link opportunity, one refresh after the generated.
+    if(state_->vsync&&state_->pending_pair&&state_->pending_surface_epoch==state_->surface_epoch&&
+       state_->pending_generated_done&&!state_->pending_generated_done->load(std::memory_order_acquire)){
+      state_->frames.Cancel(*frame);
+      return PaintResult::kNotPresented;
+    }
     auto commands = [state_->display_queue commandBuffer];
     if (!commands) return cancel();
     commands.label = @"Liberty display and UI";
@@ -595,6 +613,11 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     if(selected_pair){
       auto held=std::make_shared<std::shared_ptr<MetalGeneratedFrame>>(selected_pair);
       [commands addCompletedHandler:^(id<MTLCommandBuffer>){held->reset();}];
+    }
+    std::shared_ptr<std::atomic<bool>> generated_done;
+    if(generated){
+      generated_done=std::make_shared<std::atomic<bool>>(false);
+      [commands addCompletedHandler:^(id<MTLCommandBuffer>){generated_done->store(true,std::memory_order_release);}];
     }
     configuration.SetDither(rex::cvar::Query<bool>("gta4_native_output_dither") && !state_->hdr);
     if (source) flow = GetGuestOutputPaintFlow(properties,width,height,16384,16384,configuration);
@@ -877,6 +900,7 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     if(generated){
       state_->pending_pair=selected_pair;state_->pending_properties=properties;state_->pending_configuration=configuration;
       state_->pending_surface_epoch=state_->surface_epoch;state_->last_generated_publication=serial;
+      state_->pending_generated_done=generated_done;
       state_->generated_images.fetch_add(1,std::memory_order_relaxed);
       // The next scene may now render on its queue, but paint demand remains
       // pending until this pair's real frame has actually been submitted.
@@ -884,7 +908,7 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
       if(index<state_->outputs.size()&&state_->outputs[index].pair==selected_pair)state_->outputs[index].pair.reset();
     }else{
       AcceptPacedPublication(serial);
-      if(finishing_pair)state_->pending_pair.reset();
+      if(finishing_pair){state_->pending_pair.reset();state_->pending_generated_done.reset();}
     }
     if(rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
       REXLOG_INFO("gta4-metal-delivery kind={} frame={} publication={} generated-count={}",generated?"generated":"real",properties.provenance.submitted_frame,serial,state_->generated_images.load());
