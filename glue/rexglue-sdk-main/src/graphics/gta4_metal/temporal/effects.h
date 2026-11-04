@@ -29,6 +29,11 @@ struct Inputs {
   // world_to_view/view_to_clip hold this frame's camera: frame interpolation passes them too
   // (gta4_metalfx_frame_generation_camera_matrices). False leaves the interpolator without them.
   bool camera_matrices = false;
+  // Frame generation: output-pixel motion difference at which the discontinuity repair starts
+  // (gta4_metalfx_frame_generation_repair_px; 0 off).
+  float repair_motion_px = 0;
+  // Frame generation: unsharp amount for the generated image (gta4_metalfx_frame_generation_sharpen; 0 off).
+  float sharpen = 0;
 };
 // Keep the lease through the LAST consumer submission. Holding it prevents
 // output-slot recycling; KeepUntilCompleted transfers this duty to a command.

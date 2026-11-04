@@ -260,5 +260,87 @@ kernel void liberty_temporal_affine_ui_inplace(texture2d<float,access::read_writ
  image.write(temporal_finite(float4(image.read(id).rgb*transmit.sample(s,uv).rgb+add.sample(s,uv).rgb,1)),id);
 }
 
+// Frame generation repair (gta4_metalfx_frame_generation_repair_px): MetalFX's interpolator has
+// no reactive input, and at a motion discontinuity with a depth step (the road moving under the
+// player's car, which holds still on screen) it can give the edge the wrong layer's motion and
+// smear it. Where a tap within ~30 input pixels moves differently by more than `threshold` output
+// pixels AND lies at another depth, the generated pixel is blended toward a half-step backward
+// warp of the current real scene (scene only, no HUD), checked to stay on its own depth layer.
+struct TemporalRepairConstants {
+ float2 motion_scale;    // input-pixel motion to output pixels (output/input)
+ float2 input_texel;     // 1/input size (uv per input pixel)
+ float2 output_texel;    // 1/output size
+ float threshold;        // output pixels of motion difference where repair starts (full at 2x)
+ float near_plane,far_plane;
+ uint reversed;
+ float depth_step;       // relative view-depth difference that counts as another layer
+ float padding;
+};
+kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write> generated [[texture(0)]],
+ texture2d<float> scene [[texture(1)]],texture2d<float> motion [[texture(2)]],texture2d<float> depth [[texture(3)]],
+ constant TemporalRepairConstants& c [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+ if(id.x>=generated.get_width() || id.y>=generated.get_height())return;
+ constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
+ constexpr sampler linear_sampler(coord::normalized,address::clamp_to_edge,filter::linear);
+ const float2 uv=(float2(id)+0.5f)*c.output_texel;
+ const float z0=depth.sample(nearest,uv).r;
+ if(!temporal_valid_depth(z0))return;
+ const float v0=temporal_view_depth(z0,c.near_plane,c.far_plane,c.reversed!=0);
+ const float2 m0=motion.sample(nearest,uv).xy*c.motion_scale;
+ float weight=0;
+ const float distances[4]={2,6,14,30};
+ for(uint ring=0;ring<4;++ring)for(uint k=0;k<8;++k){
+  const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
+  const float2 tap=uv+float2(cos(angle),sin(angle))*distances[ring]*c.input_texel;
+  const float z=depth.sample(nearest,tap).r;
+  if(!temporal_valid_depth(z))continue;
+  const float v=temporal_view_depth(z,c.near_plane,c.far_plane,c.reversed!=0);
+  if(abs(v-v0)<=c.depth_step*min(v,v0))continue;
+  const float dm=length(motion.sample(nearest,tap).xy*c.motion_scale-m0);
+  // The smear reaches about half the motion difference from the edge: farther taps need more.
+  if(dm*0.5f+2.0f<distances[ring]*c.motion_scale.x)continue;
+  weight=max(weight,saturate((dm-c.threshold)/max(c.threshold,1.0f)));
+ }
+ if(weight<=0)return;
+ // m points from the current position to the previous one; this pixel's content sits at the
+ // midpoint, so it came from about uv - m/2 in the current image (scene only: the HUD is composed
+ // over the generated image later, in present.mm).
+ float2 source=uv-0.5f*m0*c.output_texel;
+ const float zs=depth.sample(nearest,source).r;
+ if(!temporal_valid_depth(zs) ||
+    abs(temporal_view_depth(zs,c.near_plane,c.far_plane,c.reversed!=0)-v0)>c.depth_step*v0)
+  source=uv;  // the warp crosses into the other layer: hold the current pixel instead
+ const float4 repaired=temporal_finite(scene.sample(linear_sampler,source));
+ const float4 original=temporal_finite(generated.read(id));
+ generated.write(mix(original,repaired,weight),id);
+}
+
 #include "temporal_exposure.metal"
 #include "temporal_motion_coverage.metal"
+
+// Frame generation sharpening (gta4_metalfx_frame_generation_sharpen): the interpolator's
+// warps soften the generated image (city drive dumps: about 0.76-0.81 of the real images'
+// Laplacian detail on the car and the near road), so a display alternating real and
+// generated images shimmers on textured near objects. An unsharp mask over the 4-neighbour
+// cross, clamped to that neighbourhood's range so it cannot ring or halo.
+// The softening grows with motion (a still pixel is the real image), so the amount ramps in
+// with the pixel's motion: none at 1 output pixel, full from 9.
+struct TemporalSharpenConstants { float amount; float padding; float2 motion_scale; };
+kernel void liberty_temporal_framegen_sharpen(texture2d<float,access::read> source [[texture(0)]],
+ texture2d<float,access::write> output [[texture(1)]],texture2d<float> motion [[texture(2)]],
+ constant TemporalSharpenConstants& k [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+ const uint2 size=uint2(source.get_width(),source.get_height());
+ if(any(id>=size))return;
+ const uint2 last=size-1;
+ const float4 c=temporal_finite(source.read(id));
+ const float3 n=temporal_finite(source.read(uint2(id.x,id.y>0?id.y-1:0))).rgb;
+ const float3 s=temporal_finite(source.read(uint2(id.x,min(id.y+1,last.y)))).rgb;
+ const float3 w=temporal_finite(source.read(uint2(id.x>0?id.x-1:0,id.y))).rgb;
+ const float3 e=temporal_finite(source.read(uint2(min(id.x+1,last.x),id.y))).rgb;
+ const float3 low=min(c.rgb,min(min(n,s),min(w,e))),high=max(c.rgb,max(max(n,s),max(w,e)));
+ constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
+ const float2 m=motion.sample(nearest,(float2(id)+0.5f)/float2(size)).xy*k.motion_scale;
+ const float amount=all(isfinite(m))?k.amount*saturate((length(m)-1.0f)/8.0f):0.0f;
+ const float3 sharpened=c.rgb+amount*(c.rgb-0.25f*(n+s+w+e));
+ output.write(float4(clamp(sharpened,low,high),c.a),id);
+}

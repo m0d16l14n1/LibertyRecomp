@@ -679,6 +679,9 @@ struct FrameInterpolation::State {
   std::string notice;  // TakeNotice()
   struct Slot {
     id<MTLTexture> scene = nil, real = nil, generated = nil;
+    // gta4_metalfx_frame_generation_sharpen: the interpolator's output, copied for the sharpen
+    // pass to read (it writes `generated`). Made at the first sharpened frame.
+    id<MTLTexture> sharpen_source = nil;
     __weak id<MTLCommandBuffer> owner = nil;
     std::weak_ptr<void> lease;
   };
@@ -696,6 +699,9 @@ struct FrameInterpolation::State {
   uint64_t native_encodes = 0, hop_encodes = 0;
   bool native4_unavailable = false;
   id<MTLComputePipelineState> composite = nil, overlay = nil;
+  id<MTLComputePipelineState> repair = nil;  // optional: nil skips the discontinuity repair
+  id<MTLComputePipelineState> sharpen = nil;  // optional: nil skips the sharpening
+  uint64_t sharpen_failures = 0;
   // Three: a slot is reused three frames later. With two, the frame that last wrote it was
   // often still scheduled on the GPU (2-3 frames in flight), and every other frame was skipped.
   std::array<Slot, 3> slots{};
@@ -781,6 +787,11 @@ bool FrameInterpolation::Configure(id<MTLDevice> device, id<MTLLibrary> library,
       error = native_error.localizedDescription.UTF8String;
       return false;
     }
+    // Optional (an older metallib may lack it): without it the repair is skipped.
+    if (auto repair_function = [library newFunctionWithName:@"liberty_temporal_framegen_repair"])
+      next->repair = [device newComputePipelineStateWithFunction:repair_function error:nil];
+    if (auto sharpen_function = [library newFunctionWithName:@"liberty_temporal_framegen_sharpen"])
+      next->sharpen = [device newComputePipelineStateWithFunction:sharpen_function error:nil];
     next->interpolator = next->CreateInterpolator();
     if (!next->interpolator) {
       error = "MetalFX frame interpolator creation failed";
@@ -998,6 +1009,90 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       id<MTLFXFrameInterpolator> fx3 = s.interpolator;
       rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [fx3 encodeToCommandBuffer:m3]; });
       ++s.hop_encodes;
+    }
+    // Both paths join here: the native MTL4FX encode updates fence4, which the next proxy
+    // encoder waits on (as the UI pass below), and the Metal 3 hop encodes into this command
+    // buffer. Same slot, same command buffer: no new lifetime; slot.owner is set below.
+    if (in.repair_motion_px > 0 && s.repair && !decision.reset) {
+      auto encoder = ComputeEncoder(commands, "framegen/repair");
+      if (!encoder) {
+        s.history.Reset();
+        error = "frame-generation repair encoder failed";
+        return false;
+      }
+      encoder.label = @"Liberty frame-generation discontinuity repair";
+      struct {
+        float motion_scale[2], input_texel[2], output_texel[2];
+        float threshold, near_plane, far_plane;
+        uint32_t reversed;
+        float depth_step, padding;
+      } c{{float(s.config.output_width) / s.config.input_width,
+           float(s.config.output_height) / s.config.input_height},
+          {1.0f / s.config.input_width, 1.0f / s.config.input_height},
+          {1.0f / s.config.output_width, 1.0f / s.config.output_height},
+          in.repair_motion_px, frame.near_plane, frame.far_plane,
+          uint32_t(s.config.depth_reversed), 0.10f, 0};
+      [encoder setComputePipelineState:s.repair];
+      [encoder setTexture:slot.generated atIndex:0];
+      [encoder setTexture:slot.scene atIndex:1];
+      [encoder setTexture:in.motion atIndex:2];
+      [encoder setTexture:in.depth atIndex:3];
+      [encoder setBytes:&c length:sizeof(c) atIndex:0];
+      const NSUInteger w = s.repair.threadExecutionWidth,
+                       h = std::max<NSUInteger>(
+                           1, std::min<NSUInteger>(8, s.repair.maxTotalThreadsPerThreadgroup / w));
+      [encoder dispatchThreads:MTLSizeMake(s.config.output_width, s.config.output_height, 1)
+          threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+      [encoder endEncoding];
+    }
+    // Before the UI goes on: only the interpolated scene is softened.
+    if (in.sharpen > 0 && s.sharpen && !decision.reset) {
+      if (!slot.sharpen_source) {
+        std::string allocation_error;
+        slot.sharpen_source = Allocate(s.device, MTLPixelFormatRGBA16Float, s.config.output_width,
+                                       s.config.output_height, MTLTextureUsageShaderRead,
+                                       @"Liberty generated image before sharpening", s.limit, s.owned,
+                                       allocation_error);
+        if (!slot.sharpen_source && s.sharpen_failures++ == 0)
+          s.notice = "frame-generation sharpening off: " + allocation_error;
+      }
+      if (slot.sharpen_source) {
+        auto copy = BlitEncoder(commands, "framegen/sharpen-copy");
+        if (!copy) {
+          s.history.Reset();
+          error = "frame-generation sharpen copy encoder failed";
+          return false;
+        }
+        copy.label = @"Liberty generated image for sharpening";
+        const bool copied = Copy(copy, slot.generated, slot.sharpen_source);
+        [copy endEncoding];
+        if (!copied) {
+          error = "frame-generation sharpen copy mismatch";
+          return false;
+        }
+        auto encoder = ComputeEncoder(commands, "framegen/sharpen");
+        if (!encoder) {
+          s.history.Reset();
+          error = "frame-generation sharpen encoder failed";
+          return false;
+        }
+        encoder.label = @"Liberty frame-generation sharpening";
+        const struct { float amount, padding, motion_scale[2]; } k{
+            std::min(in.sharpen, 2.0f), 0,
+            {float(s.config.output_width) / s.config.input_width,
+             float(s.config.output_height) / s.config.input_height}};
+        [encoder setComputePipelineState:s.sharpen];
+        [encoder setTexture:slot.sharpen_source atIndex:0];
+        [encoder setTexture:slot.generated atIndex:1];
+        [encoder setTexture:in.motion atIndex:2];
+        [encoder setBytes:&k length:sizeof(k) atIndex:0];
+        const NSUInteger w = s.sharpen.threadExecutionWidth,
+                         h = std::max<NSUInteger>(
+                             1, std::min<NSUInteger>(8, s.sharpen.maxTotalThreadsPerThreadgroup / w));
+        [encoder dispatchThreads:MTLSizeMake(s.config.output_width, s.config.output_height, 1)
+            threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+        [encoder endEncoding];
+      }
     }
     if (overlay && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/ui-after");

@@ -42,6 +42,14 @@ REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_max_real_ms, 0.0, "GPU",
                       "Frame generation: present real frames only while the smoothed real frame interval "
                       "is above this many milliseconds (resumes below 85% of it; 0 off). Large real-frame "
                       "motion is where the midpoint tears");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_sharpen, 1.0, "GPU",
+                      "Frame generation: unsharp amount for the generated image, clamped to each pixel's "
+                      "neighbourhood (0 off). The interpolator softens near detail, so alternating real and "
+                      "generated images shimmers on textured near objects (peds, wheels, the player's car)");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_repair_px, 0.0, "GPU",
+                      "Frame generation: where nearby pixels at another depth move this many output "
+                      "pixels differently, blend the generated pixel toward a half-step warp of the "
+                      "real scene (fully at twice this; 0 off). Targets smears at the player's car");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
                     "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
@@ -634,6 +642,8 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   f.color_domain = ColorDomain::kDisplayPerceptual;
   Inputs in = inputs;
   in.color = final_scene;
+  in.repair_motion_px = float(REXCVAR_GET(gta4_metalfx_frame_generation_repair_px));
+  in.sharpen = float(REXCVAR_GET(gta4_metalfx_frame_generation_sharpen));
   in.camera_matrices = REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices) &&
                        camera_matrices_sequence_ == metadata.sequence;
   // present.mm composes the HUD over the scene into the real image (Compose writes every texel).

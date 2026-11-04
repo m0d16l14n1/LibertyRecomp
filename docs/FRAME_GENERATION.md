@@ -169,6 +169,29 @@ Uncommitted batch, to build and bench together:
     - The `long=` counter (> 1.5 refreshes) counts every correct interval below 30 real fps, so watch
       the mean and sd instead.
 
+11. **Generated frames are softer than real ones, which shimmers on near textured objects.** On a
+    drive, the generated images had about 0.76-0.85 of the real images' Laplacian detail on the car
+    and 0.81-0.90 on the near road; distant scenery was equal. Shown alternately, that is a
+    sharpness flicker on peds, wheels and the car.
+    - `gta4_metalfx_frame_generation_sharpen` (default 1.0) applies an unsharp mask to the generated
+      image only, before the HUD. It is clamped to each pixel's 4-neighbour range, so it cannot ring.
+      The amount ramps in with the pixel's motion: none at 1 output px, full from 9.
+    - Tuned offline on the same 11 frames:
+
+      | amount | car | road | far |
+      |---|---|---|---|
+      | none | 0.80 | 0.88 | 0.98 |
+      | 1.0, motion-scaled | 0.86 | 1.02 | 1.06 |
+      | 1.0, flat | 1.09 | 1.17 | 1.30 |
+
+    - In game at 1.0: car 0.85, road 0.96, far 1.03; tearscore unchanged.
+12. **`gta4_metalfx_frame_generation_repair_px`** (off) blends generated pixels at motion and depth
+    discontinuities toward a half-step warp of the real scene. With the camera matrices on it gains
+    nothing:
+    - off: 0 of 18 dumps bad, average car-box p99 12.3;
+    - at 16: 1 of 20 bad, average 16.4.
+    It stays off.
+
 ## Measurements so far
 
 The action pad, windowed, 2026-11-04. Both runs were taken while the Mac had 60 GB in swap, from guest-memory
