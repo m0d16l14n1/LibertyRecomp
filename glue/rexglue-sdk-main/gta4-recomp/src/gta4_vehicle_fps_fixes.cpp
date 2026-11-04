@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include <rex/cvar.h>
+#include <rex/logging.h>
 
 #include "gta4_init.h"
 #include "gta4_timer.h"
@@ -14,6 +15,11 @@
 REXCVAR_DEFINE_BOOL(gta4_heli_rotor_speed_fix, true, "GTA IV/Fixes",
                     "Helicopter rotors spin at the same speed at any frame rate (twice as fast at "
                     "60 fps otherwise)");
+REXCVAR_DEFINE_BOOL(gta4_heli_rotor_break_fix, false, "GTA IV/Fixes",
+                    "Helicopter rotors and tail take as long to break against things at any frame "
+                    "rate (twice as fast at 60 fps otherwise)");
+REXCVAR_DEFINE_BOOL(gta4_heli_rotor_damage_log, false, "GTA IV/Diagnostics",
+                    "Log every change of a helicopter's main rotor, rear rotor and tail health");
 REXCVAR_DEFINE_BOOL(gta4_heli_blinker_fix, true, "GTA IV/Fixes",
                     "Helicopter warning lights blink at the 30 fps rate at any frame rate (twice "
                     "as often and half as long at 60 fps otherwise)");
@@ -130,4 +136,59 @@ extern "C" void sub_82334990(PPCContext& ctx, uint8_t* base) {
     ctx.f1.f64 = double(float(degrees) * kRadiansPerDegree);
   }
   __imp__sub_82334990(ctx, base);
+}
+
+// Helicopter rotor and tail break times (FF "Helicopter rotor/tail break times",
+// CHeli::ApplyCollisionInternal). sub_822A9268 (CHeli collision handling, r3 = the heli) takes
+// health off the main rotor (+8148), rear rotor (+8152) and tail (+8156) for every frame they
+// touch something, and breaks the part (sub_822A6418 / 822A64C0 / 822A6550: fragment child
+// +8144 / +8145 / +8146) when it reaches 0:
+//   main: -= (step * K + mass * |v| * 0.5) * f28
+//   rear: -= (step * K' + mass * |v|) * f28
+//   tail: -= mass * |v| * 6.0 * f28
+// The step terms are already per second; the mass * |v| terms are per frame, so at 60 fps
+// rotors break twice as fast (these are FF's three multiplies). mass comes from a virtual
+// GetMass (phArchetypePhys/Damp vtable slot 10, sub_8234C830: lfs f1,32(r3)) called right
+// before each term; the recompiled indirect call sets ctx.lr, so inside this handler the
+// three returns at 0x822A9C84 / 0x822A9DA4 / 0x822A9E68 identify exactly those calls, and
+// their mass is scaled by min(step * 30, 1). The other GetMass calls are untouched.
+namespace {
+thread_local uint32_t rotor_collision_heli = 0;
+uint32_t rotor_damage_lines = 0;
+constexpr uint32_t kMainRotorHealth = 8148;  // then rear rotor +8152, tail +8156
+}  // namespace
+
+extern "C" void sub_822A9268(PPCContext& ctx, uint8_t* base) {
+  const uint32_t heli = ctx.r3.u32;
+  const bool log = REXCVAR_GET(gta4_heli_rotor_damage_log) && rotor_damage_lines < 600;
+  float before[3] = {};
+  if (log)
+    for (int i = 0; i < 3; ++i) before[i] = std::bit_cast<float>(REX_LOAD_U32(heli + kMainRotorHealth + 4 * i));
+  const uint32_t outer = rotor_collision_heli;
+  rotor_collision_heli = heli;
+  __imp__sub_822A9268(ctx, base);
+  rotor_collision_heli = outer;
+  if (!log) return;
+  float after[3];
+  bool changed = false;
+  for (int i = 0; i < 3; ++i) {
+    after[i] = std::bit_cast<float>(REX_LOAD_U32(heli + kMainRotorHealth + 4 * i));
+    changed |= after[i] != before[i];
+  }
+  if (!changed) return;
+  ++rotor_damage_lines;
+  REXLOG_INFO("gta4-heli-rotor-damage heli={:08X} frame={} step={:.4f} fix={} main {:.2f}->{:.2f} "
+              "rear {:.2f}->{:.2f} tail {:.2f}->{:.2f}",
+              heli, REX_LOAD_U32(0x82C6C2B8), std::bit_cast<float>(REX_LOAD_U32(kGameStep)),
+              REXCVAR_GET(gta4_heli_rotor_break_fix), before[0], after[0], before[1], after[1],
+              before[2], after[2]);
+}
+
+extern "C" void sub_8234C830(PPCContext& ctx, uint8_t* base) {
+  const uint32_t from = uint32_t(ctx.lr);  // the return address the indirect call set
+  __imp__sub_8234C830(ctx, base);
+  if (rotor_collision_heli == 0) return;  // the common case: one thread_local test
+  if (from != 0x822A9C84 && from != 0x822A9DA4 && from != 0x822A9E68) return;
+  if (!REXCVAR_GET(gta4_heli_rotor_break_fix)) return;
+  ctx.f1.f64 = double(float(ctx.f1.f64) * std::min(StepScale(base), 1.0f));
 }

@@ -11,6 +11,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 
 #include <rex/cvar.h>
@@ -26,6 +27,9 @@ REXCVAR_DEFINE_BOOL(gta4_ped_pinned_down_carry, true, "GTA IV/Fixes",
 REXCVAR_DEFINE_BOOL(gta4_ladder_heading_tolerance_fix, true, "GTA IV/Fixes",
                     "Climbing onto a ladder doesn't stall above 30 fps (the turn-to-face step "
                     "uses the slide step's 0.1 tolerance instead of 0.02)");
+REXCVAR_DEFINE_BOOL(gta4_ladder_log, false, "GTA IV/Diagnostics",
+                    "Log each subtask the ladder climb task starts (class name, frame), to see "
+                    "where a climb stalls");
 
 namespace {
 
@@ -110,10 +114,59 @@ thread_local int ladder_subtask_depth = 0;
 uint32_t ladder_tolerance_patched = 0;
 }  // namespace
 
+namespace {
+
+// The class name of a guest object through its RTTI: vtable[-1] is the complete object
+// locator, +12 its type descriptor, whose name ".?AVName@@" starts at +8.
+std::string GuestClassName(uint8_t* base, uint32_t object) {
+  auto in_image = [](uint32_t a) { return a >= 0x82000000 && a < 0x83000000; };
+  if (!object) return "none";
+  const uint32_t vtable = REX_LOAD_U32(object);
+  if (!in_image(vtable)) return "?";
+  const uint32_t locator = REX_LOAD_U32(vtable - 4);
+  if (!in_image(locator)) return "?";
+  const uint32_t type = REX_LOAD_U32(locator + 12);
+  if (!in_image(type)) return "?";
+  std::string name;
+  for (uint32_t i = 0; i < 64; ++i) {
+    const char c = char(REX_LOAD_U8(type + 8 + i));
+    if (!c) break;
+    name.push_back(c);
+  }
+  if (name.rfind(".?AV", 0) == 0) name = name.substr(4);
+  if (const auto at = name.find("@@"); at != std::string::npos) name.resize(at);
+  return name;
+}
+
+uint32_t ladder_log_lines = 0;
+void LogLadderSubtask(uint8_t* base, const char* which, uint32_t task, uint32_t subtask) {
+  if (!REXCVAR_GET(gta4_ladder_log) || ladder_log_lines >= 400) return;
+  ++ladder_log_lines;
+  REXLOG_INFO("gta4-ladder {} frame={} climb={:08X} subtask={} ({:08X}) fix={}", which,
+              REX_LOAD_U32(0x82C6C2B8), task, GuestClassName(base, subtask), subtask,
+              REXCVAR_GET(gta4_ladder_heading_tolerance_fix));
+}
+}  // namespace
+
+// Slot 18 (first subtask) and slot 20 (next subtask) return the new subtask in r3.
 extern "C" void sub_826A17F0(PPCContext& ctx, uint8_t* base) {
+  const uint32_t task = ctx.r3.u32;
   ++ladder_subtask_depth;
   __imp__sub_826A17F0(ctx, base);
   --ladder_subtask_depth;
+  LogLadderSubtask(base, "first", task, ctx.r3.u32);
+}
+
+// Slot 20 runs every frame (it returns the current subtask while nothing changes), so only a
+// changed subtask is logged.
+thread_local uint32_t ladder_last_task = 0, ladder_last_subtask = 0;
+extern "C" void sub_826A1BB8(PPCContext& ctx, uint8_t* base) {
+  const uint32_t task = ctx.r3.u32;
+  __imp__sub_826A1BB8(ctx, base);
+  if (task == ladder_last_task && ctx.r3.u32 == ladder_last_subtask) return;
+  ladder_last_task = task;
+  ladder_last_subtask = ctx.r3.u32;
+  LogLadderSubtask(base, "next", task, ctx.r3.u32);
 }
 
 extern "C" void sub_826A1138(PPCContext& ctx, uint8_t* base) {

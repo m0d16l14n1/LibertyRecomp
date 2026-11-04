@@ -1,0 +1,59 @@
+# Ladder climb at a fixed 60 Hz step, fix on vs off (task 30). Needs a free-roam save.
+# Ladder A: p_tank_12 (manhat12, Algonquin north), bottom -431.19 1801.78 7.94, 7.6 m tall,
+# from the 360 map data (2dfx type 14 + .xpl instance, identity rotation). Walking into it
+# doesn't start a climb (the ped slides along the tank), so the climb is started with the
+# TASK_CLIMB_LADDER native right after the teleport. Pass: `where` z reaches about 15.5 (the
+# top). Run with --gta4_ladder_log=true: "gta4-ladder first/next ... subtask=" shows the
+# sequence (slide to coord, achieve heading, climb ladder); a stall stops at the first two.
+# "gta4-ladder heading tolerance 0.02 -> 0.1" shows the fix ran. `wait` is real time.
+await 5m
+wait 10s
+invincible
+nowanted
+clock 13 0
+weather 1
+set gta4_debug_fixed_step_hz 60
+mark all
+
+set gta4_ladder_heading_tolerance_fix false
+teleport -431.19 1800.58 9.0 0
+wait 4s
+mark a_off
+native TASK_CLIMB_LADDER $ped 0
+wait 30s
+where
+mark a_off_end
+shot {out}/shots/30-ladder-a-off.png 0.5
+
+set gta4_ladder_heading_tolerance_fix true
+teleport -431.19 1800.58 9.0 0
+wait 4s
+mark a_on
+native TASK_CLIMB_LADDER $ped 0
+wait 30s
+where
+mark a_on_end
+shot {out}/shots/30-ladder-a-on.png 0.5
+
+# Second try with the fix off, from a turned start (heading 90: the ped must turn to face).
+set gta4_ladder_heading_tolerance_fix false
+teleport -431.19 1800.58 9.0 90
+wait 4s
+mark a_off90
+native TASK_CLIMB_LADDER $ped 0
+wait 30s
+where
+mark a_off90_end
+
+set gta4_ladder_heading_tolerance_fix true
+teleport -431.19 1800.58 9.0 90
+wait 4s
+mark a_on90
+native TASK_CLIMB_LADDER $ped 0
+wait 30s
+where
+mark a_on90_end
+
+set gta4_debug_fixed_step_hz 0
+mark all_end
+quit
