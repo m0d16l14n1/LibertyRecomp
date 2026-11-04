@@ -8,6 +8,8 @@
 //   rtao_atrous     edge-aware a-trous filter (depth + normal), run with step 1 and 2
 //   rtao_upsample   depth-aware 2x2 upsample to input resolution
 //   rtao_apply_*    full-screen pass over the lighting output: multiply, or show the AO
+//   rtshadow_*      sun shadows: trace towards the sun, then rtao_temporal, rtao_atrous
+//                   (step 1) and rtshadow_upsample (see the end of this file)
 // Every texture is read with read()/write(): no samplers, no filtering surprises.
 // RtaoParams must match raytracing/raytracing.h.
 #include <metal_stdlib>
@@ -220,15 +222,7 @@ kernel void rtao_atrous(constant RtaoParams& p [[buffer(0)]],
 // To input resolution: the 2x2 nearest AO pixels, weighted by view-distance similarity
 // to this pixel. ao: r8/r16 float, 1 = unoccluded.
 
-kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
-                          texture2d<float, access::read> filtered [[texture(0)]],
-                          texture2d<float, access::read> depth [[texture(1)]],
-                          texture2d<float, access::write> ao [[texture(2)]],
-                          uint2 id [[thread_position_in_grid]]) {
-    if (any(id >= p.inputSize)) return;
-    const float d = depth_at(depth, id);
-    if (is_sky(d, p)) { ao.write(float4(1), id); return; }
-    const float distance = view_depth(world_at(id, p.inputSize, d, p), p);
+static float upsample_value(constant RtaoParams& p, texture2d<float, access::read> filtered, uint2 id, float distance) {
     const float2 source = (float2(id) + 0.5f) * 0.5f - 0.5f;
     const int2 base = int2(floor(source));
     const float2 f = source - float2(base);
@@ -244,9 +238,20 @@ kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
             total += w;
         }
     }
-    ao.write(float4(total > 0.0f ? sum / total : 1.0f), id);
+    return total > 0.0f ? sum / total : 1.0f;
 }
 
+kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
+                          texture2d<float, access::read> filtered [[texture(0)]],
+                          texture2d<float, access::read> depth [[texture(1)]],
+                          texture2d<float, access::write> ao [[texture(2)]],
+                          uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.inputSize)) return;
+    const float d = depth_at(depth, id);
+    if (is_sky(d, p)) { ao.write(float4(1), id); return; }
+    const float distance = view_depth(world_at(id, p.inputSize, d, p), p);
+    ao.write(float4(upsample_value(p, filtered, id, distance)), id);
+}
 
 // ---- apply ---------------------------------------------------------------------------
 // One full-screen triangle over the lighting output, in its own render pass.
@@ -397,4 +402,112 @@ fragment float4 rtao_apply_debug(RtaoApplyVertex in [[stage_in]],
                                  texture2d<float, access::read> debug [[texture(0)]]) {
     const uint2 pixel = min(uint2(in.position.xy) / 2u, uint2(debug.get_width() - 1, debug.get_height() - 1));
     return float4(debug.read(pixel).rgb, 1.0f);
+}
+
+
+// ---- sun shadows (gta4_metal_raytracing = shadows) ------------------------------------
+// rtshadow_trace replaces rtao_trace; rtao_temporal and rtao_atrous run unchanged on its
+// output (same layout: r visibility, g view distance); rtshadow_upsample writes the
+// lighting variant's texture (raytracing_shadow_variants.py):
+//   RG16Float, r = visibility (1 lit), g = replace (1: traced only; 0: min with the cascade).
+// Must match RtShadowParams in raytracing/sun_shadows.mm.
+
+struct RtShadowParams {
+    float4 toSun;        // xyz: unit direction towards the sun (-gDirectionalLight), w: 1 when there is a sun
+    float coneTangent;   // tan of the sun's angular radius: soft penumbrae, denoised over frames
+    float maxDistance;   // world units; casters further along the ray are ignored
+    uint mask;           // instance mask the rays test (1 opaque, 2 alpha-tested)
+    float replace;       // written to g by rtshadow_upsample
+};
+
+static float3 cone_direction(float3 axis, float tangent, float2 u) {
+    const float3 t = normalize(abs(axis.z) < 0.999f ? cross(axis, float3(0, 0, 1)) : cross(axis, float3(1, 0, 0)));
+    const float3 b = cross(axis, t);
+    const float r = tangent * sqrt(u.x), phi = 2.0f * M_PI_F * u.y;
+    return normalize(axis + (t * cos(phi) + b * sin(phi)) * r);
+}
+
+// out: r = visibility (1 lit, 0 shadowed), g = view distance (0 for sky)
+kernel void rtshadow_trace(constant RtaoParams& p [[buffer(0)]],
+                           instance_acceleration_structure scene [[buffer(1)]],
+                           constant RtShadowParams& s [[buffer(2)]],
+                           texture2d<float, access::read> depth [[texture(0)]],
+                           texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                           texture2d<float, access::write> raw [[texture(2)]],
+                           uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.traceSize)) return;
+    const uint2 jitter = uint2(p.frame & 1u, (p.frame >> 1) & 1u);
+    const uint2 pixel = min(id * 2u + jitter, p.inputSize - 1u);
+    const float d = depth_at(depth, pixel);
+    if (is_sky(d, p)) { raw.write(float4(1, 0, 0, 0), id); return; }
+    const float3 position = world_at(pixel, p.inputSize, d, p);
+    const float distance = view_depth(position, p);
+    const float3 n = normal_at(depth, gbufferNormal, pixel, position, p, p.normalMode);
+    // No sun, or a surface facing away from it: the lighting's N.L is zero there already, and
+    // "lit" keeps the filters from spreading darkness over the terminator.
+    if (s.toSun.w == 0.0f || dot(n, s.toSun.xyz) <= 0.0f || !all(isfinite(position))) {
+        raw.write(float4(1, distance, 0, 0), id);
+        return;
+    }
+    ray r;
+    r.origin = position + n * origin_offset(distance);
+    r.direction = cone_direction(s.toSun.xyz, s.coneTangent, random2(id, p.frame));
+    r.min_distance = 0.0f;
+    r.max_distance = s.maxDistance;
+    intersector<instancing> query;
+    query.accept_any_intersection(true);
+    query.assume_geometry_type(geometry_type::triangle);
+    query.force_opacity(forced_opacity::opaque);
+    const auto hit = query.intersect(r, scene, s.mask);
+    raw.write(float4(hit.type == intersection_type::none ? 1.0f : 0.0f, distance, 0, 0), id);
+}
+
+kernel void rtshadow_upsample(constant RtaoParams& p [[buffer(0)]],
+                              constant RtShadowParams& s [[buffer(2)]],
+                              texture2d<float, access::read> filtered [[texture(0)]],
+                              texture2d<float, access::read> depth [[texture(1)]],
+                              texture2d<float, access::write> shadow [[texture(2)]],
+                              uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.inputSize)) return;
+    const float d = depth_at(depth, id);
+    // Sky: lit, and never replace (the lighting draw does not shade the sky anyway).
+    if (is_sky(d, p)) { shadow.write(float4(1, 0, 0, 0), id); return; }
+    const float distance = view_depth(world_at(id, p.inputSize, d, p), p);
+    shadow.write(float4(upsample_value(p, filtered, id, distance), s.replace, 0, 0), id);
+}
+
+// Statistics every 300 traced frames (sun_shadows.mm logs gta4-metal-raytracing-shadow-stats):
+// uints: 0 traced, 1 sky, 2 facing away, 3 shadowed (raw); floats (offset 64): 0 visibility sum
+// of the final texture over non-sky pixels, 1 its pixel count, 2 N.toSun sum over traced pixels.
+kernel void rtshadow_stats(constant RtaoParams& p [[buffer(0)]],
+                           constant RtShadowParams& s [[buffer(2)]],
+                           device atomic_uint* counts [[buffer(3)]],
+                           device atomic_float* sums [[buffer(4)]],
+                           texture2d<float, access::read> depth [[texture(0)]],
+                           texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                           texture2d<float, access::read> raw [[texture(2)]],
+                           texture2d<float, access::read> shadow [[texture(3)]],
+                           uint2 id [[thread_position_in_grid]]) {
+    const bool inside = all(id < p.traceSize);
+    const uint2 pixel = min(id * 2u, p.inputSize - 1u);
+    const float d = depth_at(depth, pixel);
+    const bool sky = !inside || is_sky(d, p);
+    float facing = 0.0f;
+    bool away = false, shadowed = false;
+    if (!sky) {
+        const float3 position = world_at(pixel, p.inputSize, d, p);
+        if (all(isfinite(position))) {
+            facing = dot(normal_at(depth, gbufferNormal, pixel, position, p, p.normalMode), s.toSun.xyz);
+            away = facing <= 0.0f;
+        }
+        shadowed = raw.read(id).r < 0.5f;
+    }
+    add_count(counts, 0, !sky ? 1u : 0u);
+    add_count(counts, 1, inside && sky ? 1u : 0u);
+    add_count(counts, 2, away ? 1u : 0u);
+    add_count(counts, 3, shadowed ? 1u : 0u);
+    add_sum(sums, 2, facing);
+    const float visibility = !sky ? shadow.read(pixel).r : 0.0f;
+    add_sum(sums, 0, visibility);
+    add_sum(sums, 1, !sky ? 1.0f : 0.0f);
 }

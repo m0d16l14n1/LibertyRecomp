@@ -1005,18 +1005,21 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       }
     }
   }
-  // Ray-traced AO: once per frame, just before the deferred lighting's global contribution
-  // (lightShadowDirectional / lightNoDirectional), from the finished scene depth and the
-  // frame's captured scene. The lighting draw's own pass is reopened afterwards.
-  const bool ao_lighting=raytracing_ao.initialized()&&lighting.stage==RenderExecutionStage::kDeferredLighting&&
+  // Ray-traced AO / sun shadows: once per frame, just before the deferred lighting's global
+  // contribution (lightShadowDirectional / lightNoDirectional), from the finished scene depth
+  // and the frame's captured scene. The lighting draw's own pass is reopened afterwards.
+  const bool rt_lighting=(raytracing_ao.initialized()||raytracing_shadows.initialized())&&
+      lighting.stage==RenderExecutionStage::kDeferredLighting&&
       lighting.role==LightPassRole::kGlobalContribution&&targets.colors[0]&&temporal.depth_source&&
       temporal.depth_source->image&&targets.width==temporal.depth_source->image.width&&
       targets.height==temporal.depth_source->image.height;
-  if(ao_lighting){
+  const bool ao_lighting=rt_lighting&&raytracing_ao.initialized();
+  const bool shadow_lighting=rt_lighting&&raytracing_shadows.initialized();
+  if(rt_lighting){
     ++raytracing_ao_lighting_draws;
     if(raytracing_ao_sequence!=temporal.metadata.sequence&&raytracing_capture.has_camera()){
       raytracing_ao_sequence=temporal.metadata.sequence;
-      raytracing_ao_texture=nil;
+      raytracing_ao_texture=nil; raytracing_shadow_texture=nil;
       const auto clip_to_world=raytracing::ClipToWorldColumns(temporal.actual_projection,temporal.actual_inverse);
       EndRender();
       std::string rt_error;
@@ -1038,10 +1041,21 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         if(temporal.metadata.jitter_applied)
           f.jitter_ndc={2*temporal.metadata.jitter[0]/float(f.depth.width),-2*temporal.metadata.jitter[1]/float(f.depth.height)};
         f.captured_positions=raytracing_capture.positions(f.captured_vertices);
-        raytracing_ao_settings=raytracing::CurrentAoSettings();
-        raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
+        if(ao_lighting){
+          raytracing_ao_settings=raytracing::CurrentAoSettings();
+          raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
+        }
+        if(shadow_lighting&&rt_error.empty()){
+          // gDirectionalLight is pixel c17 of this draw (lightShadowDirectional); lightNoDirectional
+          // leaves no sun there and the trace returns all lit.
+          std::array<float,4> directional_light{};
+          core::CopyGuestWordsToHost(reinterpret_cast<uint8_t*>(directional_light.data()),guest.data()+0x1780+17*16,sizeof(directional_light));
+          raytracing_shadow_settings=raytracing::CurrentShadowSettings();
+          raytracing_shadow_texture=raytracing_shadows.Encode(commands,f,raytracing::TowardsSun(directional_light),
+                                                              raytracing_shadow_settings,rt_error);
+        }
       }
-      if(!rt_error.empty())REXLOG_ERROR("gta4-metal-raytracing: AO encode failed: {}",rt_error);
+      if(!rt_error.empty())REXLOG_ERROR("gta4-metal-raytracing: lighting trace failed: {}",rt_error);
       if(!BeginRender(targets,error))return false;
     }
   }
@@ -1060,6 +1074,19 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       draw_state=pipeline->ambient_state; ao_ambient=true;
       [render setFragmentTexture:raytracing_ao_texture atIndex:0];
       ++raytracing_ao_ambient_draws;
+    }
+  }
+  // Sun shadows: the lighting shader's shadow variant, this frame's shadows at fragment texture 1.
+  if(shadow_lighting&&raytracing_shadow_texture&&raytracing_ao_sequence==temporal.metadata.sequence&&
+     raytracing::ShadowViewUsesVariant(raytracing_shadow_settings.view)&&pipeline->sunlit&&!ao_ambient){
+    if(!pipeline->sunlit_state){
+      std::lock_guard lock(pipeline->sunlit->mutex);
+      if(pipeline->sunlit->complete)pipeline->sunlit_state=pipeline->sunlit->state;
+    }
+    if(pipeline->sunlit_state){
+      draw_state=pipeline->sunlit_state;
+      [render setFragmentTexture:raytracing_shadow_texture atIndex:1];
+      ++raytracing_shadow_draws;
     }
   }
   bindings.Pipeline(render,draw_state); bindings.Depth(render,depth_state);
@@ -1135,6 +1162,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       auto& g=capture_geometry;
       g.primitive=primitive; g.indexed=indexed; g.index32=index32; g.indices=indices; g.index_offset=index_offset;
       g.first=indexed?0:first; g.count=count; g.base_vertex=base_vertex;
+      // Cut-out surfaces (alpha test, or alpha-to-mask, which foliage uses without the test):
+      // shadow rays leave them to the cascade, since the captured triangles are solid.
+      g.alpha_tested=(fixed.alpha_test_enable&&fixed.alpha_function!=7)||fixed.alpha_to_mask_enable;
       // Rebinds the capture pipeline and buffers 6/7; the next draw rebinds its own
       // pipeline through `bindings`, and temporal draws set 6/7 every time.
       std::string capture_error;
@@ -1151,6 +1181,14 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     if(raytracing_ao.Apply(commands,targets.colors[0]->image,raytracing_ao_texture,raytracing_ao_settings,rt_error))
       ++raytracing_ao_applied;
     else REXLOG_ERROR("gta4-metal-raytracing: AO apply failed: {}",rt_error);
+  }
+  if(shadow_lighting&&raytracing_shadow_texture&&raytracing_ao_sequence==temporal.metadata.sequence&&
+     raytracing_shadow_settings.view==raytracing::ShadowView::kShow&&!scene_blending&&!sky_capture){
+    EndRender();
+    std::string rt_error;
+    if(raytracing_shadows.Show(commands,targets.colors[0]->image,raytracing_shadow_texture,rt_error))
+      ++raytracing_shadow_shown;
+    else REXLOG_ERROR("gta4-metal-raytracing: shadow show failed: {}",rt_error);
   }
   if(sky_capture){
     [render setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];

@@ -4,7 +4,7 @@
 #include <string>
 
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing, "off", "GPU",
-    "Ray-traced lighting: off, ao (ambient occlusion) or shadows (sun shadows; later stage)");
+    "Ray-traced lighting: off, ao (ambient occlusion) or shadows (sun shadows)");
 
 namespace rex::graphics::gta4_metal::raytracing {
 
@@ -50,12 +50,12 @@ MTLInstanceAccelerationStructureDescriptor* InstanceDescriptor(id<MTLBuffer> ins
 }
 
 void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, id<MTLAccelerationStructure> structure,
-                  uint32_t user_id) {
+                  uint32_t user_id, uint32_t mask) {
   instance = {};
   for (int column = 0; column < 4; ++column)
     for (int row = 0; row < 3; ++row) instance.transformationMatrix.columns[column].elements[row] = column == row ? 1.0f : 0.0f;
   instance.options = MTLAccelerationStructureInstanceOptionOpaque;
-  instance.mask = 0xFF;
+  instance.mask = mask;
   instance.intersectionFunctionTableOffset = 0;
   instance.userID = user_id;
   instance.accelerationStructureID = structure.gpuResourceID;

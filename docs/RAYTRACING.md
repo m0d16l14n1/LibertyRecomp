@@ -1,11 +1,12 @@
 # Ray tracing in the GTA IV Metal renderer
 
-Status: stage 3. Geometry capture builds the scene every frame (stage 2). In mode `ao`, AO is traced and
-denoised before the deferred lighting's global contribution and multiplied into its output. Default `off`.
+Status: stage 4. Geometry capture builds the scene every frame (stage 2). In mode `ao`, AO is traced and
+denoised before the deferred lighting's global contribution and applied to its ambient term (stage 3). In mode
+`shadows`, sun shadows are traced at the same point and combined with the cascade in the lighting shader
+(stage 4). Default `off`.
 
 Settings:
-- `gta4_metal_raytracing = off | ao | shadows`. `shadows` only captures for now. It is read at startup and needs
-  TAA or the MetalFX upscaler.
+- `gta4_metal_raytracing = off | ao | shadows`. It is read at startup and needs TAA or the MetalFX upscaler.
 - `gta4_metal_raytracing_ao_view`:
   - `apply`: AO on the ambient term only, through the lighting shader's AO variant;
   - `multiply`: the whole global contribution is multiplied by AO, scaled by `_ao_strength`;
@@ -14,6 +15,37 @@ Settings:
   - `none`: trace only, for timing.
 - `gta4_metal_raytracing_ao_normals = depth | gbuffer | gbuffer-yx`: where surface normals come from.
 - `gta4_metal_raytracing_ao_radius` (2 m), `_ao_occlusion` (0.85, AO term darkness), `_ao_strength` (0.6, multiply only).
+- `gta4_metal_raytracing_shadow_view`:
+  - `combine` (default): the lighting shader takes min(cascade, traced);
+  - `replace`: traced visibility only (judging the trace; loses casters the capture lacks);
+  - `show`: traced visibility in grey instead of the lighting;
+    it writes visibility into the HDR lighting target before tonemapping, so lit areas read
+    mid-grey, not white; compare shapes, not levels (the AO `show` behaves the same);
+  - `none`: trace only, for timing.
+- `gta4_metal_raytracing_shadow_angle` (0.5 degrees: sun angular radius, penumbra softness; 0 = hard),
+  `_shadow_distance` (250 m: farthest caster along the ray), `_shadow_foliage` (false: alpha-tested and
+  alpha-to-mask geometry does not cast traced shadows). Shadows use `_ao_normals` for surface normals.
+
+### Sun shadows (stage 4)
+
+At the same hook as the AO, from the same inputs (TLAS from capture, depth snapshot, G-buffer normals, motion):
+- `rtshadow_trace`, at half resolution: one ray per pixel towards the sun (`-gDirectionalLight`, pixel c17 of the
+  lighting draw), jittered inside the sun's cone. Surfaces facing away from the sun and frames without a sun
+  (`lightNoDirectional`) are written as lit.
+- Then `rtao_temporal` (history weight at least 0.2: moving shadows ghost less than AO), one `rtao_atrous` pass
+  (step 1) and `rtshadow_upsample` to an RG16Float texture: r visibility, g replace flag.
+- Captured instances carry a mask: 1 opaque, 2 cut-out (alpha test or alpha-to-mask). Shadow rays test 1 only
+  by default. The structures are opaque, so a leaf card would cast a solid quad; foliage keeps its cascade shadow.
+- `tools/metal/raytracing_shadow_variants.py` builds `stock_shadow_shader_archive.bin`. In
+  `lightShadowDirectional` (`7B14CAC2A31D4199`, `FF4B1BA4B364BCD3`) the four cascade taps are compared, averaged
+  and faded with distance into one factor (`r1.x`) that scales the sun's diffuse and specular. The variant
+  combines that factor with the traced texture (`texture(1)`) right after the fade. `texture(0)` stays the
+  AO's, and the two transforms compose.
+- `combine` keeps the cascade for casters the capture does not have: anything outside the camera's view
+  (only drawn geometry is captured), and foliage. The trace adds contact detail and shadows beyond the
+  cascade's fade distance.
+- Statistics every 300 traced frames: `gta4-metal-raytracing-shadow-stats` (sun direction, shadowed fraction,
+  mean N.sun, facing-away count). The renderer line adds `shadow-traced`, `shadow-draws` and `shadow-shown`.
 
 ### Ambient-only apply
 

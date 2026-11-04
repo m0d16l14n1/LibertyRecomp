@@ -26,6 +26,7 @@ struct DrawGeometry {
   uint32_t first = 0;           // non-indexed: the first vertex
   uint32_t count = 0;           // indices, or vertices
   int32_t base_vertex = 0;
+  bool alpha_tested = false;  // alpha test or alpha-to-mask: the instance gets kInstanceMaskAlphaTested (shadow_policy.h)
 };
 
 struct CaptureSettings {

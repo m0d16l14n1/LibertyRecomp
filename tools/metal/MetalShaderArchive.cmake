@@ -137,4 +137,20 @@ function(liberty_add_metal_shader_archive app_target workspace_root)
     set_source_files_properties("${ao_archive}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
     target_sources("${app_target}" PRIVATE "${ao_archive}")
     set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${ao_archive}")
+    # Ray-traced sun-shadow variants of the deferred-lighting pixel shaders (the two with the
+    # sun cascade). Without them, mode shadows traces but only view show draws the result.
+    set(shadow_builder "${workspace_root}/tools/metal/raytracing_shadow_variants.py")
+    set(shadow_archive "${archive_dir}/stock_shadow_shader_archive.bin")
+    add_custom_command(OUTPUT "${shadow_archive}"
+        COMMAND "${Python3_EXECUTABLE}" "${shadow_builder}"
+            --archive "${archive}" --sources "${archive_dir}/work/sources"
+            --work "${archive_dir}/stock-shadow-work" --output "${shadow_archive}"
+            --jobs 2 --deployment "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        DEPENDS "${archive}" "${shadow_builder}" "${builder}"
+        COMMENT "Compiling ray-traced sun-shadow lighting shader variants" VERBATIM)
+    add_custom_target(liberty_stock_shadow_archive DEPENDS "${shadow_archive}")
+    add_dependencies("${app_target}" liberty_stock_shadow_archive)
+    set_source_files_properties("${shadow_archive}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
+    target_sources("${app_target}" PRIVATE "${shadow_archive}")
+    set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${shadow_archive}")
 endfunction()

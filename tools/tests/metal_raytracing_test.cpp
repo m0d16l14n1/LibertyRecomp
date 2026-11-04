@@ -1,7 +1,9 @@
 // CPU-side ray-tracing policy: acceleration-structure cache keying, budgets and eviction,
-// and the capture policy (geometry identity, placement, clip-to-world, triangle lists).
+// the capture policy (geometry identity, placement, clip-to-world, triangle lists) and
+// the sun-shadow policy (view, sun direction, cone, instance masks).
 #include "graphics/gta4_metal/raytracing/accel_cache.h"
 #include "graphics/gta4_metal/raytracing/capture_policy.h"
+#include "graphics/gta4_metal/raytracing/shadow_policy.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -97,8 +99,41 @@ static void CapturePolicy() {
   }
 }
 
+static void ShadowPolicy() {
+  {  // the view cvar: anything unknown keeps the default
+    CHECK(ParseShadowView("combine") == ShadowView::kCombine);
+    CHECK(ParseShadowView("replace") == ShadowView::kReplace);
+    CHECK(ParseShadowView("show") == ShadowView::kShow);
+    CHECK(ParseShadowView("none") == ShadowView::kNone);
+    CHECK(ParseShadowView("") == ShadowView::kCombine && ParseShadowView("Replace") == ShadowView::kCombine);
+    CHECK(ShadowViewUsesVariant(ShadowView::kCombine) && ShadowViewUsesVariant(ShadowView::kReplace));
+    CHECK(!ShadowViewUsesVariant(ShadowView::kShow) && !ShadowViewUsesVariant(ShadowView::kNone));
+  }
+  {  // gDirectionalLight is where the light goes: rays go the other way, normalised
+    const auto noon = TowardsSun({0.0f, 0.0f, -2.0f, 1.0f});
+    CHECK(noon && (*noon)[0] == 0.0f && (*noon)[1] == 0.0f && (*noon)[2] == 1.0f);
+    const auto low = TowardsSun({-3.0f, 0.0f, -4.0f, 0.0f});  // w (the title's own use) is ignored
+    CHECK(low && std::fabs((*low)[0] - 0.6f) < 1e-6f && std::fabs((*low)[2] - 0.8f) < 1e-6f);
+    CHECK(!TowardsSun({0.0f, 0.0f, 0.0f, 1.0f}));  // lightNoDirectional: no sun
+    CHECK(!TowardsSun({NAN, 0.0f, -1.0f, 1.0f}) && !TowardsSun({0.0f, INFINITY, -1.0f, 1.0f}));
+    CHECK(!TowardsSun({1e-6f, 0.0f, 0.0f, 1.0f}));
+  }
+  {  // the cone: degrees to a tangent, hard at 0, at most 5 degrees
+    CHECK(ConeTangent(0.0) == 0.0f && ConeTangent(-1.0) == 0.0f && ConeTangent(NAN) == 0.0f);
+    CHECK(std::fabs(ConeTangent(0.5) - 0.0087269f) < 1e-6f);
+    CHECK(ConeTangent(45.0) == ConeTangent(5.0));
+  }
+  {  // masks: AO rays (0xFF) see everything, shadow rays skip cut-outs unless foliage is on
+    CHECK(InstanceMaskOf(false) == kInstanceMaskOpaque && InstanceMaskOf(true) == kInstanceMaskAlphaTested);
+    CHECK((ShadowRayMask(false) & InstanceMaskOf(false)) != 0 && (ShadowRayMask(false) & InstanceMaskOf(true)) == 0);
+    CHECK((ShadowRayMask(true) & InstanceMaskOf(false)) != 0 && (ShadowRayMask(true) & InstanceMaskOf(true)) != 0);
+    CHECK((0xFFu & InstanceMaskOf(true)) != 0 && (0xFFu & InstanceMaskOf(false)) != 0);
+  }
+}
+
 int main() {
   CapturePolicy();
+  ShadowPolicy();
   std::vector<std::string> released;
   const auto release = [&](std::string& payload) { released.push_back(payload); };
   {  // static geometry: built once, then only instanced

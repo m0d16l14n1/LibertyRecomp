@@ -1,5 +1,5 @@
 #pragma once
-// Ray-traced AO (and later sun shadows) for the GTA IV Metal renderer.
+// Ray-traced AO and sun shadows for the GTA IV Metal renderer.
 // Design: docs/RAYTRACING.md. Stage 1 here: the public types, the one entry
 // point for every acceleration-structure build/refit, and the cvar. The frame
 // hook and capture call site follow once the G-buffer layout is confirmed.
@@ -86,7 +86,8 @@ MTLPrimitiveAccelerationStructureDescriptor* PrimitiveDescriptor(const TriangleG
 MTLInstanceAccelerationStructureDescriptor* InstanceDescriptor(id<MTLBuffer> instances, NSUInteger offset,
                                                                uint32_t count);
 // An identity-transform, opaque instance of `structure` (captured positions are world space).
+// `mask`: kInstanceMask* (shadow_policy.h); rays test it against their own mask.
 void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, id<MTLAccelerationStructure> structure,
-                  uint32_t user_id);
+                  uint32_t user_id, uint32_t mask = 0xFF);
 
 }  // namespace rex::graphics::gta4_metal::raytracing

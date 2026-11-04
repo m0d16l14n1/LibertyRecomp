@@ -11,6 +11,7 @@
 #include "temporal/live.h"
 #include "raytracing/capture.h"
 #include "raytracing/ambient_occlusion.h"
+#include "raytracing/sun_shadows.h"
 #include "frame_work_qos.h"
 #include "encoder_bindings.h"
 #include "constant_upload_cache.h"
@@ -74,6 +75,10 @@ struct Renderer::State {
     // (raytracing_ao_variants.py), which scales only the ambient term; set once ready.
     std::shared_ptr<PipelineBuild> ambient;
     id<MTLRenderPipelineState> ambient_state=nil;
+    // Ray-traced sun shadows (mode shadows): this pipeline with the lighting shader's shadow
+    // variant (raytracing_shadow_variants.py), which combines the cascade with the trace.
+    std::shared_ptr<PipelineBuild> sunlit;
+    id<MTLRenderPipelineState> sunlit_state=nil;
   };
   // Guest, shared and descriptor banks retain their latest exact source bytes
   // to reject unchanged values before hashing or inspecting immutable uploads.
@@ -124,6 +129,8 @@ struct Renderer::State {
   ShaderCache capture_stock;  // ray-tracing capture variants of the stock vertex shaders
   ShaderCache ao_stock;       // ray-traced AO variants of the deferred-lighting pixel shaders
   bool raytracing_ao_variants=false;  // ao_stock loaded
+  ShaderCache shadow_stock;   // ray-traced sun-shadow variants of the deferred-lighting pixel shaders
+  bool raytracing_shadow_variants=false;  // shadow_stock loaded
   raytracing::Mode raytracing_mode=raytracing::Mode::kOff;  // read at Initialize
   raytracing::Capture raytracing_capture;
   uint64_t raytracing_sequence=~0ull;  // temporal sequence of the open capture frame
@@ -131,8 +138,13 @@ struct Renderer::State {
   raytracing::AmbientOcclusion raytracing_ao;
   raytracing::AoSettings raytracing_ao_settings;
   id<MTLTexture> raytracing_ao_texture=nil;   // this frame's AO, input size
-  uint64_t raytracing_ao_sequence=~0ull;      // temporal sequence it was traced for
+  uint64_t raytracing_ao_sequence=~0ull;      // temporal sequence it (and the shadows) was traced for
   uint64_t raytracing_ao_lighting_draws=0,raytracing_ao_applied=0,raytracing_ao_ambient_draws=0;
+  // Ray-traced sun shadows (mode shadows): traced at the same hook, from the same inputs.
+  raytracing::SunShadows raytracing_shadows;
+  raytracing::ShadowSettings raytracing_shadow_settings;
+  id<MTLTexture> raytracing_shadow_texture=nil;  // this frame's shadows, input size, RG16Float
+  uint64_t raytracing_shadow_draws=0,raytracing_shadow_shown=0;
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
   // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about

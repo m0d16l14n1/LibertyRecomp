@@ -37,7 +37,7 @@ set(METAL_RENDERER_SOURCES renderer.mm pipelines.mm pipeline_store.mm gpu_pass_t
     resolve.mm depth_passes.mm readback.mm present.mm post_processing.mm depth_of_field.mm sun_shafts.mm shaders.mm
     resources.mm resource_buffers.mm resource_textures.mm resource_samplers.mm resource_fonts.mm
     texture_preparation.mm temporal/live.mm raytracing/raytracing.mm raytracing/capture.mm
-    raytracing/ambient_occlusion.mm)
+    raytracing/ambient_occlusion.mm raytracing/sun_shadows.mm)
 set_source_files_properties(${METAL_RENDERER_SOURCES} graphics_system.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 add_library(rex-gta4-metal-renderer STATIC ${METAL_RENDERER_SOURCES}

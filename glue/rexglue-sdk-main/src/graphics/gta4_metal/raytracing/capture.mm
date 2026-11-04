@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "shadow_policy.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -14,6 +15,7 @@ struct Blas {
   id<MTLBuffer> indices = nil;  // persistent relative triangle list
   uint32_t first_vertex = 0, vertex_count = 0, triangle_count = 0;
   NSUInteger refit_scratch = 0;
+  uint32_t mask = kInstanceMaskOpaque;  // InstanceMaskOf(alpha tested), fixed at the build
 };
 NSUInteger AlignUp(NSUInteger value, NSUInteger alignment) { return (value + alignment - 1) / alignment * alignment; }
 }  // namespace
@@ -180,6 +182,7 @@ bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
     blas.first_vertex = list->first_vertex;
     blas.vertex_count = list->vertex_count;
     blas.triangle_count = uint32_t(list->indices.size() / 3);
+    blas.mask = InstanceMaskOf(draw.alpha_tested);
     blas.indices = [s.device newBufferWithBytes:list->indices.data() length:list->indices.size() * sizeof(uint32_t)
                                         options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
     if (!blas.indices) { s.cache.Abandon(slot); return true; }
@@ -263,7 +266,7 @@ id<MTLAccelerationStructure> Capture::EncodeScene(id<MTLCommandBuffer> commands,
     if (!s.slot->scene) { error = "ray-tracing scene allocation failed"; return nil; }
   }
   auto* instances = static_cast<MTLIndirectAccelerationStructureInstanceDescriptor*>(s.slot->instances.contents);
-  for (size_t i = 0; i < scene.size(); ++i) FillInstance(instances[i], scene[i]->payload.structure, uint32_t(i));
+  for (size_t i = 0; i < scene.size(); ++i) FillInstance(instances[i], scene[i]->payload.structure, uint32_t(i), scene[i]->payload.mask);
 
   std::vector<AccelerationStructureOp> primitives;
   primitives.reserve(s.pending.size());
