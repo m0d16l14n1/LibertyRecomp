@@ -27,6 +27,9 @@
 REXCVAR_DEFINE_BOOL(gta4_cutscene_smooth_clock, true, "GTA IV/Fixes",
                     "Cutscene animation follows its audio smoothly instead of in the audio "
                     "thread's steps (cutscene judder)");
+REXCVAR_DEFINE_BOOL(gta4_cutscene_camera_cut_hold_fix, true, "GTA IV/Fixes",
+                    "Hold an animated camera only on the frames at a camera cut, not for the rest "
+                    "of the shot above 30 fps (FusionFix)");
 REXCVAR_DEFINE_BOOL(gta4_cutscene_clock_log, false, "GTA IV/Diagnostics",
                     "Log the per-frame cutscene time step, the game's and the smoothed, every 60 "
                     "playing frames (gta4-cutscene-clock)");
@@ -169,4 +172,21 @@ extern "C" void sub_821E5390(PPCContext& ctx, uint8_t* base) {
   ResetStatistics();
   game_steps.Add(last_game);
   smooth_steps.Add(last_smooth);
+}
+
+// Camera cuts hold only at the cut (FusionFix cutscenecam.ixx, the two +0x1B4 stores).
+// sub_82604DD8 (r3 = the animated camera, r4 = its phase; called from sub_82605030) turns the
+// phase into a 30 fps animation frame and looks for the camera-cut tag (144) on the frames around
+// it. Near a cut it puts the phase back to the last one (+440) and stores the held frame + 1 at
+// +436 (-1 = none); while +436 holds a frame, later calls take that frame instead of the phase's.
+// Above 30 fps several frames fall on one animation frame, so the camera kept the held frame
+// past the cut: a visible hitch at cuts. Keeping +436 at -1 (what FusionFix's NOPs do) holds the
+// camera only on frames that really are at the cut.
+extern "C" void sub_82604DD8(PPCContext& ctx, uint8_t* base) {
+  const uint32_t camera = ctx.r3.u32;
+  __imp__sub_82604DD8(ctx, base);
+  constexpr uint32_t kHeldFrame = 436;
+  constexpr uint32_t kNone = 0xBF800000;  // -1.0f
+  if (REXCVAR_GET(gta4_cutscene_camera_cut_hold_fix) && camera && REX_LOAD_U32(camera + kHeldFrame) != kNone)
+    REX_STORE_U32(camera + kHeldFrame, kNone);
 }
