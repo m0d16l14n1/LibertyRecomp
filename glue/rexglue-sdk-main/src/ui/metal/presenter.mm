@@ -12,6 +12,7 @@
 #include <utility>
 #include <rex/logging.h>
 #include <rex/cvar.h>
+#include "metal4_queue.h"
 #include <span>
 #include <rex/ui/surface_mac.h>
 #include <rex/ui/window.h>
@@ -223,7 +224,7 @@ std::unique_ptr<MetalPresenter> MetalPresenter::Create(std::shared_ptr<MetalCont
     if (!result->state_->present_pipeline || !result->state_->capture_pipeline) {
       REXLOG_ERROR("gta4-metal: {}",error); return {};
     }
-    auto sampler = [[MTLSamplerDescriptor alloc] init];
+    auto sampler = [[MTLSamplerDescriptor alloc] init]; sampler.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
     sampler.minFilter = sampler.magFilter = MTLSamplerMinMagFilterLinear;
     sampler.sAddressMode = sampler.tAddressMode = MTLSamplerAddressModeClampToEdge;
     result->state_->sampler = [result->state_->context->device newSamplerStateWithDescriptor:sampler];
@@ -441,6 +442,7 @@ Presenter::SurfacePaintConnectResult MetalPresenter::ConnectOrReconnectPaintingT
     layer.pixelFormat = hdr ? MTLPixelFormatRGBA16Float : kPresentationFormat;
     layer.wantsExtendedDynamicRangeContent = hdr;
     layer.framebufferOnly = YES;
+    AddLayerResidency(state_->display_queue ? state_->display_queue : state_->context->queue, layer);
     layer.opaque = YES;
     layer.presentsWithTransaction = NO;
     layer.drawableSize = CGSizeMake(width,height);

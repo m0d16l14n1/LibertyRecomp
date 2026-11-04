@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "pass_tags.h"
+#include "../../../ui/metal/metal4_queue.h"
 
 namespace rex::graphics::gta4_metal::temporal {
 namespace {
@@ -429,7 +430,8 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       scaler.preExposure = frame.pre_exposure;
       scaler.depthReversed = s.config.depth_reversed;
       scaler.reset = decision.reset;
-      [scaler encodeToCommandBuffer:commands];
+      // MetalFX takes a Metal 3 command buffer; on the Metal 4 queue it runs in an ordered hop.
+      rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [scaler encodeToCommandBuffer:m3]; });
     } else {
       TaaConstants c;
       c.extent = {s.config.input_width, s.config.input_height};
@@ -711,7 +713,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.aspectRatio = frame.aspect;
     fx.depthReversed = s.config.depth_reversed;
     fx.shouldResetHistory = decision.reset;
-    [fx encodeToCommandBuffer:commands];
+    rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [fx encodeToCommandBuffer:m3]; });
     if (overlay && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/ui-after");
       if (!encoder) {

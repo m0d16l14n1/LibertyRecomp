@@ -3,6 +3,13 @@
 #include <dispatch/dispatch.h>
 
 #include "metal_ui_library.h"
+#include "metal4_queue.h"
+
+#include <rex/cvar.h>
+#include <rex/logging.h>
+
+REXCVAR_DEFINE_STRING(gta4_metal_api, "metal3", "GPU/Metal",
+    "Command API for the Metal renderer: metal3, or metal4 (MTL4 queue, argument tables, residency sets; falls back to metal3 without Metal 4)");
 
 namespace rex::ui::metal {
 
@@ -25,7 +32,13 @@ std::shared_ptr<MetalContext> MetalContext::Create(std::string& error) {
       error = "The experimental Metal backend currently requires an Apple GPU.";
       return {};
     }
-    context->queue = [context->device newCommandQueue];
+    if (rex::cvar::GetFlagByName("gta4_metal_api") == "metal4") {
+      std::string metal4_error;
+      context->queue = NewMetal4Queue(context->device, metal4_error);
+      if (context->queue) REXLOG_INFO("gta4-metal: command API metal4");
+      else REXLOG_WARN("gta4-metal: command API metal4 unavailable ({}); using metal3", metal4_error);
+    }
+    if (!context->queue) context->queue = [context->device newCommandQueue];
     if (!context->queue) {
       error = "Metal command queue creation failed.";
       return {};

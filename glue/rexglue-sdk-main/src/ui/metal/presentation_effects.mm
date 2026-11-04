@@ -44,7 +44,7 @@ bool PresentationEffects::Initialize(std::shared_ptr<MetalContext> context, std:
         if (!pipelines_[index][format]) { error = MetalError(native_error, "Presentation pipeline creation failed"); return false; }
       }
     }
-    auto sampler = [MTLSamplerDescriptor new];
+    auto sampler = [MTLSamplerDescriptor new]; sampler.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
     sampler.minFilter = sampler.magFilter = MTLSamplerMinMagFilterLinear;
     sampler.sAddressMode = sampler.tAddressMode = MTLSamplerAddressModeClampToEdge;
     sampler_ = [context->device newSamplerStateWithDescriptor:sampler];

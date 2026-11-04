@@ -27,7 +27,7 @@ bool OutputTransfer::Initialize(std::shared_ptr<MetalContext> context, std::stri
       candidates[i] = [context->device newRenderPipelineStateWithDescriptor:descriptor error:&native_error];
       if (!candidates[i]) { error = MetalError(native_error, "Output-transfer pipeline creation failed"); return false; }
     }
-    auto descriptor = [MTLSamplerDescriptor new];
+    auto descriptor = [MTLSamplerDescriptor new]; descriptor.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
     descriptor.minFilter = descriptor.magFilter = MTLSamplerMinMagFilterLinear;
     descriptor.sAddressMode = descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
     auto sampler = [context->device newSamplerStateWithDescriptor:descriptor];

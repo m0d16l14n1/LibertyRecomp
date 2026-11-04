@@ -78,7 +78,7 @@ bool MetalImmediateDrawer::Initialize(std::string& error) {
     state_->depth = [state_->context->device newDepthStencilStateWithDescriptor:depth];
     if (!state_->depth) { error = "UI depth state creation failed."; return false; }
     for (size_t i = 0; i < state_->samplers.size(); ++i) {
-      auto sampler = [[MTLSamplerDescriptor alloc] init];
+      auto sampler = [[MTLSamplerDescriptor alloc] init]; sampler.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
       sampler.minFilter = sampler.magFilter = i & 1 ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
       sampler.sAddressMode = sampler.tAddressMode = i & 2 ? MTLSamplerAddressModeRepeat : MTLSamplerAddressModeClampToEdge;
       state_->samplers[i] = [state_->context->device newSamplerStateWithDescriptor:sampler];

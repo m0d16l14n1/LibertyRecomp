@@ -49,7 +49,7 @@ id<MTLTexture> DepthOfField::Record(const std::shared_ptr<ui::metal::MetalContex
     pipeline_ = pipeline; format_ = scene.pixelFormat;
   }
   if (!sampler_) {
-    auto descriptor = [MTLSamplerDescriptor new];
+    auto descriptor = [MTLSamplerDescriptor new]; descriptor.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
     descriptor.minFilter = descriptor.magFilter = MTLSamplerMinMagFilterLinear;
     descriptor.sAddressMode = descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
     descriptor.lodMaxClamp = 0;

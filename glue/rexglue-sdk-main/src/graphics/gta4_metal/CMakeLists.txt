@@ -19,6 +19,14 @@ add_custom_command(OUTPUT "${METAL_TEMPORAL_HEADER}"
         --sdk macosx --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
     DEPENDS shaders/temporal.metal shaders/temporal_exposure.metal shaders/temporal_motion_coverage.metal "${REXGLUE_ROOT}/tools/compile_metal_library.py"
     COMMENT "Compiling native temporal reconstruction and UI shaders" VERBATIM)
+set(METAL_RAYTRACING_HEADER "${METAL_RENDERER_GENERATED}/metal_raytracing_library.h")
+add_custom_command(OUTPUT "${METAL_RAYTRACING_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${REXGLUE_ROOT}/tools/compile_metal_library.py"
+        --source "${CMAKE_CURRENT_SOURCE_DIR}/raytracing/shaders/rtao.metal"
+        --output "${METAL_RAYTRACING_HEADER}" --symbol kMetalRaytracingLibrary
+        --sdk macosx --deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    DEPENDS raytracing/shaders/rtao.metal "${REXGLUE_ROOT}/tools/compile_metal_library.py"
+    COMMENT "Compiling ray-traced AO shaders" VERBATIM)
 add_library(rex-gta4-metal-temporal STATIC temporal/effects.mm temporal/library.mm temporal/motion_coverage.mm "${METAL_TEMPORAL_HEADER}")
 set_source_files_properties(temporal/effects.mm temporal/library.mm temporal/motion_coverage.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 set_target_properties(rex-gta4-metal-temporal PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
@@ -28,11 +36,12 @@ target_link_libraries(rex-gta4-metal-temporal PUBLIC "-framework Metal" "-framew
 set(METAL_RENDERER_SOURCES renderer.mm pipelines.mm pipeline_store.mm gpu_pass_timer.mm draw.mm attachment_passes.mm modern_sky_probe.mm
     resolve.mm depth_passes.mm readback.mm present.mm post_processing.mm depth_of_field.mm sun_shafts.mm shaders.mm
     resources.mm resource_buffers.mm resource_textures.mm resource_samplers.mm resource_fonts.mm
-    texture_preparation.mm temporal/live.mm)
+    texture_preparation.mm temporal/live.mm raytracing/raytracing.mm)
 set_source_files_properties(${METAL_RENDERER_SOURCES} graphics_system.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 add_library(rex-gta4-metal-renderer STATIC ${METAL_RENDERER_SOURCES}
-    guest_state.cpp shader_archive.cpp ../gta4_native/core/font_atlas.cpp "${METAL_NATIVE_HEADER}")
+    guest_state.cpp shader_archive.cpp ../gta4_native/core/font_atlas.cpp "${METAL_NATIVE_HEADER}"
+    "${METAL_RAYTRACING_HEADER}")
 set_target_properties(rex-gta4-metal-renderer PROPERTIES CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 target_include_directories(rex-gta4-metal-renderer PUBLIC "${REXGLUE_ROOT}/src"
@@ -81,6 +90,10 @@ if(REXGLUE_BUILD_TESTS)
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_constant_cache_test.cpp")
     target_include_directories(rex-metal-constant-cache-test PRIVATE "${REXGLUE_ROOT}/src")
     target_compile_options(rex-metal-constant-cache-test PRIVATE -UNDEBUG)
+    add_executable(rex-metal-raytracing-test EXCLUDE_FROM_ALL
+        "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_raytracing_test.cpp")
+    target_include_directories(rex-metal-raytracing-test PRIVATE "${REXGLUE_ROOT}/src")
+    target_compile_options(rex-metal-raytracing-test PRIVATE -UNDEBUG)
     add_executable(rex-metal-constant-range-shadow-test EXCLUDE_FROM_ALL
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_constant_range_shadow_test.cpp")
     target_include_directories(rex-metal-constant-range-shadow-test PRIVATE "${REXGLUE_ROOT}/src")

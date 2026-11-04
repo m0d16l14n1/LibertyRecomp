@@ -36,7 +36,7 @@ bool PostProcessing::EnsureSmaa(size_t quality,std::string& error){
       }
     }
     if(area_&&search_&&linear_&&point_){error.clear();return true;}
-    auto sampler = [MTLSamplerDescriptor new];
+    auto sampler = [MTLSamplerDescriptor new]; sampler.supportArgumentBuffers = YES;  // Metal 4 argument tables bind samplers by resource ID
     sampler.minFilter = sampler.magFilter = MTLSamplerMinMagFilterNearest;
     sampler.sAddressMode = sampler.tAddressMode = MTLSamplerAddressModeClampToEdge;
     point_ = [context_->device newSamplerStateWithDescriptor:sampler];

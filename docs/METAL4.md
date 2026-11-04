@@ -17,6 +17,22 @@ The device summary line (`gta4-metal: device summary ... metal4=yes/no`) says wh
 | Pipelines | `newRenderPipelineStateWithDescriptor:completionHandler:` with an `MTLBinaryArchive` (`PipelineStore`, `recipes-v1.bin`, a bundled seed); scene draws wait at most 4 ms a frame for a compile | `MTL4Compiler` (sync or `MTL4CompilerTask`), flexible pipelines specialised at runtime, `MTL4Archive` + `MTL4PipelineDataSetSerializer` |
 | Upscaling, frame generation | `MTLFXTemporalScaler`, `MTLFXFrameInterpolator` | `MTL4FXTemporalScaler`, `MTL4FXFrameInterpolator` (need Metal 4 command buffers; same algorithms) |
 
+## Switching (gta4_metal_api)
+
+`gta4_metal_api = metal3` (default) or `metal4`. With metal4 the shared `MetalContext::queue` is a
+proxy (`ui/metal/metal4_queue.mm`) that speaks the Metal 3 protocols, so every pass encodes as
+before while the work runs on Metal 4: `MTL4CommandQueue`, pooled `MTL4CommandAllocator`s and
+command buffers, `MTL4ArgumentTable`s (vertex, fragment, compute) fed GPU addresses and resource
+IDs, a per-command-buffer transient buffer instead of `set*Bytes`, a per-command-buffer
+`MTLResidencySet` holding every bound or declared resource (retained until commit feedback),
+blits on `MTL4ComputeCommandEncoder`, a queue barrier at each encoder start plus encoder barriers
+between copies and between serial dispatches, commit feedback for completion handlers, and
+queue waits/signals for events and drawables (the layer's residency set joins the queue).
+MetalFX still takes a Metal 3 command buffer: `EncodeMetal3` commits the Metal 4 work so far and
+runs it on a side Metal 3 queue, ordered by an `MTLEvent` (one hop per frame; `MTL4FX` next).
+Without Metal 4 (macOS < 26 or the GPU family) the game logs it and stays on metal3.
+First drive (2026-11-04): the city route renders identically to metal3, no unrecognised selectors.
+
 ## What the measurements say
 
 - **CPU submission** is where Metal 4 pays off. TBoGT downtown (BACKLOG 75): render thread busy 95%,
