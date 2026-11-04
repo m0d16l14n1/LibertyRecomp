@@ -1,0 +1,126 @@
+# Controlled water re-measurement (task 29). Needs --gta4_water_speed_log=true.
+# Every segment starts from the same state (teleport to the same water, fresh vehicle), so
+# 30 vs 60 and on vs off compare like with like. Read the "gta4-water" lines whose window lies
+# inside each mark pair.
+# Pass (fixes on), 30 vs 60 should match within about 10%:
+#   heli:  downwash kept/s and push/s (pushes/s doubles at 60 and push, the per-push size,
+#          halves with the fix on; equal with it off)
+#   boat:  buoyancy relax/s at equal factor (the raw mean, i.e. the same scene); wake/splash kept/s
+# Fixes off at 60: downwash fired/s = kept/s and push/s about 2x the 30 value; relax/s about 2x.
+# Fixes on at 60: fired/s still about 2x (attempts), kept/s back to the 30 value.
+await 5m
+wait 10s
+invincible
+nowanted
+clock 13 0
+weather 1
+set gta4_water_speed_log true
+
+# --- Heli frozen 10 m over open water: constant height, so constant N and push.
+# If "downwash fired/s" is 0 while frozen, the freeze stops the downwash; then delete the
+# FREEZE lines and use "trigger rt 0.5 8s" instead of "wait 8s" (each segment re-spawns, so
+# the climb profile is the same in all four).
+set gta4_water_ripple_rate_fix true
+set gta4_debug_fixed_step_hz 30
+water 1500
+heli maverick 10
+wait 3s
+native FREEZE_CAR_POSITION $car 1
+wait 2s
+mark heli30on
+wait 8s
+mark heli30on_end
+set gta4_debug_fixed_step_hz 60
+mark heli60on
+wait 8s
+mark heli60on_end
+set gta4_water_ripple_rate_fix false
+mark heli60off
+wait 8s
+mark heli60off_end
+set gta4_debug_fixed_step_hz 30
+mark heli30off
+wait 8s
+mark heli30off_end
+native FREEZE_CAR_POSITION $car 0
+
+# --- Boat: re-spawned at the same spot per segment, full throttle in a steady circle,
+# 8 s to settle, 8 s measured; GET_CAR_SPEED printed at both ends to check the speeds match.
+set gta4_water_speed_fps_fix true
+set gta4_water_ripple_rate_fix true
+set gta4_debug_fixed_step_hz 30
+water 1500
+car jetmax
+wait 2s
+trigger rt 1
+stick lx 0.5
+wait 8s
+native GET_CAR_SPEED $car out
+mark boat30on
+wait 8s
+mark boat30on_end
+native GET_CAR_SPEED $car out
+release all
+set gta4_debug_fixed_step_hz 60
+water 1500
+car jetmax
+wait 2s
+trigger rt 1
+stick lx 0.5
+wait 8s
+native GET_CAR_SPEED $car out
+mark boat60on
+wait 8s
+mark boat60on_end
+native GET_CAR_SPEED $car out
+release all
+set gta4_water_speed_fps_fix false
+set gta4_water_ripple_rate_fix false
+water 1500
+car jetmax
+wait 2s
+trigger rt 1
+stick lx 0.5
+wait 8s
+native GET_CAR_SPEED $car out
+mark boat60off
+wait 8s
+mark boat60off_end
+native GET_CAR_SPEED $car out
+release all
+set gta4_debug_fixed_step_hz 30
+water 1500
+car jetmax
+wait 2s
+trigger rt 1
+stick lx 0.5
+wait 8s
+native GET_CAR_SPEED $car out
+mark boat30off
+wait 8s
+mark boat30off_end
+native GET_CAR_SPEED $car out
+release all
+
+# --- Idle boat (no input): pure bobbing, the cleanest buoyancy comparison if calls are non-zero.
+set gta4_water_speed_fps_fix true
+set gta4_debug_fixed_step_hz 30
+water 1500
+car jetmax
+wait 6s
+mark idle30on
+wait 8s
+mark idle30on_end
+set gta4_debug_fixed_step_hz 60
+mark idle60on
+wait 8s
+mark idle60on_end
+set gta4_water_speed_fps_fix false
+mark idle60off
+wait 8s
+mark idle60off_end
+
+set gta4_debug_fixed_step_hz 0
+where
+mark all_end
+quit

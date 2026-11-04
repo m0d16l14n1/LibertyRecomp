@@ -14,6 +14,7 @@
 #include <unordered_map>
 
 #include <rex/cvar.h>
+#include <rex/logging.h>
 
 #include "gta4_init.h"
 
@@ -22,6 +23,9 @@ REXCVAR_DEFINE_BOOL(gta4_ped_static_counter_30hz, true, "GTA IV/Fixes",
                     "counts, twice as early at 60 fps)");
 REXCVAR_DEFINE_BOOL(gta4_ped_pinned_down_carry, true, "GTA IV/Fixes",
                     "Peds pinned down in cover recover above 30 fps (the decay truncated to 0)");
+REXCVAR_DEFINE_BOOL(gta4_ladder_heading_tolerance_fix, true, "GTA IV/Fixes",
+                    "Climbing onto a ladder doesn't stall above 30 fps (the turn-to-face step "
+                    "uses the slide step's 0.1 tolerance instead of 0.02)");
 
 namespace {
 
@@ -92,4 +96,38 @@ extern "C" void sub_823C17E8(PPCContext& ctx, uint8_t* base) {
   if (time < kLogicalStep) return;  // the function returns nothing: skipping it is a no-op
   time = std::min(time - kLogicalStep, kLogicalStep);
   __imp__sub_823C17E8(ctx, base);
+}
+
+// Ladder stalls (FF "Fix stalls when trying to climb ladders"). CTaskComplexClimbLadder
+// (vtable 0x82045D84) makes its turn-to-face subtask in slot 18, sub_826A17F0, and in
+// sub_826A1138 (called from slot 18 and slot 20, sub_826A1BB8): CTaskSimpleMoveAchieveHeading's
+// constructor sub_823FE5F0 (r3 = task, f1 = heading, f2 = rate 2.0, f3 = tolerance) gets 0.02
+// from 0x82017558. CTaskSimpleSlideToCoord checks 0.1. Above 30 fps the tasks finish in the
+// wrong order and the ped stands at the ladder. FF passes 0.1. The 0.02 constant has 22 other
+// readers, so only these calls get 0.1.
+namespace {
+thread_local int ladder_subtask_depth = 0;
+uint32_t ladder_tolerance_patched = 0;
+}  // namespace
+
+extern "C" void sub_826A17F0(PPCContext& ctx, uint8_t* base) {
+  ++ladder_subtask_depth;
+  __imp__sub_826A17F0(ctx, base);
+  --ladder_subtask_depth;
+}
+
+extern "C" void sub_826A1138(PPCContext& ctx, uint8_t* base) {
+  ++ladder_subtask_depth;
+  __imp__sub_826A1138(ctx, base);
+  --ladder_subtask_depth;
+}
+
+extern "C" void sub_823FE5F0(PPCContext& ctx, uint8_t* base) {
+  if (ladder_subtask_depth > 0 && REXCVAR_GET(gta4_ladder_heading_tolerance_fix) &&
+      float(ctx.f3.f64) == 0.02f) {
+    ctx.f3.f64 = double(0.1f);
+    if (ladder_tolerance_patched++ < 4)
+      REXLOG_INFO("gta4-ladder heading tolerance 0.02 -> 0.1 (task {:08X})", ctx.r3.u32);
+  }
+  __imp__sub_823FE5F0(ctx, base);
 }
