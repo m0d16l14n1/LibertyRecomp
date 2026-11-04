@@ -12,7 +12,8 @@
 //   stick lx|ly|rx|ry <-1..1> [duration]   wait <duration>
 //   shot <file.png> [scale]   log <text>   set <cvar> <value>   get <cvar>
 //   include <script>   mark <name>   time   quit   await [timeout]
-//   teleport road car drive clock weather invincible nowanted (gta4_dev_world.cpp)
+//   teleport road car drive clock weather invincible nowanted cutscene native
+//   (gta4_dev_world.cpp)
 //
 // Buttons: a b x y lb rb back start ls rs up down left right (d-pad).
 // Durations: 500ms, 2s, 1.5m. A failing line ends a script (the rest would
@@ -372,7 +373,7 @@ std::string Execute(const std::string& line) {
   if (cmd == "teleport" || cmd == "road" || cmd == "car" || cmd == "drive" || cmd == "clock" ||
       cmd == "weather" || cmd == "invincible" || cmd == "nowanted" || cmd == "heli" ||
       cmd == "water" || cmd == "weapon" || cmd == "peds" || cmd == "cars" || cmd == "explode" ||
-      cmd == "boom" || cmd == "where" || cmd == "native") {
+      cmd == "boom" || cmd == "where" || cmd == "native" || cmd == "cutscene") {
     return WorldCommand(args);
   }
   if (cmd == "time") {

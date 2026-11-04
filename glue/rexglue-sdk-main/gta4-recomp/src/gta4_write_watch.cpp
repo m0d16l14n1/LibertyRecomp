@@ -316,9 +316,13 @@ void Tick(uint8_t* base) {
     }
   }
   if (++ticks % 60 && armed.load()) return;
-  for (const auto& [key, count] : window)
-    REXLOG_INFO("gta4-watch frames=60 guest=0x{:08X} (+0x{:X}) writes={} writer={} caller={}",
-                target.guest + std::get<0>(key), std::get<0>(key), count, std::get<1>(key), std::get<2>(key));
+  for (const auto& [key, count] : window) {
+    // The aligned word holding the offset, now: a counter shows as a value that keeps climbing.
+    const uint32_t word = (target.guest + std::get<0>(key)) & ~3u;
+    REXLOG_INFO("gta4-watch frames=60 guest=0x{:08X} (+0x{:X}) writes={} value@0x{:08X}=0x{:08X} writer={} caller={}",
+                target.guest + std::get<0>(key), std::get<0>(key), count, word, REX_LOAD_U32(word),
+                std::get<1>(key), std::get<2>(key));
+  }
   const uint64_t others = other_writes.exchange(0), lost_hits = dropped.exchange(0);
   if (!window.empty() || others || lost_hits)
     REXLOG_INFO("gta4-watch frames=60 other-writes-on-page={} dropped={}", others, lost_hits);

@@ -27,7 +27,11 @@
 //   boom [distance m] [type] [radius m]  an explosion ahead of the player
 //   where                           log and reply the player position, car/water flags, health
 //   native <NAME> [args]            any native: ints, floats (with a '.'), $ped, $player, $car
-//                                   (last car made), out (an out slot); replies value and outs
+//                                   (last car made), out (an out slot), "text" (a string, may
+//                                   hold spaces); replies value and outs
+//   cutscene <name> [timeout s]     play a cutscene (cuts.img name without .cut: intro, rom2_a,
+//                                   ...): INIT_CUTSCENE, wait until loaded, START_CUTSCENE, wait
+//                                   until HAS_CUTSCENE_FINISHED, CLEAR_CUTSCENE (default 300 s)
 //
 // Coordinates are world metres: Algonquin is west (x < 600), Broker and Dukes east (Hove Beach
 // safehouse ~ 892 -500, Downtown Broker ~ 1040 150). Early in the story Algonquin is closed and
@@ -117,6 +121,7 @@ bool g_hash_checked = false;
 struct Arg {
   uint32_t value = 0;
   bool out = false;
+  std::string text;  // non-empty: a string copied into the call frame; the argument points at it
 };
 struct Result {
   bool called = false;
@@ -126,6 +131,8 @@ struct Result {
 
 class Invoker {
  public:
+  static constexpr uint32_t kFrameBytes = 0x600;  // 0x400 call frame + 0x200 for string arguments
+
   Invoker(PPCContext& parent, uint8_t* base) : parent_(parent), base_(base) {}
 
   Result Call(std::string_view name, std::initializer_list<Arg> args) {
@@ -147,20 +154,38 @@ class Invoker {
       REXLOG_ERROR("dev world: native {} is not registered", name);
       return result;
     }
-    if (args.size() > 16 || parent_.r1.u32 < 0x400) return result;
-    // A frame below the caller's stack: back chain, context, return slot, arguments, outs.
-    const uint32_t frame = (parent_.r1.u32 - 0x400u) & ~15u;
-    if (!Span(frame, 0x400, true)) return result;
+    if (args.size() > 16 || parent_.r1.u32 < kFrameBytes) return result;
+    // A frame below the caller's stack: back chain, context, return slot, arguments, outs,
+    // string arguments.
+    const uint32_t frame = (parent_.r1.u32 - kFrameBytes) & ~15u;
+    if (!Span(frame, kFrameBytes, true)) return result;
     const uint32_t context = frame + 0x80, ret = frame + 0xC0, argv = frame + 0x100,
-                   outs = frame + 0x180;
-    std::memset(rex::memory::GuestPtr(base_, frame + 0x80), 0, 0x400 - 0x80);
+                   outs = frame + 0x180, strings = frame + 0x400;
+    std::memset(rex::memory::GuestPtr(base_, frame + 0x80), 0, kFrameBytes - 0x80);
+    uint32_t text_used = 0;
+    for (const Arg& a : args) {
+      if (a.text.empty()) continue;
+      if (text_used + a.text.size() + 1 > kFrameBytes - 0x400) {
+        REXLOG_ERROR("dev world: native {} string arguments exceed {} bytes", name, kFrameBytes - 0x400);
+        return result;
+      }
+      std::memcpy(rex::memory::GuestPtr(base_, strings + text_used), a.text.data(), a.text.size());
+      text_used += (uint32_t(a.text.size()) + 4) & ~3u;  // NUL included (the frame is zeroed)
+    }
     Write(base_, frame, parent_.r1.u32);
     Write(base_, context, ret);
     Write(base_, context + 4, uint32_t(args.size()));
     Write(base_, context + 8, argv);
-    uint32_t i = 0, out_count = 0;
+    uint32_t i = 0, out_count = 0, text_at = 0;
     for (const Arg& a : args) {
-      Write(base_, argv + i * 4, a.out ? outs + 16 * out_count++ : a.value);
+      uint32_t value = a.value;
+      if (a.out) {
+        value = outs + 16 * out_count++;
+      } else if (!a.text.empty()) {
+        value = strings + text_at;
+        text_at += (uint32_t(a.text.size()) + 4) & ~3u;
+      }
+      Write(base_, argv + i * 4, value);
       ++i;
     }
     // Slots past the given arguments point at scratch memory: a native that takes more
@@ -361,9 +386,21 @@ namespace gta4::dev_pad {
 std::string NativeCommand(const std::vector<std::string>& args) {
   if (args.size() < 2) return "err native needs a name";
   const std::string name = args[1];
-  std::vector<std::string> words(args.begin() + 2, args.end());
+  // "a quoted string" may span several words: join them back (single spaces).
+  std::vector<std::string> words;
+  for (size_t i = 2; i < args.size(); ++i) {
+    std::string w = args[i];
+    if (w.size() > 1 && w.front() == '"' && w.back() != '"') {
+      while (++i < args.size()) {
+        w += ' ' + args[i];
+        if (args[i].back() == '"') break;
+      }
+    }
+    if (w.front() == '"' && (w.size() < 2 || w.back() != '"')) return "err unterminated string " + w;
+    words.push_back(std::move(w));
+  }
   for (const auto& w : words) {
-    if (w == "$ped" || w == "$player" || w == "$car" || w == "out") continue;
+    if (w == "$ped" || w == "$player" || w == "$car" || w == "out" || w.front() == '"') continue;
     float v;
     if (!ParseFloat(w, v)) return "err '" + w + "' is not a number";
   }
@@ -376,6 +413,10 @@ std::string NativeCommand(const std::vector<std::string>& args) {
       else if (w == "$player") call.push_back({p.id});
       else if (w == "$car") call.push_back({g_last_car});
       else if (w == "out") call.push_back({0, true});
+      else if (w.front() == '"') {
+        if (w.size() == 2) return "err empty string argument";
+        call.push_back({0, false, w.substr(1, w.size() - 2)});
+      }
       else if (w.find('.') != std::string::npos) call.push_back({F(std::strtof(w.c_str(), nullptr))});
       else call.push_back({uint32_t(std::strtol(w.c_str(), nullptr, 0))});
     }
@@ -392,9 +433,56 @@ std::string NativeCommand(const std::vector<std::string>& args) {
   });
 }
 
+// cutscene <name> [timeout s]: the sequence a mission script uses, from the "main" script.
+std::string CutsceneCommand(const std::vector<std::string>& args) {
+  if (args.size() < 2) return "err cutscene needs a name (cuts.img, without .cut)";
+  const std::string name = args[1];
+  float timeout = 300.0f;
+  if (args.size() > 2 && (!ParseFloat(args[2], timeout) || timeout <= 0)) return "err bad timeout " + args[2];
+  int stage = 0, frames = 0, loaded_at = 0;
+  const auto started = std::chrono::steady_clock::now();
+  return RunOnScriptThread(
+      [=](Invoker& n) mutable -> std::optional<std::string> {
+        ++frames;
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        if (stage == 0) {
+          if (!n.Call("INIT_CUTSCENE", {{0, false, name}}).called) return "err INIT_CUTSCENE was not called";
+          REXLOG_INFO("dev world: cutscene {} init", name);
+          stage = 1;
+          return std::nullopt;
+        }
+        if (stage == 1) {
+          const Result loaded = n.Call("HAS_CUTSCENE_LOADED", {});
+          if (!loaded.called || !loaded.value) {
+            if (seconds < 60.0) return std::nullopt;
+            n.Call("CLEAR_CUTSCENE", {});
+            return "err cutscene " + name + " did not load in 60 s";
+          }
+          n.Call("START_CUTSCENE", {});
+          loaded_at = frames;
+          REXLOG_INFO("dev world: cutscene {} loaded after {} frames, started", name, frames);
+          stage = 2;
+          return std::nullopt;
+        }
+        const Result finished = n.Call("HAS_CUTSCENE_FINISHED", {});
+        // A start takes a few frames to show as running: finished counts after 30 frames.
+        const bool done = finished.called && finished.value && frames - loaded_at > 30;
+        if (!done && seconds < timeout) return std::nullopt;
+        n.Call("CLEAR_CUTSCENE", {});
+        const std::string reply = "ok " + name + (done ? " finished" : " timed out") +
+                                  " frames=" + std::to_string(frames - loaded_at) +
+                                  " seconds=" + std::to_string(int(seconds));
+        REXLOG_INFO("dev world: cutscene {}", reply.substr(3));
+        return reply;
+      },
+      std::chrono::seconds(int(timeout) + 70));
+}
+
 std::string WorldCommand(const std::vector<std::string>& args) {
   const std::string& cmd = args[0];
   if (cmd == "native") return NativeCommand(args);
+  if (cmd == "cutscene") return CutsceneCommand(args);
   // These take a model name first; the numbers follow it.
   const bool named = cmd == "car" || cmd == "heli" || cmd == "cars";
   std::vector<float> f;

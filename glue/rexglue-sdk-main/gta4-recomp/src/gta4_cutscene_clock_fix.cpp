@@ -24,7 +24,7 @@
 
 #include "gta4_init.h"
 
-REXCVAR_DEFINE_BOOL(gta4_cutscene_smooth_clock, false, "GTA IV/Fixes",
+REXCVAR_DEFINE_BOOL(gta4_cutscene_smooth_clock, true, "GTA IV/Fixes",
                     "Cutscene animation follows its audio smoothly instead of in the audio "
                     "thread's steps (cutscene judder)");
 REXCVAR_DEFINE_BOOL(gta4_cutscene_clock_log, false, "GTA IV/Diagnostics",
