@@ -1,5 +1,13 @@
 #import "metal4_queue.h"
 
+#include <rex/cvar.h>
+
+REXCVAR_DEFINE_STRING(gta4_metal4_render_barrier, "full", "GPU/Metal",
+    "Metal 4 queue barrier before each render pass: full (wait for all earlier work before vertex and "
+    "fragment stages) or fragment (measurement only: vertex work may overlap earlier passes)");
+
+#import <objc/runtime.h>
+
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -19,6 +27,21 @@ constexpr NSUInteger kChunkBytes = 4u << 20;
 constexpr NSUInteger kTransientAlignment = 16;
 constexpr MTLStages kRenderStages = MTLStageVertex | MTLStageFragment;
 constexpr MTLStages kComputeStages = MTLStageDispatch | MTLStageBlit;
+
+// -conformsToProtocol: walks the class's protocol lists; it was most of the proxy's
+// per-resource cost. Resource classes are few, so cache the answer per class.
+template <typename Protocol>
+bool Conforms(id object, Protocol* protocol) {
+  struct Entry { Class cls; Protocol* protocol; bool conforms; };
+  thread_local std::vector<Entry> cache;
+  const Class cls = object_getClass(object);
+  for (const Entry& e : cache)
+    if (e.cls == cls && e.protocol == protocol) return e.conforms;
+  const bool conforms = [object conformsToProtocol:protocol];
+  cache.push_back({cls, protocol, conforms});
+  return conforms;
+}
+enum class Kind { kUnknown, kTexture, kBuffer };
 }  // namespace
 
 @class LXCommandBuffer;
@@ -37,6 +60,7 @@ constexpr MTLStages kComputeStages = MTLStageDispatch | MTLStageBlit;
   NSUInteger _tableTextures;
   NSString* _label;
   id<MTL4Compiler> _compiler;
+  MTLStages _renderBefore;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
 }
 - (id<MTL4CommandAllocator>)takeAllocator;
@@ -77,6 +101,7 @@ constexpr MTLStages kComputeStages = MTLStageDispatch | MTLStageBlit;
   BOOL _committed;
 }
 - (void)track:(id<MTLResource>)resource;
+- (void)track:(id<MTLResource>)resource kind:(Kind)kind;
 - (void)trackHeap:(id<MTLHeap>)heap;
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length;
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
@@ -122,12 +147,12 @@ static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
 
 static void BindBuffer(LXCommandBuffer* owner, id<MTL4ArgumentTable> t, id<MTLBuffer> b, NSUInteger offset, NSUInteger index) {
   if (!b) return;
-  [owner track:b];
+  [owner track:b kind:Kind::kBuffer];
   [t setAddress:b.gpuAddress + offset atIndex:index];
 }
 static void BindTexture(LXCommandBuffer* owner, id<MTL4ArgumentTable> t, id<MTLTexture> texture, NSUInteger index) {
   MTLResourceID rid{};
-  if (texture) { [owner track:texture]; rid = texture.gpuResourceID; }
+  if (texture) { [owner track:texture kind:Kind::kTexture]; rid = texture.gpuResourceID; }
   [t setTexture:rid atIndex:index];
 }
 static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NSUInteger index) {
@@ -217,7 +242,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
     if (std::strcmp([signature getArgumentTypeAtIndex:i], "@") != 0) continue;
     __unsafe_unretained id value = nil;
     [invocation getArgument:&value atIndex:i];
-    if (value && [value conformsToProtocol:@protocol(MTLResource)]) [owner track:value];
+    if (value && Conforms(value, @protocol(MTLResource))) [owner track:value];
   }
 }
 
@@ -351,7 +376,8 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (CFTimeInterval)kernelStartTime { return _gpuStart; }
 - (CFTimeInterval)kernelEndTime { return _gpuEnd; }
 
-- (void)track:(id<MTLResource>)resource {
+- (void)track:(id<MTLResource>)resource { [self track:resource kind:Kind::kUnknown]; }
+- (void)track:(id<MTLResource>)resource kind:(Kind)kind {
   if (!resource) return;
   if (!_seen.insert((__bridge const void*)resource).second) return;
   [_retained addObject:resource];
@@ -360,12 +386,13 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
     if (!_seen.insert((__bridge const void*)heap).second) return;
     [_retained addObject:heap];
     allocation = heap;
-  } else if ([resource conformsToProtocol:@protocol(MTLTexture)]) {
+  } else if (kind == Kind::kTexture ||
+             (kind == Kind::kUnknown && Conforms(resource, @protocol(MTLTexture)))) {
     id<MTLTexture> texture = (id<MTLTexture>)resource;
     // Drawables are resident through their layer's residency set (AddLayerResidency).
     if (texture.isFramebufferOnly) return;
-    if (id<MTLTexture> parent = texture.parentTexture) { [self track:parent]; return; }
-    if (id<MTLBuffer> buffer = texture.buffer) { [self track:buffer]; return; }
+    if (id<MTLTexture> parent = texture.parentTexture) { [self track:parent kind:Kind::kTexture]; return; }
+    if (id<MTLBuffer> buffer = texture.buffer) { [self track:buffer kind:Kind::kBuffer]; return; }
   }
   [_set addAllocation:allocation];
   ++_q->_resident;
@@ -381,7 +408,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   if (!_chunk || offset + length > _chunk.length) {
     _chunk = [_q takeChunk:MAX(length, kChunkBytes)];
     [_chunks addObject:_chunk];
-    [self track:_chunk];
+    [self track:_chunk kind:Kind::kBuffer];
     offset = 0;
   }
   std::memcpy(static_cast<uint8_t*>(_chunk.contents) + offset, bytes, length);
@@ -395,19 +422,19 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   for (NSUInteger i = 0; i < 8; ++i) {
     MTLRenderPassColorAttachmentDescriptor* a = d.colorAttachments[i];
     if (!a.texture) continue;
-    [self track:a.texture]; [self track:a.resolveTexture];
+    [self track:a.texture kind:Kind::kTexture]; [self track:a.resolveTexture kind:Kind::kTexture];
     r.colorAttachments[i] = a;
   }
   if (d.depthAttachment.texture) {
-    [self track:d.depthAttachment.texture]; [self track:d.depthAttachment.resolveTexture];
+    [self track:d.depthAttachment.texture kind:Kind::kTexture]; [self track:d.depthAttachment.resolveTexture kind:Kind::kTexture];
     r.depthAttachment = d.depthAttachment;
   }
   if (d.stencilAttachment.texture) {
-    [self track:d.stencilAttachment.texture];
+    [self track:d.stencilAttachment.texture kind:Kind::kTexture];
     r.stencilAttachment = d.stencilAttachment;
   }
   if (d.visibilityResultBuffer) {
-    [self track:d.visibilityResultBuffer];
+    [self track:d.visibilityResultBuffer kind:Kind::kBuffer];
     r.visibilityResultBuffer = d.visibilityResultBuffer;
     r.visibilityResultType = d.visibilityResultType;
   }
@@ -417,7 +444,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   r.defaultRasterSampleCount = d.defaultRasterSampleCount;
   id<MTL4RenderCommandEncoder> e = [_cb renderCommandEncoderWithDescriptor:r];
   if (!e) return nil;
-  Barrier(_q, e, kRenderStages);
+  Barrier(_q, e, _q->_renderBefore);
   LXRender* p = [LXRender new];
   p->_owner = self; p->_e = e;
   p->_vt = [_q takeTable]; p->_ft = [_q takeTable];
@@ -652,6 +679,7 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
     if (![device supportsFamily:MTLGPUFamilyMetal4]) { error = "The GPU has no Metal 4 support."; return nil; }
     LXQueue* q = [LXQueue new];
     q->_device = device;
+    q->_renderBefore = REXCVAR_GET(gta4_metal4_render_barrier) == "fragment" ? MTLStageFragment : kRenderStages;
     MTL4CommandQueueDescriptor* descriptor = [MTL4CommandQueueDescriptor new];
     descriptor.label = @"Liberty Metal 4";
     q->_queue4 = [device newMTL4CommandQueueWithDescriptor:descriptor error:nil];
