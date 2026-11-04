@@ -61,7 +61,8 @@ template<class T> T Command(std::span<const std::byte> bytes) {
 Renderer::State::State(std::shared_ptr<ui::metal::MetalContext> c,memory::Memory* m,ui::Presenter* p)
     :context(std::move(c)),memory(m),presenter(p),resources(context,memory),stock(context),
      overrides(context,"override_shader_archive"),temporal_stock(context,"stock_temporal_shader_archive"),
-     temporal_overrides(context,"override_temporal_shader_archive"),capture_stock(context,"stock_capture_shader_archive"),frames(64u*1024u*1024u,
+     temporal_overrides(context,"override_temporal_shader_archive"),capture_stock(context,"stock_capture_shader_archive"),
+     ao_stock(context,"stock_ao_shader_archive"),frames(64u*1024u*1024u,
        // Running a frame ahead of presentation needs a third slot or Begin() blocks on the GPU.
        std::max(rex::cvar::Query<uint32_t>("gta4_native_frames_in_flight"),
                 2u+rex::cvar::Query<uint32_t>("present_frames_ahead"))) {}
@@ -164,6 +165,14 @@ bool Renderer::Initialize(std::string& error,const std::filesystem::path& direct
                                          2u+rex::cvar::Query<uint32_t>("present_frames_ahead"));
       if(ok)ok=s.raytracing_capture.Initialize(s.context->device,settings,reason);
       if(ok&&s.raytracing_mode==raytracing::Mode::kAmbientOcclusion)ok=s.raytracing_ao.Initialize(s.context->device,reason);
+      if(ok&&s.raytracing_mode==raytracing::Mode::kAmbientOcclusion){
+        // Without the lighting variants the AO still works, as a multiply of the whole lighting.
+        std::string variants_error;
+        s.raytracing_ao_variants=directory.empty()?s.ao_stock.Initialize(variants_error):
+            s.ao_stock.InitializeFile((directory/"stock_ao_shader_archive.bin").string(),variants_error);
+        if(!s.raytracing_ao_variants)
+          REXLOG_WARN("gta4-metal-raytracing: no lighting AO variants ({}); AO multiplies the whole lighting",variants_error);
+      }
       if(ok)REXLOG_INFO("gta4-metal-raytracing: geometry capture enabled mode={}",rex::cvar::GetFlagByName("gta4_metal_raytracing"));
       else{REXLOG_WARN("gta4-metal-raytracing: disabled: {}",reason);s.raytracing_mode=raytracing::Mode::kOff;}
     }
@@ -547,10 +556,11 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
               const auto& r=s.raytracing_capture.statistics();
               REXLOG_INFO("gta4-metal-raytracing: frame={} captured={} rejected={} built={} rebuilt={} refit={} reused={} "
                   "stale={} skipped-builds={} skipped-bytes={} evicted={} bytes={} instances={} ao-traced={} "
-                  "ao-lighting-draws={} ao-applied={}",t.metadata.sequence,
+                  "ao-lighting-draws={} ao-applied={} ao-ambient-draws={}",t.metadata.sequence,
                   s.raytracing_capture.captured_draws(),s.raytracing_capture.rejected_draws(),r.built,r.rebuilt,r.refit,
                   r.reused,r.stale,r.skipped_builds,r.skipped_bytes,r.evicted,r.bytes,r.instances,
-                  s.raytracing_ao.traced_frames(),s.raytracing_ao_lighting_draws,s.raytracing_ao_applied);
+                  s.raytracing_ao.traced_frames(),s.raytracing_ao_lighting_draws,s.raytracing_ao_applied,
+                  s.raytracing_ao_ambient_draws);
             }
           }
           if(c.sequence%60==0)REXLOG_INFO("gta4-temporal-begin sequence={} epoch={} view={:X} previous-sequence={} previous-view={:X} previous-world={} phase={}",c.sequence,c.epoch,c.view,t.metadata.sequence,t.metadata.view,t.world_draws,uint32_t(s.Phase()));

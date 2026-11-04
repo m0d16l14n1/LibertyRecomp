@@ -15,14 +15,18 @@
 
 namespace rex::graphics::gta4_metal::raytracing {
 
-// gta4_metal_raytracing_ao_view = apply | show | debug | none
+// gta4_metal_raytracing_ao_view = apply | multiply | show | debug | none
+// apply: on the ambient term of the lighting shader (its AO variant; draw.mm binds the AO at
+// fragment texture 0), or the multiply when that pipeline is not available.
+// multiply: always the full-screen multiply of the whole global contribution.
 // debug: r = fract(world.x / 10), g = AO ray hit within the radius, b = long-ray hit distance.
-enum class AoView : uint8_t { kApply, kShow, kDebug, kNone };
+enum class AoView : uint8_t { kApply, kShow, kDebug, kNone, kMultiply };
 struct AoSettings {
   AoView view = AoView::kApply;
   float radius = 2.0f;          // world units (metres)
   float occlusion = 0.85f;      // how dark a contact hit gets in the AO term
-  float apply_strength = 0.6f;  // how much of the AO term reaches the lit image
+  float apply_strength = 0.6f;  // multiply apply only: how much of the AO term reaches the lit image
+  uint32_t normal_mode = 0;     // gta4_metal_raytracing_ao_normals: 0 depth, 1 gbuffer, 2 gbuffer-yx
 };
 AoSettings CurrentAoSettings();  // the cvars; read once per frame by the caller
 
@@ -31,6 +35,7 @@ struct AoFrame {
   id<MTLHeap> structures = nil;              // Capture::heap(): the instances' structures
   id<MTLTexture> depth = nil;                // the scene depth attachment, single sample
   id<MTLTexture> motion = nil;               // RG16Float, input pixels towards the previous frame; may be nil
+  id<MTLTexture> normals = nil;              // GBufferTextureSampler1, for normal_mode 1/2; may be nil
   std::array<float, 16> clip_to_world{};     // ClipToWorldColumns(), unjittered
   std::array<float, 3> camera_position{};    // world
   std::array<float, 2> jitter_ndc{};         // projection jitter of this frame's depth, in ndc

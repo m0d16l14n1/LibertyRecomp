@@ -121,4 +121,20 @@ function(liberty_add_metal_shader_archive app_target workspace_root)
     set_source_files_properties("${capture_archive}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
     target_sources("${app_target}" PRIVATE "${capture_archive}")
     set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${capture_archive}")
+    # Ray-traced AO variants of the deferred-lighting pixel shaders (four, ambient term only).
+    # Without them, mode ao falls back to multiplying the whole lighting.
+    set(ao_builder "${workspace_root}/tools/metal/raytracing_ao_variants.py")
+    set(ao_archive "${archive_dir}/stock_ao_shader_archive.bin")
+    add_custom_command(OUTPUT "${ao_archive}"
+        COMMAND "${Python3_EXECUTABLE}" "${ao_builder}"
+            --archive "${archive}" --sources "${archive_dir}/work/sources"
+            --work "${archive_dir}/stock-ao-work" --output "${ao_archive}"
+            --jobs 2 --deployment "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        DEPENDS "${archive}" "${ao_builder}" "${builder}"
+        COMMENT "Compiling ray-traced AO lighting shader variants" VERBATIM)
+    add_custom_target(liberty_stock_ao_archive DEPENDS "${ao_archive}")
+    add_dependencies("${app_target}" liberty_stock_ao_archive)
+    set_source_files_properties("${ao_archive}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
+    target_sources("${app_target}" PRIVATE "${ao_archive}")
+    set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${ao_archive}")
 endfunction()

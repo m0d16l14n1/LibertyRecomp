@@ -26,7 +26,7 @@ struct RtaoParams {
     float historyBlendMinimum;   // weight of the new sample once history is long
     float depthRejection;        // relative view-depth difference that drops history
     uint frame;
-    uint normalMode;             // 0: from depth; 1: G-buffer rgb = n * 0.5 + 0.5 (world space)
+    uint normalMode;             // 0: from depth; 1: G-buffer rgb = n * 0.5 + 0.5 (world, Z up); 2: as 1 with x and y swapped
     uint reversedDepth;          // 1: device depth 1 is near
     uint validHistory;           // 0 after a camera cut or resize
     float2 jitterNdc;            // the depth was rendered with ndc + jitterNdc: removed before reconstruction
@@ -75,12 +75,20 @@ static float depth_at(texture2d<float, access::read> depth, uint2 pixel) {
     return depth.read(min(pixel, uint2(depth.get_width() - 1, depth.get_height() - 1))).r;
 }
 
+// GBufferTextureSampler1 (RGBA8, world normal * 0.5 + 0.5, Z up). mode 2 swaps x and y:
+// the title fetches it as .yxzw, and which of the two is world x is checked by the stats.
+static float3 gbuffer_normal(texture2d<float, access::read> gbufferNormal, uint2 pixel, uint mode) {
+    const float3 n = gbufferNormal.read(min(pixel, uint2(gbufferNormal.get_width() - 1, gbufferNormal.get_height() - 1))).rgb
+                     * 2.0f - 1.0f;
+    return mode == 2u ? n.yxz : n;
+}
+
 // The surface normal at an input-resolution pixel, facing the camera.
 static float3 normal_at(texture2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
-                        uint2 pixel, float3 position, constant RtaoParams& p) {
+                        uint2 pixel, float3 position, constant RtaoParams& p, uint mode) {
     float3 n;
-    if (p.normalMode == 1u) {
-        n = gbufferNormal.read(pixel).rgb * 2.0f - 1.0f;
+    if (mode != 0u) {
+        n = gbuffer_normal(gbufferNormal, pixel, mode);
     } else {
         // From depth: the smaller of the two one-sided differences on each axis avoids
         // smearing normals across silhouettes.
@@ -124,7 +132,7 @@ kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
     const float d = depth_at(depth, pixel);
     if (is_sky(d, p)) { raw.write(float4(1, 0, 0, 0), id); return; }
     const float3 position = world_at(pixel, p.inputSize, d, p);
-    const float3 n = normal_at(depth, gbufferNormal, pixel, position, p);
+    const float3 n = normal_at(depth, gbufferNormal, pixel, position, p, p.normalMode);
     const float distance = view_depth(position, p);
 
     ray r;
@@ -276,7 +284,8 @@ constant uint kStatTraced = 0, kStatSky = 1, kStatBadOrigin = 2, kStatNearHits =
               kStatAoMin = 5, kStatAoMax = 6, kStatPositionsFinite = 7, kStatPositionsBad = 8, kStatAoPixels = 9,
               kStatNearHitsUnderOffset = 10;
 constant uint kSumOriginX = 0, kSumOriginY = 1, kSumOriginZ = 2, kSumFarDistance = 3, kSumViewDistance = 4,
-              kSumAo = 5, kSumPositionX = 6, kSumPositionY = 7, kSumPositionZ = 8, kSumNearDistance = 9;
+              kSumAo = 5, kSumPositionX = 6, kSumPositionY = 7, kSumPositionZ = 8, kSumNearDistance = 9,
+              kSumNormalAgreementRgb = 10, kSumNormalAgreementGrb = 11;
 
 static void add_count(device atomic_uint* counts, uint index, uint value) {
     const uint total = simd_sum(value);
@@ -306,7 +315,7 @@ kernel void rtao_debug_trace(constant RtaoParams& p [[buffer(0)]],
     if (!sky) {
         position = world_at(pixel, p.inputSize, d, p);
         good = all(isfinite(position));
-        if (good) { n = normal_at(depth, gbufferNormal, pixel, position, p); distance = view_depth(position, p); }
+        if (good) { n = normal_at(depth, gbufferNormal, pixel, position, p, p.normalMode); distance = view_depth(position, p); }
     }
     bool near = false, far = false;
     float nearDistance = 0.0f, farDistance = 0.0f;
@@ -343,6 +352,15 @@ kernel void rtao_debug_trace(constant RtaoParams& p [[buffer(0)]],
     add_sum(sums, kSumViewDistance, distance);
     add_sum(sums, kSumFarDistance, farDistance);
     add_sum(sums, kSumNearDistance, nearDistance);
+    // How well each G-buffer decoding agrees with the normal from depth (mean dot, 1 = same).
+    float agreeRgb = 0.0f, agreeGrb = 0.0f;
+    if (good) {
+        const float3 fromDepth = normal_at(depth, gbufferNormal, pixel, position, p, 0u);
+        agreeRgb = dot(fromDepth, normal_at(depth, gbufferNormal, pixel, position, p, 1u));
+        agreeGrb = dot(fromDepth, normal_at(depth, gbufferNormal, pixel, position, p, 2u));
+    }
+    add_sum(sums, kSumNormalAgreementRgb, agreeRgb);
+    add_sum(sums, kSumNormalAgreementGrb, agreeGrb);
 }
 
 kernel void rtao_debug_ao(texture2d<float, access::read> ao [[texture(0)]],

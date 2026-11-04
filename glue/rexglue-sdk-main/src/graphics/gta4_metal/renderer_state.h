@@ -70,6 +70,10 @@ struct Renderer::State {
     // vertex shader, compiled asynchronously; capture_state is set once it is ready.
     std::shared_ptr<PipelineBuild> capture;
     id<MTLRenderPipelineState> capture_state=nil;
+    // Ray-traced AO (mode ao): this pipeline with the deferred-lighting shader's AO variant
+    // (raytracing_ao_variants.py), which scales only the ambient term; set once ready.
+    std::shared_ptr<PipelineBuild> ambient;
+    id<MTLRenderPipelineState> ambient_state=nil;
   };
   // Guest, shared and descriptor banks retain their latest exact source bytes
   // to reject unchanged values before hashing or inspecting immutable uploads.
@@ -118,6 +122,8 @@ struct Renderer::State {
   ResourceStore resources;
   ShaderCache stock,overrides,temporal_stock,temporal_overrides;
   ShaderCache capture_stock;  // ray-tracing capture variants of the stock vertex shaders
+  ShaderCache ao_stock;       // ray-traced AO variants of the deferred-lighting pixel shaders
+  bool raytracing_ao_variants=false;  // ao_stock loaded
   raytracing::Mode raytracing_mode=raytracing::Mode::kOff;  // read at Initialize
   raytracing::Capture raytracing_capture;
   uint64_t raytracing_sequence=~0ull;  // temporal sequence of the open capture frame
@@ -126,7 +132,7 @@ struct Renderer::State {
   raytracing::AoSettings raytracing_ao_settings;
   id<MTLTexture> raytracing_ao_texture=nil;   // this frame's AO, input size
   uint64_t raytracing_ao_sequence=~0ull;      // temporal sequence it was traced for
-  uint64_t raytracing_ao_lighting_draws=0,raytracing_ao_applied=0;
+  uint64_t raytracing_ao_lighting_draws=0,raytracing_ao_applied=0,raytracing_ao_ambient_draws=0;
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
   // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about

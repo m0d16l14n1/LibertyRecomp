@@ -263,6 +263,30 @@ Renderer::State::Pipeline* Renderer::State::DrawPipeline(const Targets& targets,
       });
     }
   }
+  if(raytracing_ao_variants&&ps&&!selection.pixel_override&&!result.temporal_variant){
+    // Only the deferred-lighting shaders have an AO variant; every other lookup misses quietly.
+    std::string ao_error;
+    if(id<MTLFunction> ao_fragment=ao_stock.Function(ps->hash,ShaderStage::kPixel,specialization,late,ao_error)){
+      MTLRenderPipelineDescriptor* ao_descriptor=[descriptor copy];
+      ao_descriptor.fragmentFunction=ao_fragment;
+      ao_descriptor.binaryArchives=nil;
+      ao_descriptor.label=[NSString stringWithFormat:@"Liberty AO %016llX/%016llX",vs->hash,ps->hash];
+      auto build=std::make_shared<PipelineBuild>(); result.ambient=build;
+      [context->device newRenderPipelineStateWithDescriptor:ao_descriptor
+          completionHandler:^(id<MTLRenderPipelineState> state,NSError* native_error){
+        { std::lock_guard lock(build->mutex);
+          build->state=state;
+          if(!state){
+            build->error=ui::metal::MetalError(native_error,"Metal AO lighting pipeline creation failed");
+            REXLOG_WARN("gta4-metal-raytracing: {}",build->error);
+          }
+          build->complete=true;
+        }
+        build->wake.notify_all();
+      }];
+      REXLOG_INFO("gta4-metal-raytracing: AO lighting pipeline requested ps={:016X} late={}",ps->hash,late);
+    }
+  }
   ++pipeline_creations;
   if(profile_enabled) REXLOG_INFO("gta4-metal-profile-shader vs={:016X} ps={:016X} variant={:X} selected-vs={} selected-ps={}",
       vs->hash,ps?ps->hash:0,selection.variant_key,vs->name,ps?ps->name:"none");

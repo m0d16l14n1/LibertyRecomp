@@ -1027,6 +1027,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         raytracing::AoFrame f;
         f.scene=scene; f.structures=raytracing_capture.heap();
         f.depth=temporal.inputs.depth; f.motion=temporal.inputs.motion;
+        // GBufferTextureSampler1 of the lighting draw: the world normal (normal modes gbuffer*).
+        if(const auto normals=sampled_images[1];normals&&normals.pixelFormat==MTLPixelFormatRGBA8Unorm&&
+           normals.width==f.depth.width&&normals.height==f.depth.height)f.normals=normals;
         f.clip_to_world=*clip_to_world;
         // actual_inverse is camera-to-world with row vectors: its last row is the camera position.
         f.camera_position={temporal.actual_inverse[12],temporal.actual_inverse[13],temporal.actual_inverse[14]};
@@ -1043,7 +1046,23 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     }
   }
   diagnostic_point="draw.encode";
-  bindings.Pipeline(render,pipeline->state); bindings.Depth(render,depth_state);
+  // Ambient-only AO: the lighting shader's AO variant, with this frame's AO at fragment texture 0
+  // (no translated shader uses direct texture slots). Otherwise the multiply after the draw.
+  id<MTLRenderPipelineState> draw_state=pipeline->state;
+  bool ao_ambient=false;
+  if(ao_lighting&&raytracing_ao_texture&&raytracing_ao_sequence==temporal.metadata.sequence&&
+     raytracing_ao_settings.view==raytracing::AoView::kApply&&pipeline->ambient){
+    if(!pipeline->ambient_state){
+      std::lock_guard lock(pipeline->ambient->mutex);
+      if(pipeline->ambient->complete)pipeline->ambient_state=pipeline->ambient->state;
+    }
+    if(pipeline->ambient_state){
+      draw_state=pipeline->ambient_state; ao_ambient=true;
+      [render setFragmentTexture:raytracing_ao_texture atIndex:0];
+      ++raytracing_ao_ambient_draws;
+    }
+  }
+  bindings.Pipeline(render,draw_state); bindings.Depth(render,depth_state);
   bindings.Vertex(render,default_vertex,0,30);
   for(size_t i=0;i<vertices.size();++i) if(vertices[i]) bindings.Vertex(render,vertices[i],offsets[i],9+i);
   std::array<NSUInteger,5> argument_offsets{};
@@ -1126,7 +1145,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   // shader override can limit it to the ambient term). A blended contribution adds to
   // earlier light and is left alone.
   if(ao_lighting&&raytracing_ao_texture&&raytracing_ao_sequence==temporal.metadata.sequence&&
-     !scene_blending&&!sky_capture){
+     !ao_ambient&&!scene_blending&&!sky_capture){
     EndRender();
     std::string rt_error;
     if(raytracing_ao.Apply(commands,targets.colors[0]->image,raytracing_ao_texture,raytracing_ao_settings,rt_error))

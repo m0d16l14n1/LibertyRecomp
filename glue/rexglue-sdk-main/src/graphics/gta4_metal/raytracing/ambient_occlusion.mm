@@ -11,6 +11,8 @@
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing_ao_view, "apply", "GPU",
     "Ray-traced AO output: apply (darken the lit image), show (AO in grey instead of lighting), "
     "debug (r = world x / 10, g = hit within radius, b = long-ray hit distance) or none (trace only)");
+REXCVAR_DEFINE_STRING(gta4_metal_raytracing_ao_normals, "gbuffer", "GPU",
+    "Ray-traced AO surface normals: depth (reconstructed), gbuffer (GBufferTextureSampler1 rgb) or gbuffer-yx");
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_radius, 2.0, "GPU", "Ray-traced AO ray length in metres")
     .range(0.25, 8.0);
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_occlusion, 0.85, "GPU",
@@ -26,7 +28,9 @@ AoSettings CurrentAoSettings() {
   AoSettings settings;
   const auto view = rex::cvar::GetFlagByName("gta4_metal_raytracing_ao_view");
   settings.view = view == "show" ? AoView::kShow : view == "debug" ? AoView::kDebug
-                : view == "none" ? AoView::kNone : AoView::kApply;
+                : view == "none" ? AoView::kNone : view == "multiply" ? AoView::kMultiply : AoView::kApply;
+  const auto normals = rex::cvar::GetFlagByName("gta4_metal_raytracing_ao_normals");
+  settings.normal_mode = normals == "gbuffer" ? 1u : normals == "gbuffer-yx" ? 2u : 0u;
   settings.radius = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_radius"));
   settings.occlusion = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_occlusion"));
   settings.apply_strength = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_strength"));
@@ -93,7 +97,8 @@ struct AmbientOcclusion::Impl {
     return raw && history[0] && history[1] && filter[0] && filter[1] && ao && debug;
   }
   id<MTLRenderPipelineState> ApplyPipeline(MTLPixelFormat format, AoView view, std::string& error) {
-    const bool show = view != AoView::kApply;
+    if (view == AoView::kMultiply) view = AoView::kApply;  // the same multiply pipeline
+    const bool show = view == AoView::kShow || view == AoView::kDebug;
     const uint64_t key = uint64_t(format) << 2 | uint64_t(view);
     if (auto found = apply.find(key); found != apply.end()) return found->second;
     auto* descriptor = [MTLRenderPipelineDescriptor new];
@@ -162,7 +167,7 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
   p.radius = settings.radius;
   p.strength = settings.occlusion;
   p.frame = uint32_t(s.frames);
-  p.normal_mode = 0;  // from depth until the G-buffer normal encoding is confirmed
+  p.normal_mode = frame.normals ? settings.normal_mode : 0u;
   p.reversed_depth = frame.reversed_depth;
   p.jitter_ndc = simd_make_float2(frame.jitter_ndc[0], frame.jitter_ndc[1]);
   p.valid_history = s.history_valid && !frame.camera_cut && frame.motion;
@@ -186,7 +191,7 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
   id<MTLAccelerationStructure> scene = frame.scene;
   id<MTLHeap> structures = frame.structures;
   id<MTLTexture> depth = frame.depth, motion = frame.motion ? frame.motion : s.no_motion;
-  id<MTLTexture> raw = s.raw, normals = s.no_normals, before = s.history[previous], now = s.history[current];
+  id<MTLTexture> raw = s.raw, normals = frame.normals ? frame.normals : s.no_normals, before = s.history[previous], now = s.history[current];
   id<MTLTexture> f0 = s.filter[0], f1 = s.filter[1], ao = s.ao;
   const uint32_t steps[2] = {1, 2};
   const uint32_t* step = steps;
@@ -277,12 +282,13 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
             "near-hits-under-10cm={} far-hits={} mean-near-distance={:.3f} mean-far-distance={:.2f} "
             "mean-view-distance={:.2f} radius={} ao-min={:.3f} ao-mean={:.3f} ao-max={:.3f} "
             "origin-mean=({:.1f},{:.1f},{:.1f}) captured-finite={} captured-nan={} captured-mean=({:.1f},{:.1f},{:.1f}) "
-            "camera=({:.1f},{:.1f},{:.1f}) jitter=({:.5f},{:.5f}) reversed={} clip-to-world-columns=[{}]",
+            "camera=({:.1f},{:.1f},{:.1f}) jitter=({:.5f},{:.5f}) reversed={} normal-agreement-rgb={:.3f} "
+            "normal-agreement-grb={:.3f} clip-to-world-columns=[{}]",
             traced, u[0], u[1], u[2], u[3], u[10], u[4], f[9] / std::max(1u, u[3]), f[3] / std::max(1u, u[4]),
             f[4] / traced_pixels, radius, ao_min, f[5] / std::max(1u, u[9]), ao_max,
             f[0] / traced_pixels, f[1] / traced_pixels, f[2] / traced_pixels, u[7], u[8],
             f[6] / positions_ok, f[7] / positions_ok, f[8] / positions_ok, camera[0], camera[1], camera[2],
-            jitter[0], jitter[1], reversed,
+            jitter[0], jitter[1], reversed, f[10] / traced_pixels, f[11] / traced_pixels,
             fmt::format("{:.4g},{:.4g},{:.4g},{:.4g}, {:.4g},{:.4g},{:.4g},{:.4g}, {:.4g},{:.4g},{:.4g},{:.4g}, "
                         "{:.4g},{:.4g},{:.4g},{:.4g}", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9],
                         m[10], m[11], m[12], m[13], m[14], m[15]));
@@ -302,7 +308,7 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   if (settings.view == AoView::kNone || !target || !ao || target.width != ao.width || target.height != ao.height ||
       target.sampleCount != 1)
     return true;
-  const bool show = settings.view != AoView::kApply;
+  const bool show = settings.view == AoView::kShow || settings.view == AoView::kDebug;
   id<MTLRenderPipelineState> pipeline = s.ApplyPipeline(target.pixelFormat, settings.view, error);
   if (!pipeline) return false;
   auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];

@@ -6,13 +6,33 @@ denoised before the deferred lighting's global contribution and multiplied into 
 Settings:
 - `gta4_metal_raytracing = off | ao | shadows`. `shadows` only captures for now. It is read at startup and needs
   TAA or the MetalFX upscaler.
-- `gta4_metal_raytracing_ao_view = apply | show | none`: darken the lit image; show the AO in grey instead of the
-  lighting; or trace only, for timing.
-- `gta4_metal_raytracing_ao_radius` (2 m), `_ao_occlusion` (0.85, AO term darkness), `_ao_strength` (0.6, share of
-  the AO term applied).
+- `gta4_metal_raytracing_ao_view`:
+  - `apply`: AO on the ambient term only, through the lighting shader's AO variant;
+  - `multiply`: the whole global contribution is multiplied by AO, scaled by `_ao_strength`;
+  - `show`: AO in grey instead of the lighting;
+  - `debug`: world-position stripes, near hits and long-ray hit distance;
+  - `none`: trace only, for timing.
+- `gta4_metal_raytracing_ao_normals = depth | gbuffer | gbuffer-yx`: where surface normals come from.
+- `gta4_metal_raytracing_ao_radius` (2 m), `_ao_occlusion` (0.85, AO term darkness), `_ao_strength` (0.6, multiply only).
 
-Until the lighting pixel-shader override exists, AO multiplies the whole global contribution (sun, ambient
-and reflection) with `_ao_strength` below 1. The override will put it on the ambient term only.
+### Ambient-only apply
+
+The global contribution (`deferred_lighting` PS `7B14CAC2A31D4199` and three siblings) computes a hemisphere
+ambient once per material branch: `gLightAmbient1 * f(n.z) + gLightAmbient0` (c37/c38). The ambient is then
+blended with the reflection, added to the shadowed sun and multiplied by albedo.
+`tools/metal/raytracing_ao_variants.py` builds `stock_ao_shader_archive.bin`: each such statement is multiplied
+by the AO read at the fragment (`texture(0)`). Only shaders that read the G-buffer get a variant, because forward
+shaders draw before the AO exists. If the archive is missing, or the pipeline is temporal or overridden, the
+renderer falls back to the multiply.
+
+G-buffer (city, frame 39278):
+- t0 albedo;
+- t1 world normal * 0.5 + 0.5, Z up, fetched `.yxzw`;
+- t2 r specular, g power, b a smooth term (baked AO or an ambient scale?);
+- t4 depth D32S8;
+- t5 stencil and vehicle mask.
+
+The scene depth is resolved, then cleared, before the lighting. The trace reads the temporal R32Float snapshot.
 
 ## What to trace, and why
 
