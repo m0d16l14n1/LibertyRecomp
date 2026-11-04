@@ -50,6 +50,7 @@ struct Capture::Impl {
   FrameSlot* slot = nullptr;
   uint64_t frame = 0;
   bool frame_open = false, frame_active = false;  // active: open, with a camera
+  id<MTLAccelerationStructure> encoded = nil;      // this frame's scene, once EncodeScene ran
   std::array<float, 16> clip_to_world{};
   struct Pending {
     AccelerationStructureOp op;
@@ -113,6 +114,7 @@ void Capture::BeginFrame() {
   ++s.frame;
   s.frame_open = true;
   s.frame_active = false;
+  s.encoded = nil;
   s.slot = &s.slots[s.frame % s.slots.size()];
   s.slot->positions_used = 0;
   s.pending.clear();
@@ -130,7 +132,9 @@ bool Capture::has_camera() const { return impl_->frame_active; }
 bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
                    const std::function<void()>& select_pipeline, std::string& error) {
   auto& s = *impl_;
-  if (!s.frame_active || !draw.identity || !draw.count) return true;
+  // After EncodeScene the frame's structures are encoded: later draws (forward geometry after
+  // the lighting) are left out of the scene.
+  if (!s.frame_active || s.encoded || !draw.identity || !draw.count) return true;
   Topology topology;
   if (draw.primitive == MTLPrimitiveTypeTriangle) topology = Topology::kList;
   else if (draw.primitive == MTLPrimitiveTypeTriangleStrip) topology = Topology::kStrip;
@@ -226,6 +230,7 @@ bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
 id<MTLAccelerationStructure> Capture::EncodeScene(id<MTLCommandBuffer> commands, std::string& error) {
   auto& s = *impl_;
   if (!s.frame_active || !s.slot) return nil;
+  if (s.encoded) return s.encoded;  // once per frame
   const auto& scene = s.cache.scene();
   if (scene.empty()) return nil;
 
@@ -268,7 +273,8 @@ id<MTLAccelerationStructure> Capture::EncodeScene(id<MTLCommandBuffer> commands,
   scene_op.instance_count = uint32_t(scene.size());
   if (!EncodeAccelerationStructureWork(commands, std::span(&scene_op, 1), error, s.heap)) return nil;
   s.pending.clear();
-  return s.slot->scene;
+  s.encoded = s.slot->scene;
+  return s.encoded;
 }
 
 void Capture::EndFrame() {
@@ -283,6 +289,7 @@ void Capture::EndFrame() {
   const uint64_t delay = s.slots.size();
   while (!s.retiring.empty() && s.frame - s.retiring.front().first >= delay) s.retiring.pop_front();
   s.frame_open = s.frame_active = false;
+  s.encoded = nil;
 }
 
 void Capture::Reset() {

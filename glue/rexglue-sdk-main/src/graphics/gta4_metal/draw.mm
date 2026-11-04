@@ -920,6 +920,36 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       if(!BeginRender(targets,error))return false;
     }
   }
+  // Ray-traced AO: once per frame, just before the deferred lighting's global contribution
+  // (lightShadowDirectional / lightNoDirectional), from the finished scene depth and the
+  // frame's captured scene. The lighting draw's own pass is reopened afterwards.
+  const bool ao_lighting=raytracing_ao.initialized()&&lighting.stage==RenderExecutionStage::kDeferredLighting&&
+      lighting.role==LightPassRole::kGlobalContribution&&targets.colors[0]&&temporal.depth_source&&
+      temporal.depth_source->image&&targets.width==temporal.depth_source->image.width&&
+      targets.height==temporal.depth_source->image.height;
+  if(ao_lighting){
+    ++raytracing_ao_lighting_draws;
+    if(raytracing_ao_sequence!=temporal.metadata.sequence&&raytracing_capture.has_camera()){
+      raytracing_ao_sequence=temporal.metadata.sequence;
+      raytracing_ao_texture=nil;
+      const auto clip_to_world=raytracing::ClipToWorldColumns(temporal.actual_projection,temporal.actual_inverse);
+      EndRender();
+      std::string rt_error;
+      if(id<MTLAccelerationStructure> scene=clip_to_world?raytracing_capture.EncodeScene(commands,rt_error):nil){
+        raytracing::AoFrame f;
+        f.scene=scene; f.structures=raytracing_capture.heap();
+        f.depth=temporal.depth_source->image; f.motion=temporal.inputs.motion;
+        f.clip_to_world=*clip_to_world;
+        // actual_inverse is camera-to-world with row vectors: its last row is the camera position.
+        f.camera_position={temporal.actual_inverse[12],temporal.actual_inverse[13],temporal.actual_inverse[14]};
+        f.reversed_depth=temporal.config.depth_reversed; f.camera_cut=temporal.metadata.camera_cut;
+        raytracing_ao_settings=raytracing::CurrentAoSettings();
+        raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
+      }
+      if(!rt_error.empty())REXLOG_ERROR("gta4-metal-raytracing: AO encode failed: {}",rt_error);
+      if(!BeginRender(targets,error))return false;
+    }
+  }
   diagnostic_point="draw.encode";
   bindings.Pipeline(render,pipeline->state); bindings.Depth(render,depth_state);
   bindings.Vertex(render,default_vertex,0,30);
@@ -999,6 +1029,17 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       std::string capture_error;
       raytracing_capture.Draw(render,g,[&]{bindings.Pipeline(render,pipeline->capture_state);},capture_error);
     }
+  }
+  // The AO darkens what the global contribution just wrote (all of it, until the lighting
+  // shader override can limit it to the ambient term). A blended contribution adds to
+  // earlier light and is left alone.
+  if(ao_lighting&&raytracing_ao_texture&&raytracing_ao_sequence==temporal.metadata.sequence&&
+     !scene_blending&&!sky_capture){
+    EndRender();
+    std::string rt_error;
+    if(raytracing_ao.Apply(commands,targets.colors[0]->image,raytracing_ao_texture,raytracing_ao_settings,rt_error))
+      ++raytracing_ao_applied;
+    else REXLOG_ERROR("gta4-metal-raytracing: AO apply failed: {}",rt_error);
   }
   if(sky_capture){
     [render setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];

@@ -7,6 +7,7 @@
 //                   texture; rejects by depth; keeps a per-pixel history length
 //   rtao_atrous     edge-aware a-trous filter (depth + normal), run with step 1 and 2
 //   rtao_upsample   depth-aware 2x2 upsample to input resolution
+//   rtao_apply_*    full-screen pass over the lighting output: multiply, or show the AO
 // Every texture is read with read()/write(): no samplers, no filtering surprises.
 // RtaoParams must match raytracing/raytracing.h.
 #include <metal_stdlib>
@@ -67,12 +68,13 @@ static float3 cosine_direction(float3 n, float2 u) {
     return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - u.x)));
 }
 
-static float depth_at(texture2d<float, access::read> depth, uint2 pixel) {
-    return depth.read(min(pixel, uint2(depth.get_width() - 1, depth.get_height() - 1))).r;
+// The scene depth attachment itself (single sample), read as a depth texture.
+static float depth_at(depth2d<float, access::read> depth, uint2 pixel) {
+    return depth.read(min(pixel, uint2(depth.get_width() - 1, depth.get_height() - 1)));
 }
 
 // The surface normal at an input-resolution pixel, facing the camera.
-static float3 normal_at(texture2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
+static float3 normal_at(depth2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
                         uint2 pixel, float3 position, constant RtaoParams& p) {
     float3 n;
     if (p.normalMode == 1u) {
@@ -103,7 +105,7 @@ static float view_depth(float3 position, constant RtaoParams& p) {
 
 kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
                        instance_acceleration_structure scene [[buffer(1)]],
-                       texture2d<float, access::read> depth [[texture(0)]],
+                       depth2d<float, access::read> depth [[texture(0)]],
                        texture2d<float, access::read> gbufferNormal [[texture(1)]],
                        texture2d<float, access::write> raw [[texture(2)]],
                        uint2 id [[thread_position_in_grid]]) {
@@ -204,7 +206,7 @@ kernel void rtao_atrous(constant RtaoParams& p [[buffer(0)]],
 
 kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
                           texture2d<float, access::read> filtered [[texture(0)]],
-                          texture2d<float, access::read> depth [[texture(1)]],
+                          depth2d<float, access::read> depth [[texture(1)]],
                           texture2d<float, access::write> ao [[texture(2)]],
                           uint2 id [[thread_position_in_grid]]) {
     if (any(id >= p.inputSize)) return;
@@ -227,4 +229,30 @@ kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
         }
     }
     ao.write(float4(total > 0.0f ? sum / total : 1.0f), id);
+}
+
+
+// ---- apply ---------------------------------------------------------------------------
+// One full-screen triangle over the lighting output, in its own render pass.
+// Multiply: blended as dst * src (source factor DestinationColor, destination Zero), so
+// the fragment returns the factor mix(1, ao, strength). Show: unblended AO in grey.
+
+struct RtaoApplyVertex { float4 position [[position]]; };
+
+vertex RtaoApplyVertex rtao_apply_vertex(uint id [[vertex_id]]) {
+    const float2 uv = float2((id << 1) & 2, id & 2);
+    return { float4(uv * float2(2, -2) + float2(-1, 1), 0, 1) };
+}
+
+fragment float4 rtao_apply_multiply(RtaoApplyVertex in [[stage_in]],
+                                    texture2d<float, access::read> ao [[texture(0)]],
+                                    constant float& strength [[buffer(0)]]) {
+    const uint2 pixel = min(uint2(in.position.xy), uint2(ao.get_width() - 1, ao.get_height() - 1));
+    return float4(float3(mix(1.0f, ao.read(pixel).r, strength)), 1.0f);
+}
+
+fragment float4 rtao_apply_show(RtaoApplyVertex in [[stage_in]],
+                                texture2d<float, access::read> ao [[texture(0)]]) {
+    const uint2 pixel = min(uint2(in.position.xy), uint2(ao.get_width() - 1, ao.get_height() - 1));
+    return float4(float3(ao.read(pixel).r), 1.0f);
 }

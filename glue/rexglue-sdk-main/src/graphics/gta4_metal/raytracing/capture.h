@@ -65,6 +65,8 @@ class Capture {
   // structure. Returns nil when the scene is empty. Trace passes must make heap()
   // and the returned structure resident (useHeap:/useResource:).
   id<MTLAccelerationStructure> EncodeScene(id<MTLCommandBuffer> commands, std::string& error);
+  // Encodes once per frame: later calls return the same structure, and draws after it are
+  // not captured (geometry drawn after the lighting hook stays out of the scene).
   id<MTLHeap> heap() const;
   // Ends the frame; structures evicted now are released frames_in_flight frames later.
   // Builds EncodeScene() did not encode this frame are dropped and retried.

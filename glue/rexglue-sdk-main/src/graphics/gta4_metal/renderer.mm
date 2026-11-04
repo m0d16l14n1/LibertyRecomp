@@ -163,6 +163,7 @@ bool Renderer::Initialize(std::string& error,const std::filesystem::path& direct
       settings.frames_in_flight=std::max(rex::cvar::Query<uint32_t>("gta4_native_frames_in_flight"),
                                          2u+rex::cvar::Query<uint32_t>("present_frames_ahead"));
       if(ok)ok=s.raytracing_capture.Initialize(s.context->device,settings,reason);
+      if(ok&&s.raytracing_mode==raytracing::Mode::kAmbientOcclusion)ok=s.raytracing_ao.Initialize(s.context->device,reason);
       if(ok)REXLOG_INFO("gta4-metal-raytracing: geometry capture enabled mode={}",rex::cvar::GetFlagByName("gta4_metal_raytracing"));
       else{REXLOG_WARN("gta4-metal-raytracing: disabled: {}",reason);s.raytracing_mode=raytracing::Mode::kOff;}
     }
@@ -545,9 +546,11 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
             if(++raytracing_frames%300==0){
               const auto& r=s.raytracing_capture.statistics();
               REXLOG_INFO("gta4-metal-raytracing: frame={} captured={} rejected={} built={} rebuilt={} refit={} reused={} "
-                  "stale={} skipped-builds={} skipped-bytes={} evicted={} bytes={} instances={}",t.metadata.sequence,
+                  "stale={} skipped-builds={} skipped-bytes={} evicted={} bytes={} instances={} ao-traced={} "
+                  "ao-lighting-draws={} ao-applied={}",t.metadata.sequence,
                   s.raytracing_capture.captured_draws(),s.raytracing_capture.rejected_draws(),r.built,r.rebuilt,r.refit,
-                  r.reused,r.stale,r.skipped_builds,r.skipped_bytes,r.evicted,r.bytes,r.instances);
+                  r.reused,r.stale,r.skipped_builds,r.skipped_bytes,r.evicted,r.bytes,r.instances,
+                  s.raytracing_ao.traced_frames(),s.raytracing_ao_lighting_draws,s.raytracing_ao_applied);
             }
           }
           if(c.sequence%60==0)REXLOG_INFO("gta4-temporal-begin sequence={} epoch={} view={:X} previous-sequence={} previous-view={:X} previous-world={} phase={}",c.sequence,c.epoch,c.view,t.metadata.sequence,t.metadata.view,t.world_draws,uint32_t(s.Phase()));
@@ -562,8 +565,8 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
           t.active_composite_scope=c.time_ns;t.executed_composite_source.reset();
           if(t.depth_source&&!s.SettlePendingResolves(t.depth_source->image,false,error))return false;
           if(s.raytracing_capture.has_camera()){
-            // Stage 2: the frame's builds and refits are encoded here so their cost shows.
-            // Stage 3 moves this before the lighting pass and traces from it.
+            // Normally encoded at the AO hook before the lighting (then this returns the same
+            // structure); here for frames without that hook and for mode shadows.
             s.EndRender();
             std::string rt_error;
             if(!s.raytracing_capture.EncodeScene(s.commands,rt_error)&&!rt_error.empty())
@@ -596,6 +599,7 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
         s.pending_resolves.clear();
         s.temporal_scene.Reset();
         s.raytracing_capture.Reset(); s.raytracing_sequence=~0ull;
+        s.raytracing_ao.Reset(); s.raytracing_ao_texture=nil; s.raytracing_ao_sequence=~0ull;
         s.resources.Clear(); s.shaders.clear(); s.declarations.clear(); s.modern.Reset(); s.phases.Reset();
         s.postfx_half_scene_handle = 0; s.depth_of_field.ReleaseExtentResources(); s.sun_shafts.ReleaseExtentResources();
         s.fusion_cloud_mask = nil; s.fusion_cloud_ready = false; return true;

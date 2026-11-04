@@ -1,7 +1,18 @@
 # Ray tracing in the GTA IV Metal renderer
 
-Status: stage 1 (policy, capture variants, AO shaders, acceleration-structure entry point).
-Not yet wired into the frame. Setting: `gta4_metal_raytracing = off | ao | shadows`, default `off`.
+Status: stage 3. Geometry capture builds the scene every frame (stage 2). In mode `ao`, AO is traced and
+denoised before the deferred lighting's global contribution and multiplied into its output. Default `off`.
+
+Settings:
+- `gta4_metal_raytracing = off | ao | shadows`. `shadows` only captures for now. It is read at startup and needs
+  TAA or the MetalFX upscaler.
+- `gta4_metal_raytracing_ao_view = apply | show | none`: darken the lit image; show the AO in grey instead of the
+  lighting; or trace only, for timing.
+- `gta4_metal_raytracing_ao_radius` (2 m), `_ao_occlusion` (0.85, AO term darkness), `_ao_strength` (0.6, share of
+  the AO term applied).
+
+Until the lighting pixel-shader override exists, AO multiplies the whole global contribution (sun, ambient
+and reflection) with `_ao_strength` below 1. The override will put it on the ambient term only.
 
 ## What to trace, and why
 
