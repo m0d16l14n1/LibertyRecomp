@@ -91,6 +91,13 @@ class FrameInterpolation {
               std::string&);
   void Reset();
   size_t owned_bytes() const;
+  // Encodes on a Metal 4 queue through MTL4FX (native) and through the Metal 3 hop (Metal 3
+  // queues, or a Metal 4 queue whose device has no MTL4FX interpolation).
+  struct EncodeCounts { uint64_t native = 0, hop = 0; };
+  EncodeCounts encode_counts() const;
+  // A one-time note about the interpolator choice (native MTL4FX or the Metal 3 hop), for the
+  // caller to log (this library does not link the logger); empty when there is none.
+  std::string TakeNotice();
 
  private:
   struct State;

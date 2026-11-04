@@ -564,7 +564,9 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   // present.mm composes the HUD over the scene into the real image (Compose writes every texel).
   UiInput ui{};
   ui.caller_writes_real = true;
-  return interpolation_.Encode(cb, in, ui, f, output, error);
+  const bool encoded = interpolation_.Encode(cb, in, ui, f, output, error);
+  if (std::string notice = interpolation_.TakeNotice(); !notice.empty()) REXLOG_INFO("{}", notice);
+  return encoded;
 }
 bool Live::AdoptExecutionCamera() {
   if (!active || !execution_camera_valid) return false;

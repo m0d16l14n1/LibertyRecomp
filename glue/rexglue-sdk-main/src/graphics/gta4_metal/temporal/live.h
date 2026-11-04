@@ -29,6 +29,7 @@ class Live {
                  std::array<float, 2> offset = {});
   bool Compose(id<MTLCommandBuffer>, id<MTLTexture>, id<MTLTexture>, std::string&);
   bool Generate(id<MTLCommandBuffer>, InterpolationOutput&, std::string&);
+  FrameInterpolation::EncodeCounts interpolation_counts() const { return interpolation_.encode_counts(); }
   bool NeedsMotionCoverage() const;
   bool ValidateMotionCoverage(id<MTLCommandBuffer>, std::string&);
   id<MTLTexture> ResampleHalf(id<MTLCommandBuffer>, id<MTLTexture>, std::string&);

@@ -342,6 +342,8 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
           present.submitted_frame, m4.command_buffers, m4.parts, m4.encoders, m4.barriers, m4.transient_bytes,
           m4.resident, m4.metal3_hops, m4.binds, m4.bind_hits, m4.fragment_barriers, m4.vertex_barriers, m4.evicted,
           m4.residency_commits);
+    if (const auto fg = temporal_scene.interpolation_counts(); fg.native || fg.hop)
+      REXLOG_INFO("gta4-metal-framegen frame={} native-mtl4fx={} metal3-hop={}", present.submitted_frame, fg.native, fg.hop);
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={} delta={} delta-uploads={} "
         "delta-unchanged={} delta-groups={} last-hits={} hash-hits={} history-uploads={} history-reuses={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,

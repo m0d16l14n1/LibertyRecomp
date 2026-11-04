@@ -513,6 +513,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
   }
 }
 struct FrameInterpolation::State {
+  std::string notice;  // TakeNotice()
   struct Slot {
     id<MTLTexture> scene = nil, real = nil, generated = nil;
     __weak id<MTLCommandBuffer> owner = nil;
@@ -523,13 +524,21 @@ struct FrameInterpolation::State {
   Configuration config{};
   History history;
   id<MTLFXFrameInterpolator> interpolator = nil;
+  // Metal 4 queue (gta4_metal_api = metal4): the same interpolator as MTL4FX, made at the
+  // first Metal 4 encode from the queue's MTL4Compiler and encoded into the MTL4 command
+  // buffer (EncodeMetal4) instead of a Metal 3 hop. Its own fence: the temporal scaler's
+  // EncodeMetal4 earlier in the frame is ordered by the queue barrier, not by sharing one.
+  id<MTL4FXFrameInterpolator> interpolator4 = nil;
+  id<MTLFence> fence4 = nil;
+  uint64_t native_encodes = 0, hop_encodes = 0;
+  bool native4_unavailable = false;
   id<MTLComputePipelineState> composite = nil, overlay = nil;
   std::array<Slot, 2> slots{};
   size_t cursor = 0, previous = 0, owned = 0, limit = 0;
   bool encoded = false, restart_instance = false;
   std::shared_ptr<FailureState> failures = std::make_shared<FailureState>();
   uint64_t seen_failure = 0;
-  id<MTLFXFrameInterpolator> CreateInterpolator() const {
+  MTLFXFrameInterpolatorDescriptor* Describe() const {
     auto descriptor = [MTLFXFrameInterpolatorDescriptor new];
     descriptor.inputWidth = config.input_width;
     descriptor.inputHeight = config.input_height;
@@ -539,7 +548,16 @@ struct FrameInterpolation::State {
         MTLPixelFormatRGBA16Float;
     descriptor.depthTextureFormat = MTLPixelFormatR32Float;
     descriptor.motionTextureFormat = MTLPixelFormatRG16Float;
-    return [descriptor newFrameInterpolatorWithDevice:device];
+    return descriptor;
+  }
+  id<MTLFXFrameInterpolator> CreateInterpolator() const {
+    return [Describe() newFrameInterpolatorWithDevice:device];
+  }
+  // nil when the device or queue has no MTL4FX interpolation; then the Metal 3 hop is used.
+  id<MTL4FXFrameInterpolator> CreateInterpolator4(id<MTLCommandQueue> queue) const {
+    if (![MTLFXFrameInterpolatorDescriptor supportsMetal4FX:device]) return nil;
+    auto compiler = rex::ui::metal::Metal4Compiler(queue);
+    return compiler ? [Describe() newFrameInterpolatorWithDevice:device compiler:compiler] : nil;
   }
 };
 FrameInterpolation::FrameInterpolation() = default;
@@ -551,6 +569,12 @@ void FrameInterpolation::Reset() {
   }
 }
 size_t FrameInterpolation::owned_bytes() const { return state_ ? state_->owned : 0; }
+std::string FrameInterpolation::TakeNotice() {
+  return state_ ? std::exchange(state_->notice, std::string()) : std::string();
+}
+FrameInterpolation::EncodeCounts FrameInterpolation::encode_counts() const {
+  return state_ ? EncodeCounts{state_->native_encodes, state_->hop_encodes} : EncodeCounts{};
+}
 bool FrameInterpolation::Configure(id<MTLDevice> device, id<MTLLibrary> library, Configuration c,
                                    size_t budget, std::string& error) {
   @autoreleasepool {
@@ -641,7 +665,29 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       error = "frame interpolation cannot cross command queues";
       return false;
     }
-    auto fx = s.interpolator;
+    const bool metal4 = rex::ui::metal::IsMetal4(commands);
+    bool native4 = false;
+    if (metal4 && !s.interpolator4 && !s.native4_unavailable) {
+      s.interpolator4 = s.CreateInterpolator4(commands.commandQueue);
+      if (s.interpolator4) {
+        s.fence4 = [s.device newFence];
+        s.interpolator4.fence = s.fence4;
+        s.notice = "gta4-metal-framegen: native MTL4FX frame interpolator " +
+                   std::to_string(s.config.input_width) + "x" + std::to_string(s.config.input_height) +
+                   " -> " + std::to_string(s.config.output_width) + "x" + std::to_string(s.config.output_height);
+      } else {
+        s.native4_unavailable = true;  // once: keep the Metal 3 hop
+        s.notice = "gta4-metal-framegen: MTL4FX frame interpolator unavailable; using the Metal 3 hop";
+      }
+    }
+    native4 = metal4 && s.interpolator4;
+    id<MTLFXFrameInterpolatorBase> fx = native4 ? (id<MTLFXFrameInterpolatorBase>)s.interpolator4
+                                                : (id<MTLFXFrameInterpolatorBase>)s.interpolator;
+    if (native4 && ((s.slots[s.cursor].scene.usage & fx.colorTextureUsage) != fx.colorTextureUsage ||
+                    (s.slots[s.cursor].generated.usage & fx.outputTextureUsage) != fx.outputTextureUsage)) {
+      error = "MTL4FX frame interpolation slot usage contract is unmet";
+      return false;
+    }
     if ((in.depth.usage & fx.depthTextureUsage) != fx.depthTextureUsage ||
         (in.motion.usage & fx.motionTextureUsage) != fx.motionTextureUsage ||
         (ui && !TextureMatches(ui, s.device, MTLPixelFormatRGBA16Float, s.config.output_width,
@@ -668,13 +714,24 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       // The reset-and-reuse GPU regression on the tested MetalFX runtime kept
       // stale scene state after a cut. Recreate only the effect at discontinuities;
       // the bounded texture ring and ordinary continuous-frame path are reused.
-      auto replacement = s.CreateInterpolator();
-      if (!replacement) {
-        error = "MetalFX history discontinuity reset failed";
-        return false;
+      if (native4) {
+        auto replacement = s.CreateInterpolator4(commands.commandQueue);
+        if (!replacement) {
+          error = "MTL4FX history discontinuity reset failed";
+          return false;
+        }
+        replacement.fence = s.fence4;
+        s.interpolator4 = replacement;
+        fx = replacement;
+      } else {
+        auto replacement = s.CreateInterpolator();
+        if (!replacement) {
+          error = "MetalFX history discontinuity reset failed";
+          return false;
+        }
+        s.interpolator = replacement;
+        fx = replacement;
       }
-      s.interpolator = replacement;
-      fx = replacement;
       s.restart_instance = false;
     }
     if (in.color == slot.scene || in.color == slot.real || in.color == slot.generated ||
@@ -739,7 +796,28 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.aspectRatio = frame.aspect;
     fx.depthReversed = s.config.depth_reversed;
     fx.shouldResetHistory = decision.reset;
-    rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [fx encodeToCommandBuffer:m3]; });
+    if (native4) {
+      // Native Metal 4: into the open MTL4 command buffer. The snapshot blit and the UI
+      // composition above are earlier proxy encoders; EncodeMetal4's empty encoder waits for
+      // them and updates fence4, which the interpolator waits on. The UI pass below is the
+      // next proxy encoder, ordered after it by its queue barrier.
+      NSMutableArray<id<MTLResource>>* used =
+          [NSMutableArray arrayWithObjects:fx.colorTexture, fx.depthTexture, fx.motionTexture, fx.outputTexture, nil];
+      if (fx.prevColorTexture && fx.prevColorTexture != fx.colorTexture) [used addObject:fx.prevColorTexture];
+      if (fx.uiTexture) [used addObject:fx.uiTexture];
+      id<MTL4FXFrameInterpolator> fx4 = s.interpolator4;
+      if (!rex::ui::metal::EncodeMetal4(commands, s.fence4, used,
+                                        ^(id<MTL4CommandBuffer> cb) { [fx4 encodeToCommandBuffer:cb]; })) {
+        s.history.Reset();
+        error = "MTL4FX frame interpolation encode failed";
+        return false;
+      }
+      ++s.native_encodes;
+    } else {
+      id<MTLFXFrameInterpolator> fx3 = s.interpolator;
+      rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [fx3 encodeToCommandBuffer:m3]; });
+      ++s.hop_encodes;
+    }
     if (overlay && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/ui-after");
       if (!encoder) {
