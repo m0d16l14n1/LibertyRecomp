@@ -1,0 +1,113 @@
+# Action bench (in the spirit of the GTA V benchmark): two drives (Downtown Broker at noon; Hove
+# Beach at night in the rain), helicopter, boat, gunfight, explosions. About 2 min 20 s timed,
+# invincible, no police. Needs a loaded story save with
+# Broker open; run through tools/perf/route_bench.sh pad (a copy of the save; never saved).
+# Windows: drive, night, heli, boat, combat, boom, and all (the whole run).
+await 5m
+wait 10s
+nowanted
+invincible
+clock 13 0
+weather 1
+
+# 1. Drive: the game's AI takes a car through Downtown Broker traffic.
+road 1040 150 20
+car sultan
+wait 6s
+drive 18 0
+mark all
+mark drive
+wait 35s
+mark drive_end
+shot {out}/shots/1-drive.png 0.5
+
+# 2. Night drive: Hove Beach at 21:30 in the rain, a sports car.
+road 892 -500 10
+clock 21 30
+weather 4
+car infernus
+wait 6s
+drive 20 0
+mark night
+wait 30s
+mark night_end
+shot {out}/shots/2-night.png 0.5
+
+# Evening, overcast, for the flight and the boat.
+clock 17 30
+weather 3
+# 3. Helicopter: spawned 40 m above the car, climb, then fly forward over the city.
+heli maverick 40
+wait 2s
+mark heli
+trigger rt 1 6s
+trigger rt 0.6
+stick ly 0.8 20s
+release all
+mark heli_end
+shot {out}/shots/3-heli.png 0.5
+where
+
+# 4. Boat: into the nearest open water, a speedboat there, full throttle with a gentle turn.
+water 1500
+car jetmax
+wait 2s
+mark boat
+trigger rt 1
+stick lx 0.3 20s
+release all
+mark boat_end
+shot {out}/shots/4-boat.png 0.5
+where
+
+# 5. Gunfight: back on the street at noon with an AK, parked cars and hostile peds around.
+road 1040 150 20
+clock 13 0
+weather 1
+wait 4s
+weapon 14 9999
+cars sultan 4 14
+peds 8 1 12
+wait 2s
+mark combat
+trigger lt 1
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+stick rx 0.6 1s
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+stick rx -0.6 1s
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+release all
+mark combat_end
+shot {out}/shots/5-combat.png 0.5
+
+# 6. Explosions: the parked cars go up one by one, plus blasts ahead.
+mark boom
+explode 1
+wait 2s
+boom 12
+wait 2s
+explode 1
+wait 2s
+boom 18 0 8
+wait 2s
+explode 2
+wait 3s
+mark boom_end
+mark all_end
+shot {out}/shots/6-boom.png 0.5
+where
+wait 1s
+quit

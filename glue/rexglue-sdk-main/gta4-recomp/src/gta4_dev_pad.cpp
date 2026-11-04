@@ -370,7 +370,9 @@ std::string Execute(const std::string& line) {
     return "ok";
   }
   if (cmd == "teleport" || cmd == "road" || cmd == "car" || cmd == "drive" || cmd == "clock" ||
-      cmd == "weather" || cmd == "invincible" || cmd == "nowanted") {
+      cmd == "weather" || cmd == "invincible" || cmd == "nowanted" || cmd == "heli" ||
+      cmd == "water" || cmd == "weapon" || cmd == "peds" || cmd == "cars" || cmd == "explode" ||
+      cmd == "boom" || cmd == "where" || cmd == "native") {
     return WorldCommand(args);
   }
   if (cmd == "time") {

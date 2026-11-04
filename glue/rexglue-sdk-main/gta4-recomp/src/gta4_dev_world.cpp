@@ -14,6 +14,20 @@
 //   car <model>                     a car at the player (model name: sultan, comet, ...), player inside
 //   drive <speed m/s> [style]       the game's AI drives the player's car around the city (wander)
 //   clock <hour> <minute>   weather <0..7>   invincible   nowanted
+//   heli <model> [lift m]           a helicopter lift metres above the player (blades at full
+//                                   speed), player inside; fly it with the pad (rt climbs, ly pitches)
+//   water [radius m] | water <x> <y>  the player on foot into the nearest open water (water 50 m
+//                                   around in all directions; swimming), e.g. before `car jetmax`
+//   weapon <id> [ammo]              give and select a weapon (7 pistol, 10 shotgun, 12 uzi,
+//                                   14 ak47, 15 m4, 18 rocket launcher)
+//   peds [count] [hostile 0|1] [radius m]   random peds in a ring around the player; hostile
+//                                   ones get a pistol and attack the player
+//   cars <model> [count] [radius m] parked cars in a ring around the player
+//   explode [count]                 blow up the oldest cars made by `cars`
+//   boom [distance m] [type] [radius m]  an explosion ahead of the player
+//   where                           log and reply the player position, car/water flags, health
+//   native <NAME> [args]            any native: ints, floats (with a '.'), $ped, $player, $car
+//                                   (last car made), out (an out slot); replies value and outs
 //
 // Coordinates are world metres: Algonquin is west (x < 600), Broker and Dukes east (Hove Beach
 // safehouse ~ 892 -500, Downtown Broker ~ 1040 150). Early in the story Algonquin is closed and
@@ -115,6 +129,9 @@ class Invoker {
   Invoker(PPCContext& parent, uint8_t* base) : parent_(parent), base_(base) {}
 
   Result Call(std::string_view name, std::initializer_list<Arg> args) {
+    return Call(name, std::vector<Arg>(args));
+  }
+  Result Call(std::string_view name, const std::vector<Arg>& args) {
     Result result;
     uint32_t address = 0;
     {
@@ -146,6 +163,9 @@ class Invoker {
       Write(base_, argv + i * 4, a.out ? outs + 16 * out_count++ : a.value);
       ++i;
     }
+    // Slots past the given arguments point at scratch memory: a native that takes more
+    // arguments than we passed (a wrong signature) writes there instead of guest address 0.
+    for (uint32_t spare = 0; i < 32; ++i, ++spare) Write(base_, argv + i * 4, outs + 16 * (24 + spare % 16));
     PPCContext call = parent_;
     call.r1.u32 = frame;
     call.r3.u32 = context;
@@ -249,6 +269,39 @@ bool ParseFloat(const std::string& text, float& out) {
   return end && *end == '\0';
 }
 
+struct Vec3 {
+  float x = 0, y = 0, z = 0;
+};
+std::optional<Vec3> Position(Invoker& n, uint32_t ped) {
+  const Result pos = n.Call("GET_CHAR_COORDINATES", {{ped}, {0, true}, {0, true}, {0, true}});
+  if (pos.outs.size() < 3) return std::nullopt;
+  return Vec3{AsFloat(pos.outs[0]), AsFloat(pos.outs[1]), AsFloat(pos.outs[2])};
+}
+float Heading(Invoker& n, uint32_t ped) {
+  const Result h = n.Call("GET_CHAR_HEADING", {{ped}, {0, true}});
+  return h.outs.empty() ? 0.0f : AsFloat(h.outs[0]);
+}
+// GTA headings: degrees counterclockwise from north (+y).
+Vec3 Ahead(const Vec3& from, float heading, float distance) {
+  const float r = heading * 0.0174533f;
+  return {from.x - std::sin(r) * distance, from.y + std::cos(r) * distance, from.z};
+}
+bool InAnyCar(Invoker& n, uint32_t ped) {
+  const Result r = n.Call("IS_CHAR_IN_ANY_CAR", {{ped}});
+  return r.called && r.value;
+}
+// The player on foot at x y z, out of any car first.
+void PutPlayer(Invoker& n, uint32_t ped, const Vec3& at) {
+  if (InAnyCar(n, ped))
+    n.Call("WARP_CHAR_FROM_CAR_TO_COORD", {{ped}, {F(at.x)}, {F(at.y)}, {F(at.z)}});
+  else
+    n.Call("SET_CHAR_COORDINATES", {{ped}, {F(at.x)}, {F(at.y)}, {F(at.z)}});
+}
+
+// Entities the bench commands made (handles; only touched on the script thread).
+std::deque<uint32_t> g_bench_cars;
+uint32_t g_last_car = 0;
+
 }  // namespace
 
 void ObserveNativeRegistration(PPCContext& ctx, uint8_t* base) {
@@ -303,13 +356,52 @@ extern "C" void sub_82846948(PPCContext& ctx, uint8_t* base) {
 
 namespace gta4::dev_pad {
 
+// native <NAME> [args]: ints, floats (with a '.'), $ped, $player, $car (the last car made) and
+// out (an out slot). For trying natives from a pad without a rebuild.
+std::string NativeCommand(const std::vector<std::string>& args) {
+  if (args.size() < 2) return "err native needs a name";
+  const std::string name = args[1];
+  std::vector<std::string> words(args.begin() + 2, args.end());
+  for (const auto& w : words) {
+    if (w == "$ped" || w == "$player" || w == "$car" || w == "out") continue;
+    float v;
+    if (!ParseFloat(w, v)) return "err '" + w + "' is not a number";
+  }
+  return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+    const Player p = GetPlayer(n);
+    if (!p.ok) return "err no player";
+    std::vector<Arg> call;
+    for (const auto& w : words) {
+      if (w == "$ped") call.push_back({p.ped});
+      else if (w == "$player") call.push_back({p.id});
+      else if (w == "$car") call.push_back({g_last_car});
+      else if (w == "out") call.push_back({0, true});
+      else if (w.find('.') != std::string::npos) call.push_back({F(std::strtof(w.c_str(), nullptr))});
+      else call.push_back({uint32_t(std::strtol(w.c_str(), nullptr, 0))});
+    }
+    const Result r = n.Call(name, call);
+    if (!r.called) return "err native " + name + " was not called";
+    std::string reply = "ok " + std::to_string(r.value);
+    for (uint32_t o : r.outs) {
+      char b[48];
+      std::snprintf(b, sizeof(b), " %u/%g", o, AsFloat(o));
+      reply += b;
+    }
+    REXLOG_INFO("dev world: native {} -> {}", name, reply.substr(3));
+    return reply;
+  });
+}
+
 std::string WorldCommand(const std::vector<std::string>& args) {
   const std::string& cmd = args[0];
+  if (cmd == "native") return NativeCommand(args);
+  // These take a model name first; the numbers follow it.
+  const bool named = cmd == "car" || cmd == "heli" || cmd == "cars";
   std::vector<float> f;
-  for (size_t i = 1; i < args.size(); ++i) {
+  for (size_t i = named ? 2 : 1; i < args.size(); ++i) {
     float v;
-    if (cmd != "car" && !ParseFloat(args[i], v)) return "err '" + args[i] + "' is not a number";
-    if (cmd != "car") f.push_back(v);
+    if (!ParseFloat(args[i], v)) return "err '" + args[i] + "' is not a number";
+    f.push_back(v);
   }
 
   if (cmd == "teleport" || cmd == "road") {
@@ -322,8 +414,9 @@ std::string WorldCommand(const std::vector<std::string>& args) {
       const Player p = GetPlayer(n);
       if (!p.ok) return "err no player";
       if (stage == 0) {
-        // Move first so the streaming around the target starts, then load it fully.
-        n.Call("SET_CHAR_COORDINATES", {{p.ped}, {F(x)}, {F(y)}, {F(z)}});
+        // Move first so the streaming around the target starts, then load it fully. Out of
+        // any car (boat, helicopter) first, so the vehicle stays behind.
+        PutPlayer(n, p.ped, {x, y, z});
         n.Call("LOAD_SCENE", {{F(x)}, {F(y)}, {F(z)}});
         stage = 1;
         return std::nullopt;
@@ -363,8 +456,10 @@ std::string WorldCommand(const std::vector<std::string>& args) {
     }, std::chrono::seconds(120));
   }
 
-  if (cmd == "car") {
-    if (args.size() < 2) return "err car needs a model name";
+  if (cmd == "car" || cmd == "heli") {
+    if (args.size() < 2) return "err " + cmd + " needs a model name";
+    const bool heli = cmd == "heli";
+    const float lift = heli ? (f.empty() ? 40.0f : f[0]) : 0.0f;
     const uint32_t model = Hash(args[1]);
     const std::string model_name = args[1];
     int frames = 0;
@@ -381,11 +476,16 @@ std::string WorldCommand(const std::vector<std::string>& args) {
       const Result heading = n.Call("GET_CHAR_HEADING", {{p.ped}, {0, true}});
       if (pos.outs.size() < 3 || heading.outs.empty()) return "err cannot read the player position";
       const Result car = n.Call("CREATE_CAR", {{model}, {pos.outs[0]}, {pos.outs[1]},
-                                               {pos.outs[2]}, {0, true}, {1}});
+                                               {F(AsFloat(pos.outs[2]) + lift)}, {0, true}, {1}});
       if (car.outs.empty() || !car.outs[0]) return "err CREATE_CAR made no car";
       const uint32_t vehicle = car.outs[0];
+      g_last_car = vehicle;
       n.Call("SET_CAR_HEADING", {{vehicle}, {heading.outs[0]}});
-      n.Call("SET_CAR_ON_GROUND_PROPERLY", {{vehicle}});
+      if (heli) {
+        n.Call("SET_HELI_BLADES_FULL_SPEED", {{vehicle}});
+      } else {
+        n.Call("SET_CAR_ON_GROUND_PROPERLY", {{vehicle}});
+      }
       n.Call("WARP_CHAR_INTO_CAR", {{p.ped}, {vehicle}});
       n.Call("MARK_MODEL_AS_NO_LONGER_NEEDED", {{model}});
       REXLOG_INFO("dev world: car {} ({:08X}) handle {} at {:.1f} {:.1f} {:.1f}", model_name, model,
@@ -442,6 +542,189 @@ std::string WorldCommand(const std::vector<std::string>& args) {
       return "ok";
     });
   }
+  if (cmd == "water") {
+    // water <x> <y>: there. water [radius]: the nearest open water around the player, ring by
+    // ring (one ring per frame): water level within 5 m of the sea and the ground (where its
+    // collision is loaded) at least 2 m below it.
+    const bool at = f.size() >= 2;
+    const float radius = !at && !f.empty() ? f[0] : 800.0f;
+    const float tx = at ? f[0] : 0, ty = at ? f[1] : 0;
+    int ring = -1;
+    Vec3 center;
+    return RunOnScriptThread([=](Invoker& n) mutable -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      auto water_at = [&](float x, float y, float& level) {
+        // GET_WATER_HEIGHT(x, y, z, &height): the water surface below z.
+        const Result w = n.Call("GET_WATER_HEIGHT", {{F(x)}, {F(y)}, {F(50.0f)}, {0, true}});
+        if (!w.called || !w.value || w.outs.empty()) return false;
+        level = AsFloat(w.outs[0]);
+        if (std::fabs(level) > 5.0f) return false;
+        const Result g = n.Call("GET_GROUND_Z_FOR_3D_COORD", {{F(x)}, {F(y)}, {F(level + 60.0f)}, {0, true}});
+        return !(g.called && !g.outs.empty() && AsFloat(g.outs[0]) != 0.0f &&
+                 AsFloat(g.outs[0]) > level - 2.0f);
+      };
+      auto go = [&](float x, float y, float level) {
+        PutPlayer(n, p.ped, {x, y, level});
+        char b[96];
+        std::snprintf(b, sizeof(b), "ok %.1f %.1f %.1f", x, y, level);
+        REXLOG_INFO("dev world: water -> {}", b + 3);
+        return std::string(b);
+      };
+      // Open water: also water 50 m away in all eight directions (no slips, docks or
+      // enclosed basins; a river or the bay passes).
+      auto open_water_at = [&](float x, float y, float& level) {
+        if (!water_at(x, y, level)) return false;
+        for (int k = 0; k < 8; ++k) {
+          float other = 0;
+          const float a = 0.7853982f * float(k);
+          if (!water_at(x + 50.0f * std::cos(a), y + 50.0f * std::sin(a), other) ||
+              std::fabs(other - level) > 1.0f)
+            return false;
+        }
+        return true;
+      };
+      float level = 0;
+      if (at) {
+        if (!water_at(tx, ty, level)) return "err no open water at " + std::to_string(tx) + " " + std::to_string(ty);
+        return go(tx, ty, level);
+      }
+      if (ring < 0) {
+        const auto pos = Position(n, p.ped);
+        if (!pos) return "err cannot read the player position";
+        center = *pos;
+        ring = 0;
+      }
+      const float r = 15.0f * float(ring++);
+      if (r > radius) return "err no open water within " + std::to_string(int(radius)) + " m";
+      const int points = std::max(1, int(6.2831853f * r / 15.0f));
+      for (int i = 0; i < points; ++i) {
+        const float a = 6.2831853f * float(i) / float(points);
+        const float x = center.x + r * std::cos(a), y = center.y + r * std::sin(a);
+        if (open_water_at(x, y, level)) return go(x, y, level);
+      }
+      return std::nullopt;
+    }, std::chrono::seconds(120));
+  }
+
+  if (cmd == "weapon") {
+    if (f.empty()) return "err weapon needs an id";
+    const uint32_t weapon = uint32_t(f[0]), ammo = f.size() > 1 ? uint32_t(f[1]) : 9999u;
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      n.Call("GIVE_WEAPON_TO_CHAR", {{p.ped}, {weapon}, {ammo}, {0}});
+      n.Call("SET_CURRENT_CHAR_WEAPON", {{p.ped}, {weapon}, {1}});
+      return "ok";
+    });
+  }
+
+  if (cmd == "peds") {
+    const int count = f.empty() ? 6 : int(f[0]);
+    const bool hostile = f.size() > 1 ? f[1] != 0.0f : true;
+    const float radius = f.size() > 2 ? f[2] : 12.0f;
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      const auto pos = Position(n, p.ped);
+      if (!pos) return "err cannot read the player position";
+      int made = 0;
+      for (int i = 0; i < count; ++i) {
+        const float a = 6.2831853f * float(i) / float(std::max(1, count));
+        const Result ped = n.Call("CREATE_RANDOM_CHAR", {{F(pos->x + radius * std::cos(a))},
+                                                         {F(pos->y + radius * std::sin(a))},
+                                                         {F(pos->z)}, {0, true}});
+        if (ped.outs.empty() || !ped.outs[0]) continue;
+        ++made;
+        if (hostile) {
+          n.Call("GIVE_WEAPON_TO_CHAR", {{ped.outs[0]}, {7}, {500}, {0}});
+          n.Call("SET_CURRENT_CHAR_WEAPON", {{ped.outs[0]}, {7}, {1}});
+          n.Call("TASK_COMBAT", {{ped.outs[0]}, {p.ped}});
+        }
+      }
+      REXLOG_INFO("dev world: peds made {} of {} hostile={}", made, count, hostile);
+      return made ? "ok " + std::to_string(made) : std::string("err CREATE_RANDOM_CHAR made no ped");
+    });
+  }
+
+  if (cmd == "cars") {
+    if (args.size() < 2) return "err cars needs a model name";
+    const uint32_t model = Hash(args[1]);
+    const std::string model_name = args[1];
+    const int count = f.empty() ? 4 : int(f[0]);
+    const float radius = f.size() > 1 ? f[1] : 15.0f;
+    int frames = 0;
+    return RunOnScriptThread([=](Invoker& n) mutable -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      if (frames++ == 0) n.Call("REQUEST_MODEL", {{model}});
+      const Result loaded = n.Call("HAS_MODEL_LOADED", {{model}});
+      if (!loaded.called || !loaded.value)
+        return frames > 600 ? std::optional<std::string>("err model " + model_name + " did not load")
+                            : std::nullopt;
+      const auto pos = Position(n, p.ped);
+      if (!pos) return "err cannot read the player position";
+      int made = 0;
+      for (int i = 0; i < count; ++i) {
+        const float a = 6.2831853f * (float(i) + 0.5f) / float(std::max(1, count));
+        const Result car = n.Call("CREATE_CAR", {{model}, {F(pos->x + radius * std::cos(a))},
+                                                 {F(pos->y + radius * std::sin(a))}, {F(pos->z)},
+                                                 {0, true}, {1}});
+        if (car.outs.empty() || !car.outs[0]) continue;
+        n.Call("SET_CAR_ON_GROUND_PROPERLY", {{car.outs[0]}});
+        g_bench_cars.push_back(car.outs[0]);
+        g_last_car = car.outs[0];
+        ++made;
+      }
+      n.Call("MARK_MODEL_AS_NO_LONGER_NEEDED", {{model}});
+      return made ? "ok " + std::to_string(made) : std::string("err CREATE_CAR made no car");
+    });
+  }
+
+  if (cmd == "explode") {
+    const int count = f.empty() ? 1 : int(f[0]);
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      int done = 0;
+      for (; done < count && !g_bench_cars.empty(); ++done) {
+        n.Call("EXPLODE_CAR", {{g_bench_cars.front()}, {1}, {0}});
+        g_bench_cars.pop_front();
+      }
+      return done ? "ok " + std::to_string(done) : std::string("err no cars left to explode");
+    });
+  }
+
+  if (cmd == "boom") {
+    const float distance = f.empty() ? 15.0f : f[0];
+    const uint32_t type = f.size() > 1 ? uint32_t(f[1]) : 0u;
+    const float radius = f.size() > 2 ? f[2] : 6.0f;
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      const auto pos = Position(n, p.ped);
+      if (!pos) return "err cannot read the player position";
+      const Vec3 at = Ahead(*pos, Heading(n, p.ped), distance);
+      n.Call("ADD_EXPLOSION", {{F(at.x)}, {F(at.y)}, {F(at.z)}, {type}, {F(radius)}, {1}, {0}, {F(1.0f)}});
+      return "ok";
+    });
+  }
+
+  if (cmd == "where") {
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      const auto pos = Position(n, p.ped);
+      if (!pos) return "err cannot read the player position";
+      const Result water = n.Call("IS_CHAR_IN_WATER", {{p.ped}});
+      const Result health = n.Call("GET_CHAR_HEALTH", {{p.ped}, {0, true}});
+      char b[128];
+      std::snprintf(b, sizeof(b), "ok %.1f %.1f %.1f heading %.0f car=%d water=%d health=%u", pos->x,
+                    pos->y, pos->z, Heading(n, p.ped), InAnyCar(n, p.ped) ? 1 : 0,
+                    water.called && water.value ? 1 : 0, health.outs.empty() ? 0u : health.outs[0]);
+      REXLOG_INFO("dev world: where -> {}", b + 3);
+      return std::string(b);
+    });
+  }
+
   return "err unknown command '" + cmd + "'";
 }
 
