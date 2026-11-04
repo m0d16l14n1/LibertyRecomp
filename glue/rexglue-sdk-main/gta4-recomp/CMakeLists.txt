@@ -228,6 +228,9 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
     set_source_files_properties("${LIBERTY_METAL_RECIPE_SEED}" PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources/metal")
     target_sources(LibertyRecomp PRIVATE "${LIBERTY_METAL_RECIPE_SEED}")
+    # A seed-only refresh changes the bundle seal: relink so the post-build signing step reruns
+    # (otherwise codesign --verify fails with "a sealed resource is missing or invalid").
+    set_property(TARGET LibertyRecomp APPEND PROPERTY LINK_DEPENDS "${LIBERTY_METAL_RECIPE_SEED}")
 
     get_property(LIBERTY_METAL_PASS_LIBRARY GLOBAL PROPERTY REX_METAL_PASSES_LIBRARY)
     if(LIBERTY_METAL_PASS_LIBRARY)
