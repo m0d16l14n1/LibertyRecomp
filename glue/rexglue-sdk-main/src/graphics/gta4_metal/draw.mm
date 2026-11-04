@@ -898,6 +898,34 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       temporal_parameters.valid_history=1;temporal_parameters.previous_jitter_clip=history.previous->jitter_clip;
     }
     if(history.ambiguous){temporal_parameters.valid_history=0;temporal_parameters.reactive=1;}
+    if(history.late.valid){  // gta4_temporal_late_constants_diag
+      const auto& late=history.late;
+      const std::string_view name=pipeline->vertex.name;
+      const size_t kind=name.find("gta_vehicle_tire")!=name.npos?0:name.find("gta_vehicle_")!=name.npos?1:
+                        name.find("gta_ped")!=name.npos?2:late.palette?3:4;
+      auto& c=temporal.late_counters[kind];
+      const bool stale=late.moved&&!late.changed;
+      ++c.draws;c.sibling+=late.sibling;c.moved+=late.moved;c.changed+=late.changed;c.stale+=stale;
+      c.stale_seen+=stale&&late.changes>0;c.stale_never+=stale&&!late.changes&&late.frames>=30;
+      c.chain_frames+=late.frames;c.chain_changes+=late.changes;
+      // Samples: in the 60th frame, up to 3 per class (stale ones first come first), 15 in all.
+      if(temporal.metadata.sequence%60==0&&temporal.late_samples<15&&(stale||late.changed)){
+        ++temporal.late_samples;
+        const auto at=[&](std::span<const uint8_t> bank,uint32_t reg){
+          std::array<float,4> v{};if(bank.size()>=(reg+1)*16)std::memcpy(v.data(),bank.data()+reg*16,16);return v;};
+        const uint32_t shown=late.first_changed?late.first_changed:late.first;
+        const auto before=at(history.previous->vertex,shown),after=at(captured_vertex,shown);
+        static constexpr const char* kKinds[]={"tire","vehicle","ped","palette","late"};
+        const size_t slash=name.rfind('/');
+        REXLOG_INFO("gta4-temporal-late-sample frame={} class={} vs={:016X} {} owner={:X} scoped={} drawable={:X} pose={:X} "
+                    "sibling={} palette={} world-late={} moved={} changed={} reads=c{}-c{} first-changed=c{} chain={}/{} "
+                    "c{}=({:.4f},{:.4f},{:.4f},{:.4f})->({:.4f},{:.4f},{:.4f},{:.4f})",
+          temporal.metadata.sequence,kKinds[kind],pipeline->vertex.hash,slash==name.npos?name:name.substr(slash+1),owner,
+          bool(temporal.instance),temporal.drawable,temporal.pose,late.sibling,late.palette,late.world_late,late.moved,late.changed,
+          late.first,late.last,late.first_changed,late.changes,late.frames,shown,
+          before[0],before[1],before[2],before[3],after[0],after[1],after[2],after[3]);
+      }
+    }
     const bool traced=temporal_trace_vs&&pipeline->vertex.hash==temporal_trace_vs;
     if(!temporal_parameters.valid_history&&temporal.metadata.sequence%60==0&&(traced||temporal.diagnostic_missing_motion++<12))
       REXLOG_INFO("gta4-temporal-missing-motion frame={} vs={:016X} ps={:016X} owner={:X} scoped={} drawable={:X} pose={:X} generation={:X} range={:X} reason={}",

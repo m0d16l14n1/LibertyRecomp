@@ -96,6 +96,10 @@ struct GeometrySnapshot {
   std::vector<uint8_t> vertex, shared;
   std::array<float, 2> jitter_clip{};
   uint64_t sequence = 0;
+  // Late-constant diagnostic (set_late_diagnostic): hash of the c64+ registers the draw read, and
+  // over this key's unbroken chain of key matches, how many frames and how many hash changes.
+  uint64_t late_hash = 0;
+  uint32_t late_frames = 0, late_changes = 0;
   std::shared_ptr<GeometryBudget> budget;
   ~GeometrySnapshot() {
     if (budget) budget->used.fetch_sub(vertex.size() + shared.size(), std::memory_order_relaxed);
@@ -105,6 +109,18 @@ struct GeometryLookup {
   std::shared_ptr<const GeometrySnapshot> previous;
   bool captured = false, ambiguous = false;
   bool matched_by_transform = false;  // found by the nearest-transform fallback, not the key
+  // Late-constant diagnostic, for key (or sibling) matches only: the read registers past c63
+  // (bones, matWheelTransform) against the matched previous draw.
+  struct Late {
+    bool valid = false;
+    bool palette = false;     // a0-relative reads (the whole tail): a gBoneMtx palette
+    bool world_late = false;  // no c0-c3 read: the world step is taken from c64-c67 (tire, some skinned)
+    bool sibling = false;     // told apart from other draws of one key
+    bool moved = false;       // the world registers changed
+    bool changed = false;     // any read c64+ register changed
+    uint32_t first = 0, last = 0, first_changed = 0;  // read c64+ range; first changed register (0 none)
+    uint32_t frames = 0, changes = 0;                 // this key's chain (GeometrySnapshot::late_*)
+  } late{};
 };
 struct GeometryMatchStatistics {
   uint64_t key = 0, transform = 0, transform_ambiguous = 0, transform_far = 0, key_far = 0,
@@ -249,6 +265,8 @@ class GeometryHistory {
     snapshot->shared.assign(shared.begin(), shared.end());
     snapshot->sequence = sequence_;
     snapshot->jitter_clip = jitter;
+    snapshot->late_hash = 0;
+    snapshot->late_frames = snapshot->late_changes = 0;
     budget_->used.fetch_add(bytes, std::memory_order_relaxed);
     snapshot->budget = budget_;
     auto& entry = current_.emplace(key, Entry{snapshot, false, nullptr}).first->second;
@@ -271,6 +289,8 @@ class GeometryHistory {
     } remember{entry, lookup};
     bool sibling_unclear = false;
     lookup.previous = PreviousSibling(key, vertex, sibling_unclear);
+    if (late_diagnostic_ && !sibling_unclear)
+      LateDiagnostic(lookup, *snapshot, vertex, previous_siblings_.count(Siblings(key)) != 0);
     if (sibling_unclear) {
       // Siblings existed but none is clearly this draw: keep the old ambiguous outcome. Only
       // this frame's lookup is ambiguous; the entry stays matchable for the next frame.
@@ -309,6 +329,7 @@ class GeometryHistory {
   // into place, another object of the same model) was always accepted and gave its pixels a
   // rigid rotation in motion. 2*sin(angle/2): 0.35 is about 20 degrees per frame.
   void set_rotation_limit(float limit) { rotation_limit_ = limit; }
+  void set_late_diagnostic(bool enabled) { late_diagnostic_ = enabled; }
   GeometryMatchStatistics TakeStatistics() {
     auto taken = statistics_;
     statistics_ = {};
@@ -457,6 +478,51 @@ class GeometryHistory {
     double sum = 0;       // squared change of every finite read constant
     uint32_t max_index = 0;  // float index of the largest change of any read constant
   };
+  // Fills lookup.late and the new snapshot's late chain. Only the read c64+ registers count: the
+  // rest of the tail holds whatever earlier draws left.
+  void LateDiagnostic(GeometryLookup& lookup, GeometrySnapshot& snapshot,
+                      std::span<const uint8_t> vertex, bool sibling) const {
+    const ConstantMask late{0, reads_[1], reads_[2], reads_[3]};
+    if (!(late[1] | late[2] | late[3])) return;
+    const size_t registers = std::min<size_t>(vertex.size() / 16, 256);
+    uint64_t hash = 0xCBF29CE484222325ull;
+    uint32_t first = 0, last = 0;
+    for (size_t word = 1; word < 4; ++word)
+      for (uint64_t bits = late[word]; bits; bits &= bits - 1) {
+        const size_t reg = word * 64 + size_t(std::countr_zero(bits));
+        if (reg >= registers) break;
+        if (!first) first = uint32_t(reg);
+        last = uint32_t(reg);
+        for (size_t b = 0; b < 16; ++b) hash = (hash ^ vertex[reg * 16 + b]) * 0x100000001B3ull;
+      }
+    snapshot.late_hash = hash;
+    // A chain starts at a previous draw that had no late hash (diagnostic just enabled).
+    if (!lookup.previous || !lookup.previous->late_hash) return;
+    const auto& previous = *lookup.previous;
+    auto& out = lookup.late;
+    out.valid = true;
+    out.palette = late[2] == ~0ull && late[3] == ~0ull;
+    out.world_late = (world_[1] & late[1]) != 0;
+    out.sibling = sibling;
+    out.first = first;
+    out.last = last;
+    out.moved = Distance(previous.vertex, vertex, false).max_world > 1.0e-4f;
+    out.changed = previous.late_hash != hash;
+    if (out.changed && previous.vertex.size() >= registers * 16)
+      for (size_t word = 1; word < 4 && !out.first_changed; ++word)
+        for (uint64_t bits = late[word]; bits; bits &= bits - 1) {
+          const size_t reg = word * 64 + size_t(std::countr_zero(bits));
+          if (reg >= registers) break;
+          if (std::memcmp(previous.vertex.data() + reg * 16, vertex.data() + reg * 16, 16)) {
+            out.first_changed = uint32_t(reg);
+            break;
+          }
+        }
+    snapshot.late_frames = previous.late_frames + 1;
+    snapshot.late_changes = previous.late_changes + uint32_t(out.changed);
+    out.frames = snapshot.late_frames;
+    out.changes = snapshot.late_changes;
+  }
   Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all) const {
     Difference d;
     const size_t registers = std::min<size_t>(std::min(a.size(), b.size()) / 16, 256);
@@ -537,6 +603,7 @@ class GeometryHistory {
     return d.max_world <= kMaximumWorldStep && (rotation_limit_ <= 0 || d.max_rotation <= rotation_limit_);
   }
   float rotation_limit_ = 0;
+  bool late_diagnostic_ = false;
   static constexpr size_t kMaximumShapeCandidates = 32;
   static constexpr uint32_t kMaximumSiblings = 64;  // past this, the last one is ambiguous (a street of one tree model)
   static constexpr float kMaximumWorldStep = 6.0f;      // ~650 km/h at 30 fps

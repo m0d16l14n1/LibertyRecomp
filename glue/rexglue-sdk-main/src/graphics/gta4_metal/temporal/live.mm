@@ -18,6 +18,9 @@
 REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
                     "Continue a moving object's motion history by its nearest transform when its "
                     "owner address changed since the previous frame");
+REXCVAR_DEFINE_BOOL(gta4_temporal_late_constants_diag, false, "GPU/Diagnostics",
+                    "Log how often key-matched draws' c64+ vertex constants (bones, matWheelTransform) "
+                    "change, by class, with samples (gta4-temporal-late lines every 60 frames)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_history_rotation_limit, 0.0, "GPU",
                       "Refuse an object's motion history when its world rotation changed more than this "
                       "per frame (largest change of a rotation matrix element; 0.35 is about 20 degrees, "
@@ -179,6 +182,7 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
   metadata.camera_cut = c.flags & gta4_native::kTemporalCameraCut;
   geometry.set_transform_fallback(REXCVAR_GET(gta4_temporal_history_transform_match));
   geometry.set_rotation_limit(float(REXCVAR_GET(gta4_temporal_history_rotation_limit)));
+  geometry.set_late_diagnostic(REXCVAR_GET(gta4_temporal_late_constants_diag));
   if (!ValidConfiguration(config) ||
       !geometry.Begin(c.epoch, c.view, c.sequence, metadata.camera_cut)) {
     error = "temporal scene identity or dimensions invalid";

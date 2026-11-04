@@ -87,6 +87,16 @@ class Live {
   struct GbufferAudit { uint32_t total=0, ui=0, composite=0, screen=0, not_primary=0, camera=0, world=0; } gbuffer_audit;
   uint32_t gbuffer_audit_logs = 0;
   uint32_t diagnostic_missing_motion = 0, diagnostic_reactive = 0, diagnostic_trace = 0;
+  // gta4_temporal_late_constants_diag, per 60 frames: key-matched draws reading c64+, by class
+  // (0 tire, 1 other vehicle, 2 ped, 3 other bone palette, 4 other c64+). `stale` = moved with
+  // every read c64+ register bit-identical; `stale_seen` = those whose key changed them earlier
+  // in its chain (an update slower than the frame), `stale_never` = never in 30+ frames (static).
+  struct LateCounters {
+    uint64_t draws = 0, sibling = 0, moved = 0, changed = 0, stale = 0, stale_seen = 0,
+             stale_never = 0, chain_frames = 0, chain_changes = 0;
+  };
+  std::array<LateCounters, 5> late_counters{};
+  uint32_t late_samples = 0;
 
  private:
   std::shared_ptr<ui::metal::MetalContext> context_;

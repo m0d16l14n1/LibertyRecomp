@@ -15,6 +15,7 @@
 #include <chrono>
 #include <iterator>
 
+REXCVAR_DECLARE(bool, gta4_temporal_late_constants_diag);  // temporal/live.mm
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_half_rate, true, "GPU",
                     "MetalFX frame generation: draw real frames at half the display refresh, so every "
                     "one gets its generated midpoint and the screen shows an even rate");
@@ -296,6 +297,19 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
       temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
       temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason,temporal.slow_generation_skips);
+  if(temporal.active&&present.submitted_frame%60==0&&REXCVAR_GET(gta4_temporal_late_constants_diag)){
+    static constexpr const char* kKinds[]={"tire","vehicle","ped","palette","late"};
+    for(size_t k=0;k<temporal.late_counters.size();++k){
+      const auto& c=temporal.late_counters[k];
+      if(!c.draws)continue;
+      // frames-per-change: ~1 a per-frame update, ~2 a half-rate one, large a static parameter.
+      REXLOG_INFO("gta4-temporal-late frame={} class={} draws={} sibling={} moved={} changed={} stale={} stale-seen-change={} "
+                  "stale-never-changed={} frames-per-change={:.2f} (60 frames)",
+        present.submitted_frame,kKinds[k],c.draws,c.sibling,c.moved,c.changed,c.stale,c.stale_seen,c.stale_never,
+        c.chain_changes?double(c.chain_frames)/double(c.chain_changes):0.0);
+    }
+    temporal.late_counters={};temporal.late_samples=0;
+  }
   if(temporal.active&&present.submitted_frame%60==0){
     const auto m=temporal.geometry.TakeStatistics();
     REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} "
