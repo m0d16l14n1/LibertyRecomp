@@ -5,10 +5,24 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <utility>
+
+#include <rex/cvar.h>
+
+// Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): the renderer offsets
+// the projection by (+2jx/W, -2jy/H) for a jitter (jx, jy) in input pixels (y down), as DLSS
+// and FSR 2 take it. "++" passes (jx, jy) unchanged; "--", "-+", "+-" negate x and/or y.
+REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
+                      "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
 
 namespace rex::graphics::gta4_metal::temporal {
 namespace {
+std::array<float, 2> MetalFxJitter(const std::array<float, 2>& jitter) {
+  const std::string sign = REXCVAR_GET(gta4_metalfx_jitter_sign);
+  return {sign.size() > 0 && sign[0] == '-' ? -jitter[0] : jitter[0],
+          sign.size() > 1 && sign[1] == '-' ? -jitter[1] : jitter[1]};
+}
 constexpr size_t kMaximumOwnedBytes = 1024u * 1024u * 1024u;
 struct FailureState {
   std::atomic<uint64_t> count{0};
@@ -396,8 +410,9 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       scaler.motionTexture = in.motion;
       scaler.reactiveMaskTexture = in.reactive;
       scaler.outputTexture = slot.color;
-      scaler.jitterOffsetX = frame.jitter[0];
-      scaler.jitterOffsetY = frame.jitter[1];
+      const auto jitter = MetalFxJitter(frame.jitter);
+      scaler.jitterOffsetX = jitter[0];
+      scaler.jitterOffsetY = jitter[1];
       scaler.motionVectorScaleX = 1;
       scaler.motionVectorScaleY = 1;
       scaler.preExposure = frame.pre_exposure;
@@ -672,8 +687,9 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.uiTextureComposited = ui_input.mode == UiMode::kComposited;
     fx.motionVectorScaleX = float(s.config.output_width) / s.config.input_width;
     fx.motionVectorScaleY = float(s.config.output_height) / s.config.input_height;
-    fx.jitterOffsetX = frame.jitter[0];
-    fx.jitterOffsetY = frame.jitter[1];
+    const auto fx_jitter = MetalFxJitter(frame.jitter);
+    fx.jitterOffsetX = fx_jitter[0];
+    fx.jitterOffsetY = fx_jitter[1];
     fx.deltaTime = decision.delta_seconds > 0 ? decision.delta_seconds : 1.0f / 60.0f;
     fx.nearPlane = frame.near_plane;
     fx.farPlane = frame.far_plane;

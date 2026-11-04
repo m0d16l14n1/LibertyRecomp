@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <memory>
 
 #include <rex/ui/presenter.h>
@@ -17,6 +19,9 @@ class MetalPresenter final : public Presenter {
   ~MetalPresenter() override;
   Surface::TypeFlags GetSupportedSurfaceTypes() const override;
   bool CaptureGuestOutput(RawImage& image_out) override;
+  uint32_t DisplayRefreshRate() const override {
+    return display_refresh_rate_.load(std::memory_order_relaxed);
+  }
   uint64_t submitted_frames() const;
   struct DeliveryStatistics { uint64_t submissions, new_game_images, repeated_game_images, generated_images; };
   DeliveryStatistics delivery_statistics() const;
@@ -41,6 +46,7 @@ class MetalPresenter final : public Presenter {
   struct State;
   MetalPresenter(std::shared_ptr<MetalContext> context, HostGpuLossCallback callback);
   std::unique_ptr<State> state_;
+  std::atomic<uint32_t> display_refresh_rate_{0};
 };
 
 }  // namespace rex::ui::metal

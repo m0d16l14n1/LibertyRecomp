@@ -14,6 +14,9 @@
 #include <chrono>
 #include <iterator>
 
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_half_rate, true, "GPU",
+                    "MetalFX frame generation: draw real frames at half the display refresh, so every "
+                    "one gets its generated midpoint and the screen shows an even rate");
 REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_dump, "", "GPU/Diagnostics",
                       "Folder for MetalFX frame generation checks: every 120th generated frame and the real "
                       "frame after it, as PPM, at most 6 pairs (empty = off)");
@@ -177,6 +180,17 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     provenance.frame_rate_limit = rex::cvar::Query<uint32_t>("gta4_frame_limit");
     provenance.producer_backpressure = present.device != 0;
     provenance.paired_presentation=generated_pair.generated!=nil;
+    // Frame generation shows each real frame with a generated midpoint, so real frames have to
+    // come at most at half the refresh rate: faster, a real frame arrives while the previous
+    // pair is still on screen, its generation is skipped and it goes out alone. The cadence
+    // then keeps switching between pairs and single frames (35-75 long intervals per 10 s at
+    // ~39 real fps on a 60 Hz panel), which reads as judder. Pace real frames to half the
+    // refresh whenever generation is on, paired this frame or not.
+    if(generation_enabled&&REXCVAR_GET(gta4_metalfx_frame_generation_half_rate)){
+      const uint32_t refresh=presenter->DisplayRefreshRate();
+      const uint32_t half=std::max(1u,(refresh?refresh:60u)/2);
+      provenance.frame_rate_limit=provenance.frame_rate_limit?std::min(provenance.frame_rate_limit,half):half;
+    }
     if(provenance.paired_presentation&&provenance.frame_rate_limit)provenance.frame_rate_limit=std::min(1000u,provenance.frame_rate_limit*2);
     provenance.title_present_id = present.diagnostic_present_id;
     provenance.selected_generation = source->generation;

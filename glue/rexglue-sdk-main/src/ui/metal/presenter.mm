@@ -385,6 +385,7 @@ void MetalPresenter::PollPresentationTiming() {
       state_->display_link.preferredFrameRateRange = CAFrameRateRangeMake(preferred, preferred, preferred);
       state_->requested_rate = requested;
       state_->screen_rate = maximum;
+      display_refresh_rate_.store(maximum, std::memory_order_relaxed);
     }
   }
 }

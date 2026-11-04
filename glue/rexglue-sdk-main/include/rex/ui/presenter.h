@@ -404,6 +404,8 @@ class Presenter {
   // multiple at the same time, and it should acquire the latest guest output
   // image via ConsumeGuestOutput.
   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
+  // The connected display's refresh rate in Hz, 0 if unknown. Any thread.
+  virtual uint32_t DisplayRefreshRate() const { return 0; }
   void CancelFramePacingWaits() { frame_publication_gate_.Stop(); }
   // Window occluded/minimized (UI thread): slow the producer's watchdog pace to 2 fps.
   void SetWindowHiddenFromUIThread(bool hidden) { frame_publication_gate_.SetHidden(hidden); }
