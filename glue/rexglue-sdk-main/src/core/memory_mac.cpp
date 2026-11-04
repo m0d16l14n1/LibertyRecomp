@@ -466,6 +466,11 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Views are mapped from the descriptor, never reopened by name, so drop the name now: the
+  // object then lives exactly as long as the process. A named object outlives a killed, crashed
+  // or signal-quit run until reboot, and its touched guest pages end up in swap (upstream
+  // rexglue PR #514; macOS builds this file, not memory_posix.cpp).
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
