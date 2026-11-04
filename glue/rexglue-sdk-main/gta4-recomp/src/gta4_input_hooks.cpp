@@ -1,4 +1,5 @@
 #include "gta4_init.h"
+#include "gta4_dev_pad.h"
 #include "gta4_frontend_hooks.h"
 #include "gta4_input_action_routing.h"
 #include "gta4_map_pan_policy.h"
@@ -188,6 +189,8 @@ constexpr uint32_t kRetailControllerDpadLeftFlag = 0x8000;
 constexpr uint32_t kRetailControllerDpadRightFlag = 0x2000;
 constexpr uint32_t kGameInputTimeAddress = 0x82C6C2A4;
 constexpr uint32_t kGameplayTimeStepAddress = 0x82C6C2AC;
+// The loading screen flag (kLoadingActiveGlobal in gta4_transition_hooks.cpp).
+constexpr uint32_t kLoadingActiveAddress = 0x831D5335;
 constexpr uint32_t kCurrentScreenAddress = 0x82BFA124;
 constexpr uint32_t kMapScreen = 3;
 constexpr uint32_t kMapZoomLevelAddress = 0x82BF9D88;
@@ -1433,7 +1436,7 @@ void ResetMouseConversion() {
 InputEpoch CaptureEpoch(const PPCContext& entry_context, uint8_t* base,
                         uint32_t caller, bool helicopter_controls) {
   NativeInputState state{};
-  const bool native_valid = rex::input::mnk::ConsumeNativeInputState(&state);
+  bool native_valid = rex::input::mnk::ConsumeNativeInputState(&state);
   const bool touch_active = rex::input::TouchControlsActive() && !GTA4_TouchTitleInputOwned();
   if (!native_valid) state = {};
   const uint32_t input_user = native_valid ? state.user_index : 0;
@@ -1443,6 +1446,12 @@ InputEpoch CaptureEpoch(const PPCContext& entry_context, uint8_t* base,
       runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
   const bool gamepad_valid =
       input_system && input_system->TryGetLastState(input_user, &gamepad_state);
+  // Bench input recording and replay (gta4_input_record / gta4_input_replay; off by default).
+  gta4::dev_pad::OnInputPoll({.base = base,
+                              .loading = LoadU8(base, kLoadingActiveAddress) != 0,
+                              .time_step = LoadFloat(base, kGameplayTimeStepAddress),
+                              .player_ped = ReadVehicleInputContext(base).ped},
+                             native_valid, state, gamepad_valid, gamepad_state);
   const bool valid = NeedsNativeActionReplay(native_valid, touch_active,
       REXCVAR_GET(gta4_motion_aim), gamepad_valid);
   const uint16_t gamepad_buttons =

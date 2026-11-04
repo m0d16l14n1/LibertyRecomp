@@ -27,6 +27,7 @@
 #include <Windows.h>
 #endif
 
+REXCVAR_DECLARE(bool, background_window);
 REXCVAR_DEFINE_BOOL(mnk_mode, true, "Input", "Enable native keyboard/mouse input");
 REXCVAR_DEFINE_BOOL(mnk_controller_emulation, false, "Input",
                     "Use legacy Xbox controller translation instead of native input");
@@ -567,7 +568,9 @@ void MnkInputDriver::UpdateMouseCapture() {
   bool currently_captured = false;
   {
     std::lock_guard lock(state_mutex_);
-    should_capture = IsEnabled() && has_focus_ && is_active();
+    // background_window: never take the pointer from the rest of the desktop.
+    should_capture =
+        IsEnabled() && has_focus_ && is_active() && !REXCVAR_GET(background_window);
     currently_captured = mouse_captured_;
   }
 

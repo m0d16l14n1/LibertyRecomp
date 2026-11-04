@@ -21,7 +21,11 @@ out="$HOME/Library/Application Support/LibertyRecomp/perf/bench-$(date +%Y%m%d-%
 mkdir -p "$out"
 sed "s|{out}|$out|g" "$pad" > "$out/run.pad"
 echo "bench $label -> $out"
-( sleep 4; osascript -e 'tell application "Liberty Recompiled" to activate' >/dev/null 2>&1 ) &
+# --background_window=true: run beside other work (no focus, no mouse capture), so no activation.
+case " ${args[*]-} " in
+  *" --background_window=true "*) ;;
+  *) ( sleep 4; osascript -e 'tell application "Liberty Recompiled" to activate' >/dev/null 2>&1 ) & ;;
+esac
 caffeinate -dimsu /usr/bin/time -l "$app" --diagnostics=true --diagnostics_categories=logging \
   --log_file="$out/game.log" --gta4_metal_frame_log="$out/frames.csv" \
   --gta4_pad_script="$out/run.pad" --gta4_pad_marks="$out/marks.csv" --gta4_pad_exit_on_end=true \

@@ -34,6 +34,11 @@ REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
 
 REXCVAR_DEFINE_BOOL(fullscreen, true, "UI/Window", "Start the window in fullscreen mode")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(background_window, false, "UI/Window",
+                    "Run beside other work: the window does not take focus when it opens or is "
+                    "raised, and the mouse is never captured or hidden (no mouse look); for "
+                    "windowed test and bench runs driven by scripts")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_INT32(monitor, 0, "UI/Window",
                      "Monitor index to display on (0 = default, 1 = primary, 2 = "

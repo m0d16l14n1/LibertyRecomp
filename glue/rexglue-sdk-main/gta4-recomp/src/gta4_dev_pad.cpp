@@ -11,15 +11,21 @@
 //   release [all|<button>]   trigger lt|rt <0..1> [duration]
 //   stick lx|ly|rx|ry <-1..1> [duration]   wait <duration>
 //   shot <file.png> [scale]   log <text>   set <cvar> <value>   get <cvar>
-//   include <script>   mark <name>   time   quit
+//   include <script>   mark <name>   time   quit   await [timeout]
+//   teleport road car drive clock weather invincible nowanted (gta4_dev_world.cpp)
 //
 // Buttons: a b x y lb rb back start ls rs up down left right (d-pad).
 // Durations: 500ms, 2s, 1.5m. A failing line ends a script (the rest would
 // run out of step); gta4_pad_exit_on_end quits the game when a script ends.
 // Without a duration, trigger and stick values stay until changed or released.
+//
+// Input recording and replay (gta4_input_record / gta4_input_replay) for benches along a route
+// the player drove or walked: see OnInputPoll and tools/perf/route_bench.sh.
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <bitset>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -42,6 +48,10 @@
 #include <rex/cvar.h>
 #include <rex/input/input_driver.h>
 #include <rex/input/input_system.h>
+#include <rex/input/mnk/mnk_input_driver.h>
+#include <rex/system/kernel_state.h>
+#include <rex/memory/utils.h>
+#include <rex/system/xmemory.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
 #include <rex/system/interfaces/graphics.h>
@@ -57,7 +67,26 @@ REXCVAR_DEFINE_STRING(gta4_pad_pipe, "", "GTA IV/Development",
 REXCVAR_DEFINE_STRING(gta4_pad_marks, "", "GTA IV/Development",
                       "Development: append `mark` commands to this CSV (name,steady_ns)");
 REXCVAR_DEFINE_BOOL(gta4_pad_exit_on_end, false, "GTA IV/Development",
-                    "Development: quit when the controller script ends");
+                    "Development: quit when the controller script or the input replay ends");
+REXCVAR_DEFINE_STRING(gta4_input_record, "", "GTA IV/Development",
+                      "Development: record pad, keyboard and mouse input and the player's position "
+                      "to this file, from the end of the first loading screen until the game quits");
+REXCVAR_DEFINE_STRING(gta4_input_replay, "", "GTA IV/Development",
+                      "Development: replay a gta4_input_record file from the end of the first "
+                      "loading screen (the real keyboard and mouse are ignored meanwhile)");
+REXCVAR_DEFINE_STRING(gta4_input_route, "", "GTA IV/Development",
+                      "Development: write the player's position to this CSV every half second "
+                      "(during a replay next to the recorded one)");
+REXCVAR_DEFINE_STRING(gta4_input_shots, "", "GTA IV/Development",
+                      "Development: while recording or replaying, save a screenshot into this "
+                      "folder every gta4_input_shot_seconds");
+REXCVAR_DEFINE_DOUBLE(gta4_input_shot_seconds, 15.0, "GTA IV/Development",
+                      "Development: seconds between gta4_input_shots screenshots")
+    .range(1.0, 3600.0);
+REXCVAR_DEFINE_DOUBLE(gta4_input_window_seconds, 30.0, "GTA IV/Development",
+                      "Development: during a replay, mark windows of this many seconds "
+                      "(w0000/w0000_end, ...) besides route/route_end")
+    .range(0.0, 3600.0);
 
 namespace gta4::dev_pad {
 namespace {
@@ -79,6 +108,8 @@ std::atomic<uint32_t> g_packet{0};
 bool g_enabled = false;
 rex::ui::WindowedAppContext* g_app_context = nullptr;
 Clock::time_point g_start;
+// The world state from the last input poll, for `await`.
+std::atomic<bool> g_world_running{false};
 
 // XINPUT_GAMEPAD button bits.
 uint16_t ButtonBit(const std::string& name) {
@@ -327,6 +358,21 @@ std::string Execute(const std::string& line) {
     }
     return "ok";
   }
+  if (cmd == "await") {
+    // Until the save is loaded and the world runs (no loading screen, a nonzero time step).
+    std::chrono::milliseconds timeout = std::chrono::minutes(5);
+    if (args.size() > 1 && !ParseDuration(args[1], timeout)) return "err bad timeout";
+    const auto until = Clock::now() + timeout;
+    while (!g_world_running.load()) {
+      if (Clock::now() > until) return "err the world did not start";
+      Sleep(std::chrono::milliseconds(100));
+    }
+    return "ok";
+  }
+  if (cmd == "teleport" || cmd == "road" || cmd == "car" || cmd == "drive" || cmd == "clock" ||
+      cmd == "weather" || cmd == "invincible" || cmd == "nowanted") {
+    return WorldCommand(args);
+  }
   if (cmd == "time") {
     const auto s = std::chrono::duration<double>(Clock::now() - g_start).count();
     return "ok " + std::to_string(s);
@@ -337,6 +383,9 @@ std::string Execute(const std::string& line) {
   }
   if (cmd == "quit") {
     Update([](PadValues& p) { p = {}; });
+    // The frame log (gta4_metal_frame_log) is written about once a second and a signal quit
+    // skips the final write: give it time to catch up with the last marks.
+    Sleep(std::chrono::milliseconds(1500));
     // As Cmd+Q: SDL turns SIGTERM into its quit event, which closes the window and
     // terminates the title (a bare UI-loop quit leaves the title thread running).
     kill(getpid(), SIGTERM);
@@ -495,10 +544,374 @@ class ScriptPad final : public rex::input::InputDriver {
   uint16_t last_buttons_ = 0;
 };
 
+
+// ---------------------------------------------------------------------------------------------
+// Input recording and replay.
+
+struct InputSample {
+  int64_t t_us = 0;  // since the end of the first loading screen
+  bool native_valid = false;
+  uint32_t user = 0;
+  PadValues pad;
+  double mouse_dx = 0.0, mouse_dy = 0.0;
+  int32_t wheel = 0;
+  bool motion = false;
+  double sensitivity = 1.0;
+  bool invert_y = false;
+  int source = 0;
+  uint64_t reset_generation = 0;
+  std::bitset<256> keys, pressed;
+  bool position_valid = false;
+  float x = 0, y = 0, z = 0;
+};
+
+std::string BitsToHex(const std::bitset<256>& bits) {
+  static const char kHex[] = "0123456789abcdef";
+  std::string out(64, '0');
+  for (size_t nibble = 0; nibble < 64; nibble++) {
+    unsigned v = 0;
+    for (size_t b = 0; b < 4; b++) v |= unsigned(bits[nibble * 4 + b]) << b;
+    out[nibble] = kHex[v];
+  }
+  return out;
+}
+
+bool HexToBits(const std::string& hex, std::bitset<256>& bits) {
+  if (hex.size() != 64) return false;
+  for (size_t nibble = 0; nibble < 64; nibble++) {
+    const char c = hex[nibble];
+    const int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+    if (v < 0) return false;
+    for (size_t b = 0; b < 4; b++) bits[nibble * 4 + b] = (v >> b) & 1;
+  }
+  return true;
+}
+
+// One line per input poll:
+// t_us native_valid user buttons lt rt lx ly rx ry mouse_dx mouse_dy wheel motion sensitivity
+// invert_y source reset_generation keys pressed position_valid x y z
+std::string FormatSample(const InputSample& s) {
+  char head[512];
+  std::snprintf(head, sizeof head,
+                "%lld %d %u %04x %u %u %d %d %d %d %.9g %.9g %d %d %.9g %d %d %llu ",
+                static_cast<long long>(s.t_us), s.native_valid, s.user, s.pad.buttons, s.pad.lt,
+                s.pad.rt, s.pad.lx, s.pad.ly, s.pad.rx, s.pad.ry, s.mouse_dx, s.mouse_dy, s.wheel,
+                s.motion, s.sensitivity, s.invert_y, s.source,
+                static_cast<unsigned long long>(s.reset_generation));
+  char tail[96];
+  std::snprintf(tail, sizeof tail, " %d %.3f %.3f %.3f", s.position_valid, s.x, s.y, s.z);
+  return head + BitsToHex(s.keys) + " " + BitsToHex(s.pressed) + tail;
+}
+
+bool ParseSample(const std::string& line, InputSample& s) {
+  std::istringstream in(line);
+  long long t;
+  int nv, motion, invert, source, pv;
+  unsigned user, buttons, lt, rt;
+  int lx, ly, rx, ry;
+  unsigned long long reset;
+  std::string keys, pressed;
+  if (!(in >> t >> nv >> user >> std::hex >> buttons >> std::dec >> lt >> rt >> lx >> ly >> rx >>
+        ry >> s.mouse_dx >> s.mouse_dy >> s.wheel >> motion >> s.sensitivity >> invert >> source >>
+        reset >> keys >> pressed >> pv >> s.x >> s.y >> s.z))
+    return false;
+  s.t_us = t;
+  s.native_valid = nv != 0;
+  s.user = user;
+  s.pad.buttons = uint16_t(buttons);
+  s.pad.lt = uint8_t(lt);
+  s.pad.rt = uint8_t(rt);
+  s.pad.lx = int16_t(lx);
+  s.pad.ly = int16_t(ly);
+  s.pad.rx = int16_t(rx);
+  s.pad.ry = int16_t(ry);
+  s.motion = motion != 0;
+  s.invert_y = invert != 0;
+  s.source = source;
+  s.reset_generation = reset;
+  s.position_valid = pv != 0;
+  return HexToBits(keys, s.keys) && HexToBits(pressed, s.pressed);
+}
+
+// A guest range that can be read without faulting (as GuestSpan in gta4_sony_feedback.cpp).
+bool GuestReadable(uint32_t address, uint32_t size) {
+  if (!address || uint64_t{address} + size - 1 > 0xFFFFFFFFull) return false;
+  auto* kernel = REX_KERNEL_STATE();
+  auto* memory = kernel ? kernel->memory() : nullptr;
+  auto* heap = memory ? memory->LookupHeap(address) : nullptr;
+  const uint32_t last = address + size - 1;
+  if (!heap || heap != memory->LookupHeap(last)) return false;
+  using rex::memory::PageAccess;
+  const auto access = heap->QueryRangeAccess(address, last);
+  return access == PageAccess::kReadOnly || access == PageAccess::kReadWrite ||
+         access == PageAccess::kExecuteReadOnly || access == PageAccess::kExecuteReadWrite;
+}
+
+uint32_t GuestU32(uint8_t* base, uint32_t address) {
+  uint32_t v;
+  std::memcpy(&v, base + address, 4);
+  return __builtin_bswap32(v);
+}
+
+// The entity position as sub_822343C0 selects it: matrix+48, or inline at +16 without a matrix.
+bool ReadPedPosition(uint8_t* base, uint32_t ped, float& x, float& y, float& z) {
+  if (!base || !GuestReadable(ped, 36)) return false;
+  const uint32_t matrix = GuestU32(base, ped + 32);
+  uint32_t position = ped + 16;
+  if (matrix) {
+    if (!GuestReadable(matrix, 60)) return false;
+    position = matrix + 48;
+  }
+  float v[3];
+  for (int i = 0; i < 3; i++) v[i] = std::bit_cast<float>(GuestU32(base, position + i * 4));
+  if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) return false;
+  x = v[0];
+  y = v[1];
+  z = v[2];
+  return true;
+}
+
+class InputTimeline {
+ public:
+  enum class Mode { kOff, kRecord, kReplay };
+
+  void Configure() {
+    if (std::string path = REXCVAR_GET(gta4_input_replay); !path.empty()) {
+      mode_ = Mode::kReplay;
+      std::ifstream in(path);
+      int number = 0;
+      for (std::string line; std::getline(in, line);) {
+        number++;
+        if (line.empty() || line[0] == '#') continue;
+        InputSample sample;
+        if (!ParseSample(line, sample)) {
+          REXLOG_ERROR("input replay: {}:{} unreadable, replay stops there", path, number);
+          break;
+        }
+        samples_.push_back(sample);
+      }
+      REXLOG_INFO("input replay: {} samples ({:.1f} s) from {}", samples_.size(),
+                  samples_.empty() ? 0.0 : samples_.back().t_us / 1e6, path);
+      if (samples_.empty()) mode_ = Mode::kOff;
+    } else if (std::string path = REXCVAR_GET(gta4_input_record); !path.empty()) {
+      mode_ = Mode::kRecord;
+      record_ = std::fopen(path.c_str(), "w");
+      if (!record_) {
+        REXLOG_ERROR("input record: cannot write {}", path);
+        mode_ = Mode::kOff;
+        return;
+      }
+      std::fprintf(record_,
+                   "# LibertyRecomp input recording v1, from the end of the first loading screen\n"
+                   "# t_us native_valid user buttons lt rt lx ly rx ry mouse_dx mouse_dy wheel "
+                   "motion sensitivity invert_y source reset_generation keys pressed "
+                   "position_valid x y z\n");
+      std::fflush(record_);
+      REXLOG_INFO("input record: writing {}", path);
+    }
+    if (std::string path = REXCVAR_GET(gta4_input_route); !path.empty() && mode_ == Mode::kReplay) {
+      route_ = std::fopen(path.c_str(), "w");
+      if (route_) std::fprintf(route_, "t_s,x,y,z,recorded_x,recorded_y,recorded_z,distance_m\n");
+    }
+  }
+
+  Mode mode() const { return mode_; }
+
+  void Poll(const PollContext& context, bool& native_valid,
+            rex::input::mnk::NativeInputState& state, bool gamepad_valid,
+            const rex::input::X_INPUT_STATE& gamepad) {
+    if (mode_ == Mode::kOff) return;
+    std::lock_guard lock(mutex_);
+    const auto now = Clock::now();
+    if (phase_ == Phase::kWaiting) {
+      if (context.loading) {
+        if (!seen_loading_) REXLOG_INFO("input {}: loading screen seen", Name());
+        seen_loading_ = true;
+        return;
+      }
+      if (!seen_loading_ || !(context.time_step > 0.0f)) return;
+      phase_ = Phase::kRunning;
+      start_ = now;
+      REXLOG_INFO("input {}: started (loading screen over, time step {:.4f})", Name(),
+                  context.time_step);
+      Mark(mode_ == Mode::kReplay ? "route" : "record");
+    }
+    if (phase_ != Phase::kRunning) return;
+    const int64_t t_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(now - start_).count();
+    TakeShots(t_us);
+
+    InputSample current;
+    current.position_valid =
+        context.player_ped &&
+        ReadPedPosition(context.base, context.player_ped, current.x, current.y, current.z);
+
+    if (mode_ == Mode::kRecord) {
+      current.t_us = t_us;
+      current.native_valid = native_valid;
+      current.user = state.user_index;
+      if (gamepad_valid) {
+        current.pad.buttons = gamepad.gamepad.buttons;
+        current.pad.lt = gamepad.gamepad.left_trigger;
+        current.pad.rt = gamepad.gamepad.right_trigger;
+        current.pad.lx = gamepad.gamepad.thumb_lx;
+        current.pad.ly = gamepad.gamepad.thumb_ly;
+        current.pad.rx = gamepad.gamepad.thumb_rx;
+        current.pad.ry = gamepad.gamepad.thumb_ry;
+      }
+      current.mouse_dx = state.mouse_dx;
+      current.mouse_dy = state.mouse_dy;
+      current.wheel = state.mouse_wheel;
+      current.motion = state.mouse_has_motion;
+      current.sensitivity = state.mouse_sensitivity;
+      current.invert_y = state.invert_mouse_y;
+      current.source = int(state.mouse_source);
+      current.reset_generation = state.mouse_reset_generation;
+      for (size_t i = 0; i < 256; i++) {
+        current.keys[i] = state.keys[i] != 0;
+        current.pressed[i] = state.pressed_keys[i] != 0;
+      }
+      std::fputs((FormatSample(current) + "\n").c_str(), record_);
+      if (t_us - last_flush_us_ > 1000000) {
+        std::fflush(record_);
+        last_flush_us_ = t_us;
+      }
+      return;
+    }
+
+    // Replay: everything recorded up to now that previous polls have not taken.
+    const size_t begin = next_;
+    while (next_ < samples_.size() && samples_[next_].t_us <= t_us) next_++;
+    if (next_ >= samples_.size() && t_us > samples_.back().t_us + 500000) {
+      Finish(t_us);
+      return;
+    }
+    const InputSample& latest = samples_[next_ ? next_ - 1 : 0];
+    rex::input::mnk::NativeInputState replayed{};
+    replayed.user_index = latest.user;
+    replayed.mouse_sensitivity = latest.sensitivity;
+    replayed.invert_mouse_y = latest.invert_y;
+    replayed.mouse_source = static_cast<rex::ui::MouseEvent::MotionSource>(latest.source);
+    replayed.mouse_reset_generation = latest.reset_generation;
+    PadValues pad = latest.pad;
+    std::bitset<256> pressed;
+    for (size_t i = begin; i < next_; i++) {
+      const InputSample& s = samples_[i];
+      replayed.mouse_dx += s.mouse_dx;
+      replayed.mouse_dy += s.mouse_dy;
+      replayed.mouse_wheel += s.wheel;
+      replayed.mouse_has_motion |= s.motion;
+      pressed |= s.pressed;
+      pad.buttons |= s.pad.buttons;  // a press shorter than this poll's span still lands
+    }
+    for (size_t i = 0; i < 256; i++) {
+      replayed.keys[i] = latest.keys[i] || pressed[i];
+      replayed.pressed_keys[i] = pressed[i];
+    }
+    native_valid = next_ ? latest.native_valid : true;
+    state = replayed;
+    Update([&](PadValues& p) { p = pad; });
+
+    if (current.position_valid && latest.position_valid && next_) {
+      const double dx = current.x - latest.x, dy = current.y - latest.y, dz = current.z - latest.z;
+      const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+      drift_sum_ += distance;
+      drift_count_++;
+      drift_max_ = std::max(drift_max_, distance);
+      drift_last_ = distance;
+      if (route_ && t_us - last_route_us_ >= 500000) {
+        std::fprintf(route_, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", t_us / 1e6, current.x,
+                     current.y, current.z, latest.x, latest.y, latest.z, distance);
+        last_route_us_ = t_us;
+      }
+    }
+    MarkWindows(t_us);
+  }
+
+ private:
+  enum class Phase { kWaiting, kRunning, kDone };
+
+  const char* Name() const { return mode_ == Mode::kReplay ? "replay" : "record"; }
+
+  static void Mark(const std::string& name) {
+    // Through the script command, so marks land in gta4_pad_marks like a script's.
+    const std::string reply = Execute("mark " + name);
+    if (reply != "ok") REXLOG_ERROR("input timeline: mark {} -> {}", name, reply);
+  }
+
+  void MarkWindows(int64_t t_us) {
+    const double window = REXCVAR_GET(gta4_input_window_seconds);
+    if (!(window > 0)) return;
+    const int64_t index = int64_t(t_us / 1e6 / window);
+    if (index == window_index_) return;
+    if (window_index_ >= 0) Mark(WindowName(window_index_) + "_end");
+    window_index_ = index;
+    Mark(WindowName(index));
+  }
+
+  std::string WindowName(int64_t index) const {
+    char name[32];
+    std::snprintf(name, sizeof name, "w%04lld",
+                  static_cast<long long>(std::llround(index * REXCVAR_GET(gta4_input_window_seconds))));
+    return name;
+  }
+
+  void TakeShots(int64_t t_us) {
+    const std::string folder = REXCVAR_GET(gta4_input_shots);
+    if (folder.empty()) return;
+    const double every = std::max(1.0, REXCVAR_GET(gta4_input_shot_seconds));
+    const int64_t index = int64_t(t_us / 1e6 / every);
+    if (index <= shot_index_) return;
+    shot_index_ = index;
+    char name[64];
+    std::snprintf(name, sizeof name, "/%s-%04lld.png", Name(),
+                  static_cast<long long>(std::llround(index * every)));
+    // Off the game thread: the capture waits for the presenter.
+    std::thread([path = folder + name] {
+      const std::string reply = Shot(path, 0.5);
+      if (reply.rfind("ok", 0) != 0) REXLOG_WARN("input timeline: shot {} -> {}", path, reply);
+    }).detach();
+  }
+
+  void Finish(int64_t t_us) {
+    phase_ = Phase::kDone;
+    Update([](PadValues& p) { p = {}; });
+    if (window_index_ >= 0) Mark(WindowName(window_index_) + "_end");
+    Mark("route_end");
+    if (route_) std::fclose(route_), route_ = nullptr;
+    REXLOG_INFO(
+        "input replay: done after {:.1f} s; distance from the recorded position mean={:.2f} m "
+        "max={:.2f} m end={:.2f} m ({} samples)",
+        t_us / 1e6, drift_count_ ? drift_sum_ / drift_count_ : 0.0, drift_max_, drift_last_,
+        drift_count_);
+    if (REXCVAR_GET(gta4_pad_exit_on_end)) std::thread([] { Execute("quit"); }).detach();
+  }
+
+  Mode mode_ = Mode::kOff;
+  Phase phase_ = Phase::kWaiting;
+  std::mutex mutex_;
+  bool seen_loading_ = false;
+  Clock::time_point start_;
+  std::vector<InputSample> samples_;
+  size_t next_ = 0;
+  FILE* record_ = nullptr;
+  FILE* route_ = nullptr;
+  int64_t last_flush_us_ = 0;
+  int64_t last_route_us_ = -1000000;
+  int64_t window_index_ = -1;
+  int64_t shot_index_ = -1;
+  double drift_sum_ = 0, drift_max_ = 0, drift_last_ = 0;
+  uint64_t drift_count_ = 0;
+};
+
+InputTimeline g_timeline;
+
 }  // namespace
 
 void Configure(rex::RuntimeConfig& config) {
-  g_enabled = !REXCVAR_GET(gta4_pad_script).empty() || !REXCVAR_GET(gta4_pad_pipe).empty();
+  g_timeline.Configure();
+  g_enabled = !REXCVAR_GET(gta4_pad_script).empty() || !REXCVAR_GET(gta4_pad_pipe).empty() ||
+              g_timeline.mode() == InputTimeline::Mode::kReplay;
   if (!g_enabled) return;
   auto inner = config.input_factory;
   config.input_factory = [inner](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
@@ -511,6 +924,8 @@ void Configure(rex::RuntimeConfig& config) {
   };
 }
 
+bool WorldEnabled() { return g_enabled; }
+
 void Start(rex::ui::WindowedAppContext* app_context) {
   if (!g_enabled) return;
   g_app_context = app_context;
@@ -519,6 +934,35 @@ void Start(rex::ui::WindowedAppContext* app_context) {
     std::thread(ServePipe, std::move(path)).detach();
   if (std::string path = REXCVAR_GET(gta4_pad_script); !path.empty())
     std::thread(RunScript, std::move(path)).detach();
+}
+
+void OnInputPoll(const PollContext& context, bool& native_valid,
+                 rex::input::mnk::NativeInputState& state, bool gamepad_valid,
+                 const rex::input::X_INPUT_STATE& gamepad) {
+  const bool running = !context.loading && context.time_step > 0.0f;
+  g_world_running.store(running, std::memory_order_relaxed);
+  // Without a replay, gta4_input_route still logs where the player is (scripted benches).
+  static FILE* route = nullptr;
+  static Clock::time_point route_start, route_last;
+  if (g_timeline.mode() != InputTimeline::Mode::kReplay && running && context.player_ped) {
+    const auto now = Clock::now();
+    if (!route) {
+      if (const std::string path = REXCVAR_GET(gta4_input_route); !path.empty()) {
+        route = std::fopen(path.c_str(), "w");
+        if (route) std::fprintf(route, "t_s,x,y,z\n");
+        route_start = route_last = now;
+      }
+    }
+    float x, y, z;
+    if (route && now - route_last >= std::chrono::milliseconds(500) &&
+        ReadPedPosition(context.base, context.player_ped, x, y, z)) {
+      route_last = now;
+      std::fprintf(route, "%.3f,%.3f,%.3f,%.3f\n",
+                   std::chrono::duration<double>(now - route_start).count(), x, y, z);
+      std::fflush(route);
+    }
+  }
+  g_timeline.Poll(context, native_valid, state, gamepad_valid, gamepad);
 }
 
 }  // namespace gta4::dev_pad

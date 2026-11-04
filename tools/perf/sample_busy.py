@@ -7,7 +7,8 @@ import re, sys
 
 WAITS = ("__psynch_cvwait", "mach_msg2_trap", "__semwait_signal", "kevent", "__workq_kernreturn",
          "__psynch_mutexwait", "__select", "__ulock_wait", "semaphore_wait_trap", "__wait4", "read",
-         "__recvfrom", "poll", "__open", "mach_wait_until", "__sigsuspend", "__psynch_rw_rdlock")
+         "__recvfrom", "poll", "__open", "mach_wait_until", "__sigsuspend", "__psynch_rw_rdlock",
+         "semaphore_timedwait_trap", "semaphore_wait_signal_trap", "__psynch_rw_wrlock")
 line_re = re.compile(r"^(\s*)[+!:| ]*(\d+) (.*)$")
 
 

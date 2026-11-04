@@ -47,6 +47,8 @@
 #include <rex/ui/surface_gnulinux.h>
 #endif
 
+REXCVAR_DECLARE(bool, background_window);
+
 namespace rex::ui {
 
 namespace {
@@ -482,7 +484,7 @@ void WindowSDL::RearmCursorAutoHideTimer() {
 }
 
 void WindowSDL::FocusImpl() {
-  if (!sdl_window_) {
+  if (!sdl_window_ || REXCVAR_GET(background_window)) {
     return;
   }
   SDL_RaiseWindow(sdl_window_);

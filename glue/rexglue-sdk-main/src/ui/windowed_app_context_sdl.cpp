@@ -16,9 +16,12 @@
 
 #include <SDL3/SDL.h>
 
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/platform.h>
 #include <rex/ui/window_sdl.h>
+
+REXCVAR_DECLARE(bool, background_window);
 
 namespace rex::ui {
 
@@ -62,6 +65,13 @@ bool SDLWindowedAppContext::Initialize() {
     return false;
   }
 #endif
+  if (REXCVAR_GET(background_window)) {
+    // Showing or raising a window activates the app by default, which takes focus (and with
+    // it the mouse, see MnkInputDriver::UpdateMouseCapture) from whatever the user is doing.
+    SDL_SetHintWithPriority(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0", SDL_HINT_OVERRIDE);
+    SDL_SetHintWithPriority(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0", SDL_HINT_OVERRIDE);
+    REXLOG_INFO("background_window: the window will not take focus or capture the mouse");
+  }
 #if REX_PLATFORM_GNU_LINUX
   // The Linux surface type the presenters consume is XcbWindow, so force X11
   // and keep SDL off Wayland where no surface shim exists yet.

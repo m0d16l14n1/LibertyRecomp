@@ -30,7 +30,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_foreground_qos, true, "GPU", "Bound recording wor
 REXCVAR_DEFINE_BOOL(gta4_metal_fold_full_clears, true, "GPU", "Fold full clears into the next attachment use");
 REXCVAR_DEFINE_BOOL(gta4_metal_retain_ignore_address, true, "GPU", "Keep colour-masked draws in the current render pass when only the guest surface address differs");
 REXCVAR_DEFINE_STRING(gta4_metal_gpu_pass_log, "", "GPU/Diagnostics", "Append average GPU ms per render-pass category to this CSV every 300 frames (empty = off)");
-REXCVAR_DEFINE_STRING(gta4_metal_frame_log, "", "GPU/Diagnostics", "Per-frame Metal timing CSV, appended every 600 frames; {session} = launch time (empty = off)");
+REXCVAR_DEFINE_STRING(gta4_metal_frame_log, "", "GPU/Diagnostics", "Per-frame Metal timing CSV, appended about once a second; {session} = launch time (empty = off)");
 REXCVAR_DEFINE_BOOL(gta4_metal_pipeline_archive, true, "GPU", "Record pipelines and precompile them into a Metal binary archive at launch");
 REXCVAR_DEFINE_BOOL(gta4_metal_async_pipelines, true, "GPU", "Overlap title pipeline creation with draw resource preparation");
 REXCVAR_DEFINE_UINT32(gta4_metal_pipeline_wait_budget_ms, 4, "GPU", "Per frame, how long scene draws wait for a pipeline still compiling before being left out of that frame (0 = always wait)");
@@ -734,8 +734,12 @@ void Renderer::State::RecordFrameSample(uint32_t frame) {
         frame_gpu_ns->load()-frame_prev_gpu_ns});
   }
   frame_last_present_ns=now; frame_submit_ns=0; frame_present_ns=0;
-  // Hard process exit can skip destructors: flush in rare, small batches instead of only at shutdown.
-  if(frame_samples.size()>=600) WriteFrameLog();
+  // Hard process exit (a SIGTERM quit) skips destructors: flush about once a second, so at most the
+  // last second is lost (600-frame batches lost up to 10 s, the end of a bench's last window).
+  if(frame_samples.size()>=600||now-frame_log_written_ns>=1'000'000'000ull) {
+    WriteFrameLog();
+    frame_log_written_ns=now;
+  }
   frame_prev_draws=draws; frame_prev_pipelines=pipeline_creations; frame_prev_waits=pipeline_waits;
   frame_prev_wait_ns=pipeline_wait_ns; frame_prev_texture_waits=prep.waited; frame_prev_gpu_ns=frame_gpu_ns->load();
 }

@@ -91,8 +91,8 @@ struct Renderer::State {
   ShaderCache stock,overrides,temporal_stock,temporal_overrides;
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
-  // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory, written once at shutdown so the
-  // measurement itself adds no per-frame I/O.
+  // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about
+  // once a second (RecordFrameSample), so the measurement adds no per-frame I/O.
   struct FrameSample {
     uint32_t frame;
     uint64_t at_ns, interval_ns, submit_ns, present_ns;
@@ -102,6 +102,7 @@ struct Renderer::State {
   std::string frame_log_path;
   std::vector<FrameSample> frame_samples;
   uint64_t frame_submit_ns = 0, frame_present_ns = 0, frame_log_origin_ns = 0, frame_last_present_ns = 0;
+  uint64_t frame_log_written_ns = 0;
   // GPU busy time summed by command-buffer completion handlers (shared: handlers may outlive State).
   std::shared_ptr<std::atomic<uint64_t>> frame_gpu_ns = std::make_shared<std::atomic<uint64_t>>(0);
   uint64_t frame_prev_gpu_ns = 0;

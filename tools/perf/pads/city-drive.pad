@@ -1,0 +1,49 @@
+# Career bench in the city: from a loaded story save, the player is put on a road in Downtown
+# Broker (open from the start of the story; Algonquin stays closed until later), given a car, and the game's own driving AI takes it through
+# the streets (TASK_CAR_DRIVE_WANDER) with traffic and pedestrians around. Fixed noon, sunny, no
+# wanted level, invincible. Run through tools/perf/route_bench.sh pad (a copy of the save; never
+# saved), which cuts frames.csv at these marks: city (the whole drive) and w1..w6 (30 s each).
+await 5m
+# The fade-in after the load and the phone/help text settle.
+wait 10s
+nowanted
+invincible
+clock 13 0
+weather 1
+road 1040 150 20
+car sultan
+wait 4s
+mark settle
+drive 16 0
+nowanted
+wait 15s
+mark settle_end
+mark city
+mark w1
+shot {out}/shots/city-000.png 0.5
+wait 30s
+mark w1_end
+mark w2
+shot {out}/shots/city-030.png 0.5
+wait 30s
+mark w2_end
+mark w3
+shot {out}/shots/city-060.png 0.5
+wait 30s
+mark w3_end
+mark w4
+shot {out}/shots/city-090.png 0.5
+wait 30s
+mark w4_end
+mark w5
+shot {out}/shots/city-120.png 0.5
+wait 30s
+mark w5_end
+mark w6
+shot {out}/shots/city-150.png 0.5
+wait 30s
+mark w6_end
+mark city_end
+shot {out}/shots/city-180.png 0.5
+wait 1s
+quit
