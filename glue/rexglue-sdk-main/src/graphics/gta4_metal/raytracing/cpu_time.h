@@ -3,8 +3,22 @@
 // (capture-cpu-us and friends): cumulative nanoseconds and calls, read as windowed deltas.
 #include <chrono>
 #include <cstdint>
+#include <mach/mach_time.h>
 
 namespace rex::graphics::gta4_metal::raytracing {
+
+// Monotonic nanoseconds for the encode-thread timers. steady_clock::now() goes through
+// clock_gettime and mach_continuous_time; it was 3% of the render thread under the bench (the
+// frame log's submit timer). mach_absolute_time is a commpage read.
+inline uint64_t FastNowNs() {
+  static const mach_timebase_info_data_t timebase = [] {
+    mach_timebase_info_data_t t{};
+    mach_timebase_info(&t);
+    return t;
+  }();
+  const uint64_t ticks = mach_absolute_time();
+  return timebase.numer == timebase.denom ? ticks : ticks * timebase.numer / timebase.denom;
+}
 
 struct CpuTime {
   uint64_t ns = 0, calls = 0;
@@ -21,9 +35,9 @@ inline bool SampleOneIn(uint64_t& state, uint64_t mask) {
 
 class ScopedCpuTime {
  public:
-  explicit ScopedCpuTime(CpuTime& time) : time_(time), start_(std::chrono::steady_clock::now()) {}
+  explicit ScopedCpuTime(CpuTime& time) : time_(time), start_(FastNowNs()) {}
   ~ScopedCpuTime() {
-    time_.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start_).count());
+    time_.ns += FastNowNs() - start_;
     ++time_.calls;
     ++time_.timed;
   }
@@ -32,7 +46,7 @@ class ScopedCpuTime {
 
  private:
   CpuTime& time_;
-  std::chrono::steady_clock::time_point start_;
+  uint64_t start_;
 };
 
 // Counts every call but reads the clock on about one in `Period` (two clock reads cost about
@@ -43,11 +57,11 @@ class ScopedSampledCpuTime {
  public:
   explicit ScopedSampledCpuTime(CpuTime& time) : time_(time), timed_(SampleOneIn(time.sampler, Period - 1)) {
     ++time.calls;
-    if (timed_) start_ = std::chrono::steady_clock::now();
+    if (timed_) start_ = FastNowNs();
   }
   ~ScopedSampledCpuTime() {
     if (!timed_) return;
-    time_.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start_).count());
+    time_.ns += FastNowNs() - start_;
     ++time_.timed;
   }
   ScopedSampledCpuTime(const ScopedSampledCpuTime&) = delete;
@@ -56,7 +70,7 @@ class ScopedSampledCpuTime {
  private:
   CpuTime& time_;
   bool timed_;
-  std::chrono::steady_clock::time_point start_{};
+  uint64_t start_ = 0;
 };
 
 }  // namespace rex::graphics::gta4_metal::raytracing

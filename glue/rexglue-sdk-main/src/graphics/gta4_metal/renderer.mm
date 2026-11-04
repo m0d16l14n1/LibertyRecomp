@@ -553,10 +553,9 @@ bool Renderer::Submit(std::span<const std::byte> bytes,std::string& error,
     submit_scale = !cheap ? 1 : raytracing::SampleOneIn(state_->submit_sampler, 7) ? 8 : 0;
   }
   const bool timed = submit_scale != 0;
-  const auto submit_begin = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  const uint64_t submit_begin = timed ? raytracing::FastNowNs() : 0;
   const bool ok = SubmitImpl(bytes, error);
-  if (timed) state_->frame_submit_ns += submit_scale * uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-      std::chrono::steady_clock::now() - submit_begin).count());
+  if (timed) state_->frame_submit_ns += submit_scale * (raytracing::FastNowNs() - submit_begin);
   if (!ok) state_->TraceCommandFailure(bytes,error);
   if (state_->sky_visibility) { state_->EndRender(); state_->sky_visibility=nil; }
   if (!ok && state_->fire_active) gta4_native::FireTraceLog("metal-command-error",
