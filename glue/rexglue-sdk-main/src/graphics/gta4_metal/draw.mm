@@ -767,7 +767,18 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     const uint64_t generation=up||!captured_bindings?0:XXH3_64bits(identities.data(),sizeof(identities));
     // Exact world-transform identity is a conservative static fallback: a
     // changed transform creates a new key, rather than borrowing another pose.
-    const uint64_t owner=temporal.instance?temporal.instance:XXH3_64bits(captured_vertex.data(),64);
+    // Unscoped: the world transform registers the shader reads (c0-c2 for gta_trees, so the
+    // unread c3 cannot split one tree's key). A shader reading none of c0-c3 (the deferred tire)
+    // keeps all four: there they still hold the car body's gWorld, steady under camera motion,
+    // and the read-mask sibling match tells that car's wheels apart.
+    const auto& constant_reads=pipeline->vertex.float_constant_mask;
+    uint64_t owner=temporal.instance;
+    if(!owner){
+      std::array<uint8_t,64> world{};
+      const uint64_t read_world=constant_reads[0]&0xFull;
+      for(size_t r=0;r<4;++r)if(!read_world||(read_world>>r&1))std::memcpy(world.data()+r*16,captured_vertex.data()+r*16,16);
+      owner=XXH3_64bits(world.data(),world.size());
+    }
     temporal::GeometryKey key{owner,temporal.drawable,temporal.pose,pipeline->vertex.hash,
       vdecl->second.identity,generation,uint64_t(source_first)<<32|source_count};
     key.pixel_shader=pipeline->has_pixel?pipeline->pixel.hash:0;
@@ -777,7 +788,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       key.streams[i]={identities[i],streams[i].offset,pipeline->strides[i]};
     key.primitive=type;key.indexed=source_indexed;key.restart=restart;
     key.restart_index=restart?restart_value:0;
-    auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip);
+    auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
     // A vertex shader reading a texture recomputes the previous position with this frame's
     // texture: exact while that texture is unchanged (vehicle damage changes rarely).
     const bool vertex_texture_history=!pipeline->vertex.used_texture_mask||temporal_vertex_texture_history;

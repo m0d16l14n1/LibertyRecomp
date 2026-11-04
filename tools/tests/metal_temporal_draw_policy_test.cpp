@@ -221,6 +221,100 @@ void GeometryTransformMatch() {
     CHECK(!h.Record(key(300),bank(0.1f,0),shared,{}).previous);
   }
 }
+// Matching compares only the registers the vertex shader reads (shader archive v3 masks).
+void GeometryReadMask() {
+  namespace history=rex::graphics::gta4_native::temporal;
+  using history::ConstantMask;
+  std::array<uint8_t,sizeof(core::SharedConstants)> shared{};
+  const auto mask=[](std::initializer_list<int> registers){
+    ConstantMask m{}; for(const int r:registers) m[r/64]|=1ull<<(r%64); return m;
+  };
+  const auto put=[](std::array<uint8_t,4096>& v,int reg,int component,float value){
+    std::memcpy(v.data()+reg*16+component*4,&value,sizeof(value));
+  };
+  const auto key=[](uint64_t owner){temporal::GeometryKey k{owner,2,owner,4,5,6,7};return k;};
+  // gta_vehicle_tire VS_VehicleTransformD and gta_trees VSPropFoliageDeferred, from their sources.
+  const auto tire=mask({4,5,6,8,9,10,11,64,65,66,67,68,69});
+  const auto tree=mask({0,1,2,8,9,10,11,39,40,45,51});
+  CHECK(history::WorldRegisters(history::kAllConstants)==(ConstantMask{0xF,0,0,0}));
+  CHECK(history::WorldRegisters(tree)==(ConstantMask{0x7,0,0,0}));
+  CHECK(history::WorldRegisters(tire)==(ConstantMask{0,0xF,0,0}));
+  CHECK(history::WorldRegisters(mask({8,9}))==(ConstantMask{}));
+  const auto wheel=[&](float x,float stale){
+    std::array<uint8_t,4096> v{};
+    for(int r=0;r<4;++r) put(v,64+r,r,1);   // matWheelTransform
+    put(v,67,0,x);                          // hub offset
+    put(v,8,3,x);                           // gWorldViewProj translation
+    put(v,25,0,stale);                      // gLightFallOff left by a forward-lit draw
+    return v;
+  };
+  for(const bool masked:{true,false}){  // new owner each frame; only the unread c25 jumps
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    const auto& reads=masked?tire:history::kAllConstants;
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),wheel(0.8f,2),shared,{},reads);
+    CHECK(h.Begin(1,1,2,false));
+    CHECK(bool(h.Record(key(200),wheel(0.9f,60),shared,{},reads).previous)==masked);
+  }
+  const auto foliage=[&](float x,float stale){
+    std::array<uint8_t,4096> v{};
+    for(int r=0;r<3;++r) put(v,r,r,1);
+    put(v,0,3,x);                // gWorld translation (row-major x)
+    put(v,3,0,stale);            // c3: never read by the tree shader
+    return v;
+  };
+  for(const bool masked:{true,false}){  // same key; the unread c3 jumps 100
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    const auto& reads=masked?tree:history::kAllConstants;
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),foliage(5,0),shared,{},reads);
+    CHECK(h.Begin(1,1,2,false));
+    const auto r=h.Record(key(100),foliage(5,100),shared,{},reads);
+    CHECK(bool(r.previous)==masked);
+    const auto statistics=h.TakeStatistics();
+    CHECK(statistics.key_far==(masked?0u:1u));
+  }
+  {  // two wheels whose unread c25 swapped between frames: told apart by the hub alone
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    h.Record(key(100),wheel(-0.8f,1),shared,{},tire); h.Record(key(100),wheel(0.8f,40),shared,{},tire);
+    CHECK(h.Begin(1,1,2,false));
+    const auto left=h.Record(key(100),wheel(-0.8f,40),shared,{},tire);
+    const auto expected=wheel(-0.8f,1);
+    CHECK(left.previous&&left.previous->vertex==std::vector<uint8_t>(expected.begin(),expected.end()));
+  }
+  {  // the far histogram names only registers the shader reads
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),wheel(0.8f,2),shared,{},tire);
+    CHECK(h.Begin(1,1,2,false));
+    auto spun=wheel(0.8f,90); put(spun,68,1,40);  // a read, non-world register jumps too
+    CHECK(!h.Record(key(200),spun,shared,{},tire).previous);
+    auto statistics=h.TakeStatistics();
+    CHECK(statistics.far_register[68]==1&&statistics.far_register[25]==0&&statistics.far_world==0);
+    CHECK(h.Begin(1,1,3,false));  // a jump in the tire's world registers is refused by the world step
+    auto moved=wheel(0.8f,2); put(moved,65,1,40);
+    CHECK(!h.Record(key(300),moved,shared,{},tire).previous);
+    statistics=h.TakeStatistics();
+    CHECK(statistics.far_world==1&&statistics.far_register[65]==0);
+  }
+  {  // a camera turn moves gWorldViewProj (c8-c11) far; it ranks but does not refuse
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),wheel(0.8f,2),shared,{},tire);
+    CHECK(h.Begin(1,1,2,false));
+    auto turned=wheel(0.8f,2); put(turned,11,3,60); put(turned,9,0,-35);
+    CHECK(bool(h.Record(key(200),turned,shared,{},tire).previous));
+    const auto statistics=h.TakeStatistics();
+    CHECK(statistics.transform==1&&statistics.far_register[11]==0&&statistics.far_register[9]==0);
+  }
+  {  // two cars of one model: same wheel transform, told apart by gWorldViewProj
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    auto car=[&](float clip){auto v=wheel(0.8f,2); put(v,8,3,clip); return v;};
+    CHECK(h.Begin(1,1,1,false));
+    h.Record(key(100),car(5),shared,{},tire); h.Record(key(101),car(40),shared,{},tire);
+    CHECK(h.Begin(1,1,2,false));
+    const auto near=h.Record(key(200),car(42),shared,{},tire);
+    const auto expected=car(40);
+    CHECK(near.previous&&near.previous->vertex==std::vector<uint8_t>(expected.begin(),expected.end()));
+  }
+}
 void MaterialSampling() {
   temporal::Configuration c{1920,1080,3840,2160,temporal::Method::kMetalFx,false};
   CHECK(temporal::MaterialMipBias(c,true)==-2.0f);
@@ -372,5 +466,5 @@ void DeclaredBoundaries() {
   CHECK(!registry.Find(1,5,11));
 }
 }  // namespace
-int main(){GeometryBindings();GeometrySiblings();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
+int main(){GeometryBindings();GeometrySiblings();GeometryReadMask();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
   std::printf("temporal draw policy: %u checks passed\n",checks);return 0;}

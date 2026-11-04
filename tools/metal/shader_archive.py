@@ -25,14 +25,18 @@ from dataclasses import dataclass
 from typing import Callable, Iterable
 
 MAGIC = b"LRMETAL2"
-VERSION = 2
+VERSION = 3
 HEADER = struct.Struct("<8sIIIIQ32s")
-RECORD = struct.Struct("<QIIIIIIQQQQQIIQQ")
+# Version 3 appends the 256-bit float-constant read mask (four little-endian words).
+RECORD = struct.Struct("<QIIIIIIQQQQQIIQQ4Q")
 ATTRIBUTE = struct.Struct("<IIII")
 MAX_BYTES = 256 * 1024 * 1024
 MAX_SHADERS = 16384
 MAX_ATTRIBUTES = 31
 MASK_TEXTURES = (1 << 26) - 1
+CONSTANT_REGISTERS = 256
+# Every register: the conservative mask for shaders whose reads are not derived.
+ALL_CONSTANTS = (1 << CONSTANT_REGISTERS) - 1
 FLAG_EARLY_TESTS = 1
 FLAG_LATE_VARIANT = 2
 FLAG_NATIVE_OUTPUT = 4
@@ -62,6 +66,8 @@ class Shader:
     attributes: tuple[Attribute, ...]
     early: bytes
     late: bytes = b""
+    # Bit n: the shader may read float constant cN of its own stage's bank.
+    constant_mask: int = ALL_CONSTANTS
 
 
 def checked_range(offset: int, length: int, total: int, label: str) -> None:
@@ -78,6 +84,8 @@ def validate_shader(shader: Shader) -> None:
         raise ValueError("texture mask exceeds the title interface")
     if not 0 <= shader.specialization_mask < 1 << 32:
         raise ValueError("invalid specialization mask")
+    if not 0 <= shader.constant_mask <= ALL_CONSTANTS:
+        raise ValueError("invalid float-constant mask")
     if shader.outputs < 0 or shader.outputs & ~31:
         raise ValueError("invalid fragment outputs")
     if shader.stage == VERTEX and (shader.outputs or shader.late or shader.flags):
@@ -137,7 +145,7 @@ def build_archive(shaders: Iterable[Shader]) -> bytes:
         table.append(RECORD.pack(shader.shader_hash, shader.stage, shader.texture_mask,
             shader.specialization_mask, shader.outputs, len(shader.attributes), shader.flags,
             early_offset, early_size, late_offset, late_size, name_offset, name_size, 0,
-            attrs_offset, attrs_size))
+            attrs_offset, attrs_size, *constant_words(shader.constant_mask)))
     for index, record in enumerate(table):
         begin = HEADER.size + index * RECORD.size
         payload[begin:begin + RECORD.size] = record
@@ -178,7 +186,7 @@ def parse_archive(data: bytes, verify_digest: bool = True) -> tuple[Shader, ...]
     for index in range(count):
         (shader_hash, stage, texture_mask, spec_mask, outputs, attr_count, flags,
          early_offset, early_size, late_offset, late_size, name_offset, name_size,
-         reserved, attrs_offset, attrs_size) = RECORD.unpack_from(data, HEADER.size + index * RECORD.size)
+         reserved, attrs_offset, attrs_size, *words) = RECORD.unpack_from(data, HEADER.size + index * RECORD.size)
         if reserved or shader_hash <= previous_hash:
             raise ValueError("invalid reserved field or non-unique shader order")
         previous_hash = shader_hash
@@ -189,7 +197,8 @@ def parse_archive(data: bytes, verify_digest: bool = True) -> tuple[Shader, ...]
         attributes = tuple(Attribute(*values) for values in ATTRIBUTE.iter_unpack(attributes_data))
         shader = Shader(shader_hash, stage, texture_mask, spec_mask, outputs, flags,
                         name, attributes, read_payload(early_offset, early_size, "primary"),
-                        read_payload(late_offset, late_size, "late", True))
+                        read_payload(late_offset, late_size, "late", True),
+                        sum(word << (64 * n) for n, word in enumerate(words)))
         validate_shader(shader)
         shaders.append(shader)
     end = table_end
@@ -202,6 +211,97 @@ def parse_archive(data: bytes, verify_digest: bool = True) -> tuple[Shader, ...]
     if end != len(data):
         raise ValueError("unreferenced archive tail")
     return tuple(shaders)
+
+
+def constant_words(mask: int) -> tuple[int, int, int, int]:
+    return tuple((mask >> (64 * n)) & ((1 << 64) - 1) for n in range(4))
+
+
+_CONSTANT_DECLARATION = re.compile(r"^\s*(\w+)\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?\s*:\s*packoffset\(\s*c(\d+)\s*\)\s*;", re.M)
+
+
+def _arguments(source: str, opening: int) -> tuple[str, int] | None:
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "(":
+            depth += 1
+        elif source[index] == ")":
+            depth -= 1
+            if not depth:
+                return source[opening + 1:index], index
+    return None
+
+
+def constant_mask(source: str, stage: int) -> int:
+    """Float constants of the stage's bank that the translated shader reads.
+
+    XenosRecomp declares each CTAB constant in a `cbuffer <Stage>ShaderConstants`
+    block at its register (`packoffset(cN)`) and reads it through a macro of the
+    same name: `NAME` for one register, `NAME(INDEX)` for an array. A literal index
+    reads one register; any other index (a0/aL-relative, e.g. a bone palette) may
+    reach every register from the array base to the end of the bank, since the
+    accessor clamps INDEX only to the bank. Anything not recognised is answered
+    with ALL_CONSTANTS, never with a smaller guess.
+    """
+    bank = "VertexShaderConstants" if stage == VERTEX else "PixelShaderConstants"
+    other = "PixelShaderConstants" if stage == VERTEX else "VertexShaderConstants"
+    if re.search(r"\b" + other + r"\s*\+", source):
+        return ALL_CONSTANTS
+    marker = "cbuffer " + bank
+    if source.count(marker) > 1:
+        return ALL_CONSTANTS
+    declared: dict[str, tuple[int, bool]] = {}
+    without_block = source
+    if marker in source:
+        start, end = _balanced_block(source, marker)
+        block = source[start + 1:end]
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = _CONSTANT_DECLARATION.match(line)
+            if not match or match.group(1) != "float4":
+                return ALL_CONSTANTS
+            name, count, register = match.group(2), match.group(3), int(match.group(4))
+            if name in declared or register >= CONSTANT_REGISTERS:
+                return ALL_CONSTANTS
+            declared[name] = (register, count is not None)
+        without_block = source[:start] + source[end + 1:]
+    # Every raw access to the bank must be one of the declared accessors.
+    code = []
+    for line in without_block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            if re.search(r"\b" + bank + r"\s*\+", stripped):
+                definition = re.match(r"#\s*define\s+(\w+)", stripped)
+                if not definition or definition.group(1) not in declared:
+                    return ALL_CONSTANTS
+            continue
+        if re.search(r"\b" + bank + r"\s*\+", stripped):
+            return ALL_CONSTANTS
+        code.append(line.split("//", 1)[0])
+    body = "\n".join(code)
+    mask = 0
+    for name, (register, array) in declared.items():
+        for use in re.finditer(r"\b" + re.escape(name) + r"\b", body):
+            if not array:
+                mask |= 1 << register
+                continue
+            opening = use.end()
+            while opening < len(body) and body[opening] in " \t":
+                opening += 1
+            if opening >= len(body) or body[opening] != "(":
+                return ALL_CONSTANTS  # an array used other than through its accessor
+            parsed = _arguments(body, opening)
+            if parsed is None:
+                return ALL_CONSTANTS
+            index = parsed[0].strip()
+            if re.fullmatch(r"\d+", index):
+                if register + int(index) < CONSTANT_REGISTERS:
+                    mask |= 1 << (register + int(index))
+            else:
+                mask |= ALL_CONSTANTS & ~((1 << register) - 1)
+    return mask
 
 
 def _balanced_block(source: str, marker: str) -> tuple[int, int]:
@@ -503,7 +603,8 @@ def build_from_repo(root: Path, output: Path, work: Path, jobs: int = 2,
             # late path. Keep that variant explicitly instead of dropping it.
             late = primary
             flags |= FLAG_LATE_VARIANT
-        recovered.append((entry, primary, late, attrs, stage, outputs, flags, hashlib.sha256(original).hexdigest()))
+        recovered.append((entry, primary, late, attrs, stage, outputs, flags, hashlib.sha256(original).hexdigest(),
+                          constant_mask(original.decode("utf-8"), stage)))
     source_directory = work / "sources"
     source_directory.mkdir(exist_ok=True)
     for entry, primary, late, *_ in recovered:
@@ -515,14 +616,16 @@ def build_from_repo(root: Path, output: Path, work: Path, jobs: int = 2,
     result = {"schema": VERSION, "stock_cache_sha256": cache_fingerprint,
               "coverage_header_sha256": hashlib.sha256(header.encode()).hexdigest(),
               "entries": len(entries), "late_variants": sum(bool(item[2]) for item in recovered),
+              "constant_masks_derived": sum(item[8] != ALL_CONSTANTS for item in recovered),
               "mode": "source-only" if emit_only else "compiled",
               "sources": [{"hash": f"{item[0].shader_hash:016X}", "original_sha256": item[7]} for item in recovered]}
     if not emit_only:
         assert compile_source is not None
         def compile_item(item) -> Shader:
-            entry, primary, late, attrs, stage, outputs, flags, _ = item
+            entry, primary, late, attrs, stage, outputs, flags, _, constants = item
             shader = Shader(entry.shader_hash, stage, entry.used_texture_mask, entry.spec_constants_mask,
-                            outputs, flags, entry.filename, attrs, compile_source(primary), compile_source(late) if late else b"")
+                            outputs, flags, entry.filename, attrs, compile_source(primary),
+                            compile_source(late) if late else b"", constants)
             print(f"compiled {entry.shader_hash:016X} {entry.filename}", flush=True)
             return shader
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs, 4))) as executor:
