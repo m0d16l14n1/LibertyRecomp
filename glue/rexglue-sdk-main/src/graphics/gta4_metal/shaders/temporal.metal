@@ -87,6 +87,10 @@ kernel void liberty_temporal_camera_motion_fill(
     // neighbour has history); 0..1 before the temporal scaler: only neighbour motion, and the
     // pixel's reactive value set to w so the scaler accumulates it like the rest of its object
     constant float4& fill [[buffer(1)]],
+    // x: what frame generation writes when no neighbour has history: 0 the camera's motion,
+    // 1 zero (the pixel moves with the camera: the player's car, Niko), 2 zero nearer than y
+    // metres and the camera's motion beyond (static world drawn without history)
+    constant float2& untracked [[buffer(2)]],
     uint2 pixel [[thread_position_in_grid]]) {
   if(any(pixel>=c.extent))return;
   const float far_depth=c.reversed?0.0f:1.0f;
@@ -122,7 +126,10 @@ kernel void liberty_temporal_camera_motion_fill(
     }
   }
   if(fill.w>=0)return;
-  motion.write(float4(temporal_camera_velocity(c,pixel,z),0,0),pixel);
+  const bool planes=fill.x>0&&fill.y>fill.x;
+  const bool zero=untracked.x>0.5f&&(untracked.x<1.5f||
+      (planes&&temporal_fill_view_depth(z,fill.xy,c.reversed)<untracked.y));
+  motion.write(float4(zero?float2(0):temporal_camera_velocity(c,pixel,z),0,0),pixel);
 }
 struct TemporalConstants {
   uint2 extent;float2 jitter;

@@ -21,6 +21,10 @@ REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_half_rate, true, "GPU",
 REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_dump, "", "GPU/Diagnostics",
                       "Folder for MetalFX frame generation checks: every 120th generated frame and the real "
                       "frame after it, as PPM, at most 6 pairs (empty = off)");
+REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_every, 120, "GPU/Diagnostics",
+                      "Frame generation dump: every Nth generated frame (at least 2)");
+REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_max, 6, "GPU/Diagnostics",
+                      "Frame generation dump: at most this many generated frames per run");
 
 namespace rex::graphics::gta4_metal {
 namespace {
@@ -191,10 +195,12 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       const auto folder=rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_dump");
       ++generated_count;
       temporal.snapshot_reactive=!folder.empty();
+      const uint64_t every=std::max<uint32_t>(2,REXCVAR_GET(gta4_metalfx_frame_generation_dump_every));
+      const uint64_t most=REXCVAR_GET(gta4_metalfx_frame_generation_dump_max);
       // The real frame before the generated one, so each check has both neighbours.
-      if(!folder.empty()&&generated_count%120==119&&dumped<6)
+      if(!folder.empty()&&generated_count%every==every-1&&dumped<most)
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_before.ppm",folder,present.submitted_frame+1));
-      if(!folder.empty()&&generated_count%120==0&&dumped<6){
+      if(!folder.empty()&&generated_count%every==0&&dumped<most){
         ++dumped;
         DumpFrameImage(commands,generated_pair.generated,fmt::format("{}/framegen_{}_generated.ppm",folder,present.submitted_frame));
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_real.ppm",folder,present.submitted_frame));

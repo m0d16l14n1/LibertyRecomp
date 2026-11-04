@@ -16,6 +16,16 @@ REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_neighbour_motion, true, "GPU",
                     "Frame generation: a pixel without object history takes the motion of nearby "
                     "pixels at its depth that have it (the rest of its object) before the camera's");
+// What a frame-generation pixel gets when its draw has no history and no neighbour at its depth
+// has any. The camera's motion is right for static world drawn without history and wrong for
+// whatever moves with the camera (the player's car, Niko), which then tears in the midpoint.
+REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_untracked_motion, "camera", "GPU",
+                      "Frame generation, world pixels without object history or a tracked neighbour: "
+                      "camera (the camera's motion), zero (no screen motion: moves with the camera) or "
+                      "near-zero (zero nearer than gta4_metalfx_frame_generation_untracked_near metres, "
+                      "camera motion beyond)");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_untracked_near, 15.0, "GPU",
+                      "near-zero: view distance in metres within which untracked pixels get zero motion");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
                     "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
@@ -261,6 +271,15 @@ bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error, float s
   [e setTexture:inputs.motion atIndex:1];
   [e setTexture:inputs.previous_depth atIndex:2];
   [e setBytes:&p length:sizeof(p) atIndex:0];
+  // x: 0 camera, 1 zero, 2 zero nearer than y metres (frame generation only; the scaler fill
+  // never writes camera motion).
+  std::array<float,2> untracked{0.0f,0.0f};
+  if(!scaler){
+    const std::string mode=REXCVAR_GET(gta4_metalfx_frame_generation_untracked_motion);
+    untracked={mode=="zero"?1.0f:mode=="near-zero"?2.0f:0.0f,
+               float(REXCVAR_GET(gta4_metalfx_frame_generation_untracked_near))};
+  }
+  [e setBytes:untracked.data() length:sizeof(untracked) atIndex:2];
   Dispatch(e,camera_motion_fill_,config.input_width,config.input_height);
   [e endEncoding];
   return true;

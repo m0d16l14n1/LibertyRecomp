@@ -533,7 +533,9 @@ struct FrameInterpolation::State {
   uint64_t native_encodes = 0, hop_encodes = 0;
   bool native4_unavailable = false;
   id<MTLComputePipelineState> composite = nil, overlay = nil;
-  std::array<Slot, 2> slots{};
+  // Three: a slot is reused three frames later. With two, the frame that last wrote it was
+  // often still scheduled on the GPU (2-3 frames in flight), and every other frame was skipped.
+  std::array<Slot, 3> slots{};
   size_t cursor = 0, previous = 0, owned = 0, limit = 0;
   bool encoded = false, restart_instance = false;
   std::shared_ptr<FailureState> failures = std::make_shared<FailureState>();
@@ -707,7 +709,12 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     }
     auto& slot = s.slots[s.cursor];
     if (!Available(slot.owner) || !slot.lease.expired()) {
-      error = "interpolated pair is still in flight or leased";
+      // Which one holds the slot: the GPU (owner status 0-3: not enqueued .. scheduled) or the
+      // presenter's lease on the generated and real images.
+      id<MTLCommandBuffer> owner = slot.owner;
+      error = "interpolated pair is still in flight or leased: owner-status=" +
+              (owner ? std::to_string(int(owner.status)) : std::string("none")) +
+              " leased=" + (slot.lease.expired() ? "no" : "yes");
       return false;
     }
     if (s.restart_instance || (decision.reset && s.encoded)) {

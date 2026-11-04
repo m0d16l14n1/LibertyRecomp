@@ -1,6 +1,7 @@
 # Frame generation and MetalFX denoising: where the work stands
 
-Written 2026-11-04, before a reboot, so the work can resume. For the Metal 4 renderer in general see
+Written 2026-11-04, before a reboot, so the work can resume; updated the same evening after the
+Metal 4 + FG investigation. For the Metal 4 renderer in general see
 `docs/METAL4.md`. For ray tracing see `docs/RAYTRACING.md`.
 
 ## Goal
@@ -22,13 +23,15 @@ The helper agent writes patches; the main session builds, tests and benchmarks.
   - `_dump` (diagnostics).
 - `gta4_metal_api = metal3 | metal4`. Under `metal4` the renderer encodes through the Metal 4 proxy
   (`src/ui/metal/metal4_queue.mm`).
-- Denoiser, from the helper's patches, not applied yet: `gta4_metal_raytracing_denoiser = metalfx`. It needs
-  `gta4_metal_api=metal4` and `gta4_metal_raytracing=ao`.
+- Denoiser: `gta4_metal_raytracing_denoiser = native | metalfx` (default native). `metalfx` needs
+  `gta4_metal_api=metal4`, `gta4_metal_raytracing=ao` and MetalFX AA; otherwise it stays native. Debug view:
+  `gta4_metal_raytracing_ao_view=guides`. Details in `docs/RAYTRACING.md`.
 
 ## Code
 
 - `src/graphics/gta4_metal/temporal/effects.mm`, `FrameInterpolation`:
-  - Configure makes the Metal 3 `MTLFXFrameInterpolator` and a ring of **2 slots**. Each slot holds:
+  - Configure makes the Metal 3 `MTLFXFrameInterpolator` and a ring of **3 slots** (2 until the
+    evening of 2026-11-04, see Findings). Each slot holds:
     - `scene`: the previous real scene;
     - `real`: the real image with the UI;
     - `generated`.
@@ -44,33 +47,71 @@ The helper agent writes patches; the main session builds, tests and benchmarks.
     - If the native interpolator is unavailable it keeps the Metal 3 hop (`EncodeMetal3`).
   - A slot is reused only when `Available(slot.owner)` holds (the owning command buffer reports `status >=
     Completed`) and the presenter's lease has expired. Otherwise the frame is skipped with "interpolated
-    pair is still in flight or leased".
+    pair is still in flight or leased: owner-status=N leased=yes|no" (N is the owner's
+    `MTLCommandBufferStatus`, 3 = scheduled; `leased=yes` means the presenter still holds the pair).
 - `temporal/live.mm`: calls `Encode`, then logs `TakeNotice()`. The temporal library cannot use REXLOG,
   because the temporal unit tests link it alone without spdlog. Messages go through
   `FrameInterpolation::TakeNotice()` and are logged in `live.mm`.
 - `present.mm`: logs a stats line every 300 frames:
   `gta4-metal-framegen frame=N native-mtl4fx=N metal3-hop=N`.
 - `src/ui/metal/metal4_queue.mm`: the proxy command buffer's `status`. It is set to Completed only in
-  the MTL4 commit feedback (around line 665).
+  the MTL4 commit feedback (around line 665). `encodeWaitForEvent` now commits the open part first when it
+  already has encoders, so a queue wait gates only the work after it (see Findings, 3).
+- `src/ui/metal/presenter.mm`: shows a pair as generated, then real. The real image is painted only once
+  the generated image's display command buffer has completed (`pending_generated_done`), and a failed
+  mailbox refresh keeps its previous `ready_value` (see Findings, 4).
 
-## State of the working tree (uncommitted)
+## State of the tree
 
-The working tree holds one batch, not yet committed. A copy of the diff is in
-`~/Library/Application Support/LibertyRecomp/wip-2026-11-04/working-tree.diff`.
-- rt12: sampled timers, `gta4_metal_memo_targets`, CaptureBuffer handle memo (draw/renderer/resources files).
-- Frame generation:
-  - the helper's fg1 (native MTL4FX interpolator) and fg2 (stats line);
-  - the TakeNotice build fix.
-- The action bench: `tools/perf/pads/action-bench.pad`, plus the new dev pad world commands in
-  `gta4-recomp/src/gta4_dev_pad.cpp` and `gta4_dev_world.cpp`:
-  - `heli`, `water`, `weapon`, `peds`, `cars`, `explode`, `boom`, `where`, `native`.
+Committed: 175b729d (rt12 per-draw CPU), e547e815 (action pad and dev pad world commands), 0cb320e5
+(native MTL4FX frame interpolator, fg1 + fg2 + the TakeNotice build fix).
 
-**Not applied yet:** the helper's denoiser patches, `dn1-metalfx-denoiser-module.patch` and
-`dn2-denoiser-hook-draw.patch`.
-- They are saved in `~/Library/Application Support/LibertyRecomp/wip-2026-11-04/helper-fg/`, because `/private/tmp`
-  is wiped by the reboot.
-- dn1 calls `REXLOG_INFO`/`REXLOG_WARN` inside `temporal/effects.mm`. That breaks the
-  `rex-metal-temporal` build in the same way fg1 did. Route those messages through a notice that `live.mm` logs.
+Uncommitted batch, to build and bench together:
+- the MetalFX denoiser (`helper-fg/dn-metalfx-denoiser-rebased.patch`: dn1 + dn2 rebased, REXLOG in
+  `temporal/effects.mm` routed through `AntiAliasing::TakeNotice()`);
+- the FG ring at 3 slots and the skip-reason string (`temporal/effects.mm`);
+- the proxy wait split (`helper-fg/m4-wait-split-proxy.patch`, `metal4_queue.mm`);
+- the presenter pair pacing and ready-value fix (`helper-fg/presenter-ready-and-pair-pacing.patch`);
+- the dev pad `peds` retry (`helper-fg/devpad-peds-retry.patch`, `gta4_dev_world.cpp`).
+
+## Findings, 2026-11-04 evening
+
+1. **The b1 bench was void.** A Virtualization.framework VM started around 20:56 and kept the GPU at
+   100% (IOAccelerator Device Utilization): b1-m3 fell from 28 to 4 fps with gpu_ms at 190. Before a bench,
+   check that no VM or other GPU user is running (Activity Monitor's GPU history, or
+   `ioreg -l | grep "Device Utilization"`).
+2. **Slots held by the GPU (hypothesis 1, confirmed on Metal 3 + FG).** The skip reasons in b1-m3fg were
+   163 `owner-status=3` (scheduled, not yet completed), 33 `leased=yes` and 1 `owner-status=2`. With 2-3
+   frames in flight a slot is often still running when it comes round again, so the ring is now 3 slots.
+   At 4K output that is 9 RGBA16Float images, about 600 MB, inside the 1 GB per-effect budget
+   (`OwnedTextureBudget`); the AA ring adds 3 more (about 200 MB).
+3. **Metal 4: the mailbox wait held the whole frame (root cause of generated=0).** `present.mm` encodes
+   `BeginWrite` (wait for the display queue's `display_done`) before the mailbox copy. On Metal 3 that wait
+   gates only the commands after it. The proxy recorded it and issued `[MTL4CommandQueue waitForEvent:]`
+   before committing the open part, so everything encoded in that part (the scene tail, the interpolator,
+   the composes) waited for the display queue to paint the previous image, that is, for the next vsync.
+   `render_ready` was then signalled late, the generated and the real display buffers (both waiting on it)
+   were released together and presented in one refresh, and the generated drawable was always replaced:
+   `generated=0`, `not-displayed=2980`, `shown-fps=0.7`. The late chain also kept both FG slots leased (one
+   pair in `pending_pair`, the next in the mailbox output), hence the 698 skips. Fix: the proxy commits the
+   open part before recording a wait (`m4-wait-split-proxy.patch`).
+4. **Pair pacing.** Even without that wait, a slow GPU tail can release both display buffers of a pair in
+   one refresh. Timed presentation is not available with `CAMetalDisplayLink`, and an earlier ready value
+   for the generated image gains nothing (both come from the same submit). The presenter now holds the real
+   image until the generated image's display buffer has completed, so the two are at least one refresh
+   apart. Also fixed: a failed mailbox refresh no longer leaves an unsignalled `ready_value`.
+5. **EncodeMetal4's empty encoder** (hypothesis 3) is correct and not the problem: its queue barrier makes
+   MetalFX wait for the frame's earlier work, which it needs anyway, and later work is ordered by each
+   proxy encoder's own start barrier, as for every other pass.
+6. **The MetalFX temporal scaler on Metal 4** has neither problem: it encodes no event waits, its 3-slot
+   ring is released by the proxy's completion handler, and the presenter never holds its images.
+7. **`Flush(true)` in the FG path** (`present.mm`, after `ValidateMotionCoverage`) runs only with
+   `gta4_metalfx_frame_generation_camera_motion=false`. It is the CPU wait for the motion-coverage
+   readback that decides whether the frame may be interpolated. With the default (camera motion fill on)
+   it never runs.
+8. **Dev pad `peds`.** `CREATE_RANDOM_CHAR` makes nothing while no ped models are streamed in around the
+   player, which stopped the Metal 4 + FG pad. `peds` now retries each frame, falls back to `CREATE_CHAR`
+   with `M_Y_THIEF` after 2 s, and replies `ok N` after 10 s at most, so the pad never stops there.
 
 ## Measurements so far
 
@@ -102,7 +143,10 @@ A later Metal 3 smoke run on the same route (thr-smoke, after the threading fix)
 
 It also reached `peds` without an error. Swap was still full.
 
-## Hypotheses for the Metal 4 + FG collapse, in the order to check them
+## Hypotheses for the Metal 4 + FG collapse (status: see Findings)
+
+Kept for the record. 1 was confirmed and fixed (3 slots); 2 was a consequence of the whole-part wait
+(Findings, 3); 3 was ruled out; 4 was real but is gone after the reboot.
 
 1. **Slots look busy for too long.** `Available()` reads the proxy's `status`, which becomes Completed only
    when the MTL4 commit feedback arrives. With 2 slots, a GPU or feedback delay of more than a frame skips
@@ -117,29 +161,21 @@ It also reached `peds` without an error. Swap was still full.
    time grew to 65 ms in heli.
 4. Swap pressure inflated all of it. Re-measure first.
 
-## Next steps after the reboot
+## Next steps
 
-1. Confirm swap is back near 0 (`sysctl vm.swapusage`).
-2. Run one interleaved batch on the action pad:
-   - Metal 3;
-   - Metal 3 + FG;
-   - Metal 4;
-   - Metal 4 + FG.
-
-   Example:
-   `tools/perf/route_bench.sh pad career-street tools/perf/pads/action-bench.pad NAME --gta4_metal_api=metal4
-   --gta4_metalfx_frame_generation=true --fullscreen=false`
-   - Pass each setting once only: a duplicate makes CLI11 reject the command line, and the pad never runs.
-   - Let the Air rest between runs.
-   - Read `summary.txt`, and `game.log` for the framegen stats and the skip warnings.
-   - The scripts are in `wip-2026-11-04/scripts/`: `action2.sh` runs the Metal 3 / Metal 4 + FG pair, and
-     `build_m4.sh` builds and runs the unit tests.
-3. Fix the slot and lease problem using the hypotheses above. Then compare Metal 3 + FG against Metal 4 + FG.
-4. Apply dn1 and dn2, adapting the REXLOG calls.
-   - Test with `--gta4_metal_api=metal4 --gta4_metal_raytracing=ao --gta4_metal_raytracing_denoiser=metalfx`
-     and MetalFX AA.
-   - Take screenshots with `gta4_metal_raytracing_ao_view=guides`.
+1. Check that the GPU is idle (no VM) and swap is near 0 (`sysctl vm.swapusage`).
+2. Build the uncommitted batch and run the unit tests (`build_m4.sh`).
+3. Smoke runs:
+   - Metal 4 + FG on the action pad: `generated` > 0 in every `gta4-metal-display` window, `not-displayed`
+     near 0, few skips, and which reason they give;
+   - the denoiser guides view (`--gta4_metal_api=metal4 --gta4_metal_raytracing=ao
+     --gta4_metal_raytracing_denoiser=metalfx --gta4_metal_raytracing_ao_view=guides`, MetalFX AA).
+4. One interleaved bench pass on the action pad: Metal 3, Metal 3 + FG, Metal 4, Metal 4 + FG, plus the
+   denoiser against native AO. Pass each setting once only (a duplicate makes CLI11 reject the command line
+   and the pad never runs). Let the Air rest between runs.
+   - Example: `tools/perf/route_bench.sh pad career-street tools/perf/pads/action-bench.pad NAME
+     --gta4_metal_api=metal4 --gta4_metalfx_frame_generation=true --fullscreen=false`.
    - Prior result from MCLA: `MTL4FXTemporalDenoisedScaler` used for its AO cost +8 ms GPU and smoothed
      textures away. Judge ours on image quality as well as cost.
-5. Commit the batch in parts: rt12; the action bench and dev pad; native MTL4FX frame generation; the
-   denoiser. Then do one bench pass for the whole batch (5-10 changes per bench pass, not one per patch).
+5. Commit in parts: the denoiser; the FG ring and skip reason; the proxy wait split; the presenter pacing;
+   the dev pad `peds` retry.
