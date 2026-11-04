@@ -145,6 +145,8 @@ struct Renderer::State {
   raytracing::ShadowSettings raytracing_shadow_settings;
   id<MTLTexture> raytracing_shadow_texture=nil;  // this frame's shadows, input size, RG16Float
   uint64_t raytracing_shadow_draws=0,raytracing_shadow_shown=0;
+  // CPU on the encode thread: Draw() in every mode, and the ray-tracing parts of it.
+  raytracing::CpuTime draw_cpu_time,raytracing_prelude_time,raytracing_hook_time,raytracing_site_time;
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
   // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about

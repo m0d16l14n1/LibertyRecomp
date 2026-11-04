@@ -16,8 +16,9 @@ namespace rex::ui::metal {
 //  - MTL4CommandQueue, MTL4CommandBuffer and pooled MTL4CommandAllocators;
 //  - bindings go to MTL4ArgumentTables (GPU addresses and resource IDs);
 //    set*Bytes copies into a per-command-buffer transient buffer;
-//  - every bound or declared resource joins the command buffer's residency set and
-//    is retained until the GPU completes it (MTL4 command buffers retain nothing);
+//  - every bound or declared resource joins the command buffer's residency set (or, with
+//    gta4_metal4_residency = persistent, one queue-level set) and is retained until the GPU
+//    completes it (MTL4 command buffers retain nothing);
 //  - blits run on an MTL4ComputeCommandEncoder;
 //  - hazards: a queue barrier (all stages, device visibility) at the start of every
 //    encoder and an encoder barrier between copies and between dispatches. That is at
@@ -52,6 +53,9 @@ void AddLayerResidency(id<MTLCommandQueue> queue, CAMetalLayer* layer);
 struct Metal4Statistics {
   uint64_t command_buffers = 0, parts = 0, encoders = 0, barriers = 0;
   uint64_t transient_bytes = 0, resident = 0, metal3_hops = 0;
+  uint64_t binds = 0, bind_hits = 0;                    // buffer/texture binds, and those the bind cache served
+  uint64_t fragment_barriers = 0, vertex_barriers = 0;  // render barriers before fragment only; in-pass vertex waits
+  uint64_t evicted = 0, residency_commits = 0;          // gta4_metal4_residency
 };
 // Cumulative counters of a Metal 4 queue (zero on Metal 3).
 Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue);

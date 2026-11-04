@@ -299,6 +299,7 @@ bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
 bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<const std::byte> bytes,
     std::string& error) {
   using namespace gta4_native;
+  raytracing::ScopedCpuTime draw_timed(draw_cpu_time);  // every mode: the off/on baseline (gta4-metal-draw-cpu)
   diagnostic_point="draw.guest-state";
   uint32_t guest_device=0,type=0,first=0,count=0,up_stride=0,up_address=0,up_size=0,restart_value=0;
   int32_t base_vertex=0;
@@ -830,6 +831,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     key.primitive=type;key.indexed=source_indexed;key.restart=restart;
     key.restart_index=restart?restart_value:0;
     if(raytracing_mode!=raytracing::Mode::kOff&&generation&&pipeline->capture){
+      raytracing::ScopedCpuTime timed(raytracing_prelude_time);
       capture_geometry.identity=raytracing::GeometryIdentityOf(key);
       capture_geometry.placement=raytracing::PlacementOf(constant_reads,captured_vertex);
     }
@@ -1018,6 +1020,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   if(rt_lighting){
     ++raytracing_ao_lighting_draws;
     if(raytracing_ao_sequence!=temporal.metadata.sequence&&raytracing_capture.has_camera()){
+      // The whole hook: pass split (EndRender, BeginRender), depth snapshot, scene and trace encodes.
+      raytracing::ScopedCpuTime hook_timed(raytracing_hook_time);
       raytracing_ao_sequence=temporal.metadata.sequence;
       raytracing_ao_texture=nil; raytracing_shadow_texture=nil;
       const auto clip_to_world=raytracing::ClipToWorldColumns(temporal.actual_projection,temporal.actual_inverse);
@@ -1148,6 +1152,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   draw_encoded=true;
   if (fire_active) [render popDebugGroup];
   if(capture_geometry.identity&&execution_camera_matches&&!sky_capture){
+    raytracing::ScopedCpuTime site_timed(raytracing_site_time);  // Capture::Draw plus the call site
     if(!pipeline->capture_state){
       std::lock_guard lock(pipeline->capture->mutex);
       if(pipeline->capture->complete)pipeline->capture_state=pipeline->capture->state;

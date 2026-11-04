@@ -4,13 +4,20 @@
 
 REXCVAR_DEFINE_STRING(gta4_metal4_render_barrier, "full", "GPU/Metal",
     "Metal 4 queue barrier before each render pass: full (wait for all earlier work before vertex and "
-    "fragment stages) or fragment (measurement only: vertex work may overlap earlier passes)");
+    "fragment stages), fragment (measurement only: vertex work may overlap earlier passes) or tracked "
+    "(fragment after render-only work; full after compute, copies or a Metal 3 hop; a vertex barrier "
+    "inside the pass when it samples an earlier pass's attachment in the vertex stage)");
+REXCVAR_DEFINE_STRING(gta4_metal4_residency, "frame", "GPU/Metal",
+    "Metal 4 residency: frame (each command buffer rebuilds its own residency set) or persistent "
+    "(one queue-level set; resources join once and leave after about 1000 command buffers unused)");
 
 #import <objc/runtime.h>
 
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -42,6 +49,24 @@ bool Conforms(id object, Protocol* protocol) {
   return conforms;
 }
 enum class Kind { kUnknown, kTexture, kBuffer };
+enum class RenderBarrier { kFull, kFragment, kTracked };
+// Persistent residency: an allocation leaves the queue set after this many command buffers unused.
+constexpr uint64_t kPersistentIdleCommandBuffers = 1000;
+struct Persisted {
+  __strong id<MTLAllocation> allocation;  // keeps the address from being reused while it is in the set
+  uint64_t last = 0;
+};
+// Per-command-buffer front of _seen for the bind hot path: a resource already tracked in
+// this command buffer and its GPU address or resource ID. Direct-mapped, no eviction cost.
+constexpr size_t kBindCacheSize = 512;
+struct BindCacheEntry {
+  const void* key = nullptr;
+  uint64_t value = 0;
+};
+inline size_t BindCacheIndex(const void* p) {
+  const uintptr_t v = reinterpret_cast<uintptr_t>(p);
+  return ((v >> 4) ^ (v >> 13)) & (kBindCacheSize - 1);
+}
 }  // namespace
 
 @class LXCommandBuffer;
@@ -61,7 +86,16 @@ enum class Kind { kUnknown, kTexture, kBuffer };
   NSString* _label;
   id<MTL4Compiler> _compiler;
   MTLStages _renderBefore;
+  RenderBarrier _renderBarrier;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
+  std::atomic<uint64_t> _binds, _bindHits, _fragmentBarriers, _vertexBarriers, _evicted, _residencyCommits;
+  // gta4_metal4_residency = persistent
+  BOOL _persistentResidency;
+  std::mutex _persistLock;
+  id<MTLResidencySet> _persistent;
+  std::unordered_map<const void*, Persisted> _persisted;
+  uint64_t _commandBufferIndex;
+  bool _persistDirty;
 }
 - (id<MTL4CommandAllocator>)takeAllocator;
 - (id<MTL4CommandBuffer>)takeBuffer;
@@ -70,6 +104,8 @@ enum class Kind { kUnknown, kTexture, kBuffer };
 - (id<MTL4ArgumentTable>)takeTable;
 - (void)giveTable:(id<MTL4ArgumentTable>)table;
 - (id<MTLCommandQueue>)side3;
+- (void)persist:(id<MTLAllocation>)allocation;
+- (void)commitPersistent:(BOOL)evict;
 @end
 
 @interface LXCommandBuffer : NSObject <MTLCommandBuffer> {
@@ -81,6 +117,9 @@ enum class Kind { kUnknown, kTexture, kBuffer };
   id<MTLResidencySet> _set;
   NSMutableArray* _retained;
   std::unordered_set<const void*> _seen;
+  BindCacheEntry _bindCache[kBindCacheSize];
+  BOOL _nonRenderSinceRender;              // tracked barriers: compute, copies or a hop since the last render pass
+  std::unordered_set<const void*> _attachments;  // tracked barriers: textures written as attachments so far
   id<MTLBuffer> _chunk;
   NSUInteger _used;
   NSMutableArray<id<MTLBuffer>>* _chunks;
@@ -102,6 +141,9 @@ enum class Kind { kUnknown, kTexture, kBuffer };
 }
 - (void)track:(id<MTLResource>)resource;
 - (void)track:(id<MTLResource>)resource kind:(Kind)kind;
+- (uint64_t)bufferAddress:(id<MTLBuffer>)buffer;
+- (MTLResourceID)textureID:(id<MTLTexture>)texture;
+- (BOOL)isAttachment:(id<MTLTexture>)texture;
 - (void)trackHeap:(id<MTLHeap>)heap;
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length;
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
@@ -119,6 +161,7 @@ static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
   LXCommandBuffer* _owner;
   id<MTL4RenderCommandEncoder> _e;
   id<MTL4ArgumentTable> _vt, _ft;
+  BOOL _vertexBarrier;  // tracked barriers: this pass already waits before its vertex stage
 }
 @end
 
@@ -147,13 +190,22 @@ static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
 
 static void BindBuffer(LXCommandBuffer* owner, id<MTL4ArgumentTable> t, id<MTLBuffer> b, NSUInteger offset, NSUInteger index) {
   if (!b) return;
-  [owner track:b kind:Kind::kBuffer];
-  [t setAddress:b.gpuAddress + offset atIndex:index];
+  [t setAddress:[owner bufferAddress:b] + offset atIndex:index];
 }
 static void BindTexture(LXCommandBuffer* owner, id<MTL4ArgumentTable> t, id<MTLTexture> texture, NSUInteger index) {
-  MTLResourceID rid{};
-  if (texture) { [owner track:texture kind:Kind::kTexture]; rid = texture.gpuResourceID; }
-  [t setTexture:rid atIndex:index];
+  [t setTexture:texture ? [owner textureID:texture] : MTLResourceID{} atIndex:index];
+}
+// Tracked barriers: a vertex-stage read of a texture an earlier pass rendered into needs the
+// vertex stage to wait too (the pass started with a fragment-only barrier).
+static void BindVertexTexture(LXRender* r, id<MTLTexture> texture, NSUInteger index) {
+  LXCommandBuffer* owner = r->_owner;
+  if (texture && !r->_vertexBarrier && owner->_q->_renderBarrier == RenderBarrier::kTracked &&
+      [owner isAttachment:texture]) {
+    [r->_e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageVertex visibilityOptions:MTL4VisibilityOptionDevice];
+    r->_vertexBarrier = YES;
+    ++owner->_q->_barriers; ++owner->_q->_vertexBarriers;
+  }
+  BindTexture(owner, r->_vt, texture, index);
 }
 static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NSUInteger index) {
   MTLResourceID rid{};
@@ -176,10 +228,10 @@ static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NS
 - (void)setFragmentBytes:(const void*)p length:(NSUInteger)n atIndex:(NSUInteger)i {
   [_ft setAddress:[_owner bytes:p length:n] atIndex:i];
 }
-- (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { BindTexture(_owner, _vt, t, i); }
+- (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { BindVertexTexture(self, t, i); }
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i { BindTexture(_owner, _ft, t, i); }
 - (void)setVertexTextures:(id<MTLTexture> const[])t withRange:(NSRange)r {
-  for (NSUInteger i = 0; i < r.length; ++i) BindTexture(_owner, _vt, t[i], r.location + i);
+  for (NSUInteger i = 0; i < r.length; ++i) BindVertexTexture(self, t[i], r.location + i);
 }
 - (void)setFragmentTextures:(id<MTLTexture> const[])t withRange:(NSRange)r {
   for (NSUInteger i = 0; i < r.length; ++i) BindTexture(_owner, _ft, t[i], r.location + i);
@@ -351,8 +403,13 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   _drawables = [NSMutableArray new];
   _done = dispatch_group_create();
   _status = MTLCommandBufferStatusNotEnqueued;
-  _set = [q takeSet];
+  _set = q->_persistentResidency ? nil : [q takeSet];
+  _nonRenderSinceRender = YES;  // what the previous command buffer ended with is unknown here
   ++q->_commandBuffers;
+  if (q->_persistentResidency) {
+    std::lock_guard<std::mutex> lock(q->_persistLock);
+    ++q->_commandBufferIndex;
+  }
   [self beginPart];
   return self;
 }
@@ -394,14 +451,49 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
     if (id<MTLTexture> parent = texture.parentTexture) { [self track:parent kind:Kind::kTexture]; return; }
     if (id<MTLBuffer> buffer = texture.buffer) { [self track:buffer kind:Kind::kBuffer]; return; }
   }
+  if (_q->_persistentResidency) { [_q persist:allocation]; return; }
   [_set addAllocation:allocation];
   ++_q->_resident;
 }
 - (void)trackHeap:(id<MTLHeap>)heap {
   if (!heap || !_seen.insert((__bridge const void*)heap).second) return;
   [_retained addObject:heap];
+  if (_q->_persistentResidency) { [_q persist:heap]; return; }
   [_set addAllocation:heap];
   ++_q->_resident;
+}
+// The bind hot path: one direct-mapped probe instead of a hash-set insert and a message for
+// the address on every bind. The entry is valid for this command buffer, which retains the
+// resource (no address reuse while it lives).
+- (uint64_t)bufferAddress:(id<MTLBuffer>)buffer {
+  ++_q->_binds;
+  BindCacheEntry& e = _bindCache[BindCacheIndex((__bridge const void*)buffer)];
+  if (e.key == (__bridge const void*)buffer) { ++_q->_bindHits; return e.value; }
+  [self track:buffer kind:Kind::kBuffer];
+  e.key = (__bridge const void*)buffer;
+  e.value = buffer.gpuAddress;
+  return e.value;
+}
+- (MTLResourceID)textureID:(id<MTLTexture>)texture {
+  ++_q->_binds;
+  BindCacheEntry& e = _bindCache[BindCacheIndex((__bridge const void*)texture)];
+  MTLResourceID rid{};
+  static_assert(sizeof(rid) == sizeof(e.value));
+  if (e.key == (__bridge const void*)texture) {
+    ++_q->_bindHits;
+    std::memcpy(&rid, &e.value, sizeof(rid));
+    return rid;
+  }
+  [self track:texture kind:Kind::kTexture];
+  rid = texture.gpuResourceID;
+  e.key = (__bridge const void*)texture;
+  std::memcpy(&e.value, &rid, sizeof(rid));
+  return rid;
+}
+- (BOOL)isAttachment:(id<MTLTexture>)texture {
+  if (_attachments.count((__bridge const void*)texture)) return YES;
+  id<MTLTexture> parent = texture.parentTexture;
+  return parent && _attachments.count((__bridge const void*)parent);
 }
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length {
   NSUInteger offset = (_used + kTransientAlignment - 1) & ~(kTransientAlignment - 1);
@@ -423,14 +515,20 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
     MTLRenderPassColorAttachmentDescriptor* a = d.colorAttachments[i];
     if (!a.texture) continue;
     [self track:a.texture kind:Kind::kTexture]; [self track:a.resolveTexture kind:Kind::kTexture];
+    if (_q->_renderBarrier == RenderBarrier::kTracked) {
+      _attachments.insert((__bridge const void*)a.texture);
+      if (a.resolveTexture) _attachments.insert((__bridge const void*)a.resolveTexture);
+    }
     r.colorAttachments[i] = a;
   }
   if (d.depthAttachment.texture) {
     [self track:d.depthAttachment.texture kind:Kind::kTexture]; [self track:d.depthAttachment.resolveTexture kind:Kind::kTexture];
+    if (_q->_renderBarrier == RenderBarrier::kTracked) _attachments.insert((__bridge const void*)d.depthAttachment.texture);
     r.depthAttachment = d.depthAttachment;
   }
   if (d.stencilAttachment.texture) {
     [self track:d.stencilAttachment.texture kind:Kind::kTexture];
+    if (_q->_renderBarrier == RenderBarrier::kTracked) _attachments.insert((__bridge const void*)d.stencilAttachment.texture);
     r.stencilAttachment = d.stencilAttachment;
   }
   if (d.visibilityResultBuffer) {
@@ -444,7 +542,16 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   r.defaultRasterSampleCount = d.defaultRasterSampleCount;
   id<MTL4RenderCommandEncoder> e = [_cb renderCommandEncoderWithDescriptor:r];
   if (!e) return nil;
-  Barrier(_q, e, _q->_renderBefore);
+  MTLStages before = _q->_renderBefore;
+  if (_q->_renderBarrier == RenderBarrier::kTracked) {
+    // Only render passes since the last barrier: their writes are attachments (fragment stage),
+    // so this pass's fragment stage waits and its vertex stage may overlap. Anything else
+    // (compute, copies, a hop) may have written buffers the vertex stage reads: full barrier.
+    before = _nonRenderSinceRender ? kRenderStages : MTLStageFragment;
+    _nonRenderSinceRender = NO;
+  }
+  if (before == MTLStageFragment) ++_q->_fragmentBarriers;
+  Barrier(_q, e, before);
   LXRender* p = [LXRender new];
   p->_owner = self; p->_e = e;
   p->_vt = [_q takeTable]; p->_ft = [_q takeTable];
@@ -456,6 +563,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   if (!e) return nil;
+  _nonRenderSinceRender = YES;
   Barrier(_q, e, kComputeStages);
   LXCopy* p = [LXCopy new];
   p->_owner = self; p->_e = e; p->_first = YES;
@@ -466,6 +574,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (id<MTLComputeCommandEncoder>)computeEncoder:(BOOL)serial {
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   if (!e) return nil;
+  _nonRenderSinceRender = YES;
   Barrier(_q, e, kComputeStages);
   LXCompute* p = [LXCompute new];
   p->_owner = self; p->_e = e; p->_serial = serial;
@@ -496,8 +605,14 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 
 // Ends the open MTL4 command buffer and commits it; the last part carries the feedback.
 - (void)finishPart:(BOOL)last {
-  [_set commit];
-  [_cb useResidencySet:_set];
+  if (_q->_persistentResidency) {
+    // The queue-level set (added to the queue once) holds everything; commit what changed.
+    [_q commitPersistent:last];
+  } else {
+    [_set commit];
+    [_cb useResidencySet:_set];
+    ++_q->_residencyCommits;
+  }
   [_cb endCommandBuffer];
   id<MTL4CommandQueue> q4 = _q->_queue4;
   for (NSUInteger i = 0; i < _waitEvents.count; ++i) [q4 waitForEvent:_waitEvents[i] value:_waitValues[i]];
@@ -560,8 +675,10 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
         [_q->_buffers addObject:object];
       }
     }
-    [_set removeAllAllocations];
-    [_q->_sets addObject:_set];
+    if (_set) {
+      [_set removeAllAllocations];
+      [_q->_sets addObject:_set];
+    }
     [_q->_chunks addObjectsFromArray:_chunks];
   }
   [_finished removeAllObjects]; [_chunks removeAllObjects];
@@ -575,6 +692,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 }
 - (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body {
   for (id<MTLResource> r in resources) [self track:r];
+  _nonRenderSinceRender = YES;
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   Barrier(_q, e, kComputeStages);
   if (fence) [e updateFence:fence afterEncoderStages:kComputeStages];
@@ -584,6 +702,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 }
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body {
   id<MTLEvent> event = [_q->_device newEvent];
+  _nonRenderSinceRender = YES;
   [self finishPart:NO];
   [_q->_queue4 signalEvent:event value:1];
   id<MTLCommandBuffer> m3 = [[_q side3] commandBuffer];
@@ -662,6 +781,38 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   std::lock_guard<std::mutex> lock(_lock);
   [_tables addObject:table];
 }
+- (void)persist:(id<MTLAllocation>)allocation {
+  std::lock_guard<std::mutex> lock(_persistLock);
+  auto [it, inserted] = _persisted.try_emplace((__bridge const void*)allocation);
+  it->second.last = _commandBufferIndex;
+  if (!inserted) return;
+  it->second.allocation = allocation;
+  [_persistent addAllocation:allocation];
+  _persistDirty = true;
+  ++_resident;
+}
+- (void)commitPersistent:(BOOL)evict {
+  std::lock_guard<std::mutex> lock(_persistLock);
+  // Every 64 command buffers: drop what has not been bound for a long time. It is far past
+  // any command buffer in flight, and a later bind adds it again.
+  if (evict && _commandBufferIndex % 64 == 0 && _commandBufferIndex > kPersistentIdleCommandBuffers) {
+    const uint64_t oldest = _commandBufferIndex - kPersistentIdleCommandBuffers;
+    for (auto it = _persisted.begin(); it != _persisted.end();) {
+      if (it->second.last < oldest) {
+        [_persistent removeAllocation:it->second.allocation];
+        it = _persisted.erase(it);
+        _persistDirty = true;
+        ++_evicted;
+      } else {
+        ++it;
+      }
+    }
+  }
+  if (!_persistDirty) return;
+  [_persistent commit];
+  _persistDirty = false;
+  ++_residencyCommits;
+}
 - (id<MTLCommandQueue>)side3 {
   std::lock_guard<std::mutex> lock(_lock);
   if (!_side3) {
@@ -679,7 +830,10 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
     if (![device supportsFamily:MTLGPUFamilyMetal4]) { error = "The GPU has no Metal 4 support."; return nil; }
     LXQueue* q = [LXQueue new];
     q->_device = device;
-    q->_renderBefore = REXCVAR_GET(gta4_metal4_render_barrier) == "fragment" ? MTLStageFragment : kRenderStages;
+    const std::string barrier = REXCVAR_GET(gta4_metal4_render_barrier);
+    q->_renderBarrier = barrier == "fragment" ? RenderBarrier::kFragment
+                      : barrier == "tracked" ? RenderBarrier::kTracked : RenderBarrier::kFull;
+    q->_renderBefore = q->_renderBarrier == RenderBarrier::kFragment ? MTLStageFragment : kRenderStages;
     MTL4CommandQueueDescriptor* descriptor = [MTL4CommandQueueDescriptor new];
     descriptor.label = @"Liberty Metal 4";
     q->_queue4 = [device newMTL4CommandQueueWithDescriptor:descriptor error:nil];
@@ -693,6 +847,15 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       if ([device newArgumentTableWithDescriptor:d error:nil]) { q->_tableTextures = count; break; }
     }
     if (!q->_tableTextures) { error = "Metal 4 argument table creation failed."; return nil; }
+    if (REXCVAR_GET(gta4_metal4_residency) == "persistent") {
+      MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
+      d.initialCapacity = 8192;
+      d.label = @"Liberty Metal 4 persistent";
+      q->_persistent = [device newResidencySetWithDescriptor:d error:nil];
+      if (!q->_persistent) { error = "Metal 4 persistent residency set creation failed."; return nil; }
+      [q->_queue4 addResidencySet:q->_persistent];
+      q->_persistentResidency = YES;
+    }
     return q;
   }
   error = "Metal 4 needs macOS 26 or later.";
@@ -732,6 +895,8 @@ Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue) {
   LXQueue* q = (LXQueue*)queue;
   s.command_buffers = q->_commandBuffers; s.parts = q->_parts; s.encoders = q->_encoders;
   s.barriers = q->_barriers; s.transient_bytes = q->_transient; s.resident = q->_resident; s.metal3_hops = q->_hops;
+  s.binds = q->_binds; s.bind_hits = q->_bindHits; s.fragment_barriers = q->_fragmentBarriers;
+  s.vertex_barriers = q->_vertexBarriers; s.evicted = q->_evicted; s.residency_commits = q->_residencyCommits;
   return s;
 }
 

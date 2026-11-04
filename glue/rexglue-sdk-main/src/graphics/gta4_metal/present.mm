@@ -322,10 +322,23 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   fusion_cloud_ready = false;
   if (present.submitted_frame % 60 == 0) LogThermalStateChange(present.submitted_frame);
   if (present.submitted_frame <= 3 || present.submitted_frame % 300 == 0) {
+    {  // Encode-thread CPU in Draw(), per presented frame since the last line (any API, any RT mode).
+      static raytracing::CpuTime last; static uint64_t last_frame = 0;
+      const uint64_t frames = present.submitted_frame - last_frame;
+      if (frames) {
+        const double us = double(draw_cpu_time.ns - last.ns) / 1000.0 / double(frames);
+        const uint64_t draws = draw_cpu_time.calls - last.calls;
+        REXLOG_INFO("gta4-metal-draw-cpu frame={} draw-us={:.1f} draws={} ns-per-draw={:.0f}", present.submitted_frame, us,
+            draws / frames, draws ? double(draw_cpu_time.ns - last.ns) / double(draws) : 0.0);
+      }
+      last = draw_cpu_time; last_frame = present.submitted_frame;
+    }
     if (const auto m4 = ui::metal::Metal4StatisticsOf(context->queue); m4.command_buffers)
-      REXLOG_INFO("gta4-metal4 frame={} command-buffers={} parts={} encoders={} barriers={} transient-bytes={} resident-adds={} metal3-hops={}",
+      REXLOG_INFO("gta4-metal4 frame={} command-buffers={} parts={} encoders={} barriers={} transient-bytes={} resident-adds={} metal3-hops={} "
+          "binds={} bind-hits={} fragment-barriers={} vertex-barriers={} evicted={} residency-commits={}",
           present.submitted_frame, m4.command_buffers, m4.parts, m4.encoders, m4.barriers, m4.transient_bytes,
-          m4.resident, m4.metal3_hops);
+          m4.resident, m4.metal3_hops, m4.binds, m4.bind_hits, m4.fragment_barriers, m4.vertex_barriers, m4.evicted,
+          m4.residency_commits);
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed);
