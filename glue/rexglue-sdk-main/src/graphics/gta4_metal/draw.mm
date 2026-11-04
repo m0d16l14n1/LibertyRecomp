@@ -21,8 +21,47 @@
 #include <cstring>
 #include <limits>
 
+REXCVAR_DEFINE_STRING(gta4_metal_lighting_dump, "", "GPU/Diagnostics",
+    "Directory: for one frame per new value, log every deferred-lighting draw and dump raw the "
+    "textures the first global-contribution draw samples, its target before and after, and the scene depth");
+
 namespace rex::graphics::gta4_metal {
 namespace {
+// "<w> <h> <bytes per texel> <MTLPixelFormat>\n" then the rows, written when the GPU completes.
+void DumpLightingTexture(id<MTLCommandBuffer> commands, id<MTLTexture> image, const std::string& path) {
+  if (!image || image.textureType != MTLTextureType2D || image.sampleCount != 1) return;
+  NSUInteger texel = 0;
+  switch (image.pixelFormat) {
+    case MTLPixelFormatR8Unorm: texel = 1; break;
+    case MTLPixelFormatRG8Unorm: case MTLPixelFormatR16Float: case MTLPixelFormatR16Unorm: texel = 2; break;
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatBGRA8Unorm:
+    case MTLPixelFormatBGRA8Unorm_sRGB: case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatRG11B10Float:
+    case MTLPixelFormatRGB9E5Float: case MTLPixelFormatR32Float: case MTLPixelFormatRG16Float:
+    case MTLPixelFormatRG16Unorm: case MTLPixelFormatR32Uint: case MTLPixelFormatDepth32Float: texel = 4; break;
+    case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRG32Float: texel = 8; break;
+    case MTLPixelFormatRGBA32Float: texel = 16; break;
+    default: REXLOG_INFO("gta4-metal-lighting-dump skipped {} format={}", path, uint32_t(image.pixelFormat)); return;
+  }
+  const NSUInteger w = image.width, h = image.height, pitch = w * texel;
+  auto buffer = [commands.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+  auto blit = [commands blitCommandEncoder];
+  if (!buffer || !blit) { [blit endEncoding]; return; }
+  blit.label = @"Liberty lighting dump";
+  [blit copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(w, h, 1) toBuffer:buffer destinationOffset:0
+        destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+  [blit endEncoding];
+  const uint32_t format = uint32_t(image.pixelFormat);
+  const std::string file = path;
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    if (done.status != MTLCommandBufferStatusCompleted) return;
+    if (FILE* f = std::fopen(file.c_str(), "wb")) {
+      std::fprintf(f, "%lu %lu %lu %u\n", (unsigned long)w, (unsigned long)h, (unsigned long)texel, format);
+      std::fwrite(buffer.contents, 1, pitch * h, f);
+      std::fclose(f);
+    }
+  }];
+}
 template<class T> T ReadCommand(std::span<const std::byte> bytes) {
   T result{}; std::memcpy(&result,bytes.data(),sizeof(result)); return result;
 }
@@ -918,6 +957,52 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       if(sky_capture)sky_visibility=sky_capture->visibility;
       else REXLOG_ERROR("gta4-modern-exec: backend=metal event=sky-probe-unavailable {} reason={}",context,probe_error);
       if(!BeginRender(targets,error))return false;
+    }
+  }
+  // gta4_metal_lighting_dump=<dir> (diagnostics): one frame per new value.
+  {
+    static std::string dump_value; static uint64_t dump_sequence=~0ull;
+    static bool dump_written=false; static uint32_t dump_logged=0;
+    static __strong id<MTLTexture> dump_after=nil;
+    const std::string dump_dir=REXCVAR_GET(gta4_metal_lighting_dump);
+    const bool deferred=lighting.stage==RenderExecutionStage::kDeferredLighting;
+    if(dump_after&&deferred){
+      EndRender();
+      DumpLightingTexture(commands,dump_after,dump_value+"/global-target-after.raw");
+      dump_after=nil;
+      if(!BeginRender(targets,error))return false;
+    }
+    if(!dump_dir.empty()&&dump_dir!=dump_value&&deferred){
+      dump_value=dump_dir; dump_sequence=temporal.metadata.sequence; dump_written=false; dump_logged=0;
+    }
+    if(deferred&&!dump_dir.empty()&&dump_sequence==temporal.metadata.sequence&&dump_logged<64){
+      ++dump_logged;
+      std::string textures,colors;
+      for(uint32_t st=0;st<kTextureStageCount;++st)
+        if(auto im=sampled_images[st])textures+=fmt::format(" t{}={}:{}x{}",st,uint32_t(im.pixelFormat),im.width,im.height);
+      for(size_t i=0;i<targets.colors.size();++i)
+        if(targets.colors[i]&&targets.colors[i]->image)
+          colors+=fmt::format(" c{}={}:{}x{}",i,uint32_t(targets.colors[i]->image.pixelFormat),
+                              targets.colors[i]->image.width,targets.colors[i]->image.height);
+      REXLOG_INFO("gta4-metal-lighting-dump frame={} draw={} vs={:016X} {} ps={:016X} {} role={} blend={} depth-test={} "
+                  "depth-write={} count={} colors:{} depth={} textures:{}",
+          temporal.metadata.sequence,dump_logged,pipeline->vertex.hash,pipeline->vertex.name,
+          pipeline->has_pixel?pipeline->pixel.hash:0,pipeline->has_pixel?pipeline->pixel.name:"",uint32_t(lighting.role),
+          scene_blending,fixed.depth_enable,fixed.depth_write_enable,count,colors,
+          targets.depth&&targets.depth->image?uint32_t(targets.depth->image.pixelFormat):0,textures);
+      if(!dump_written&&lighting.role==LightPassRole::kGlobalContribution&&targets.colors[0]&&targets.colors[0]->image){
+        dump_written=true;
+        EndRender();
+        for(uint32_t st=0;st<kTextureStageCount;++st)
+          if(auto im=sampled_images[st])
+            DumpLightingTexture(commands,im,fmt::format("{}/global-t{}-{}.raw",dump_dir,st,uint32_t(im.pixelFormat)));
+        DumpLightingTexture(commands,targets.colors[0]->image,dump_dir+"/global-target-before.raw");
+        if(temporal.CaptureDepth(commands,error)&&temporal.depth_captured)
+          DumpLightingTexture(commands,temporal.inputs.depth,dump_dir+"/scene-depth.raw");
+        error.clear();
+        dump_after=targets.colors[0]->image;
+        if(!BeginRender(targets,error))return false;
+      }
     }
   }
   // Ray-traced AO: once per frame, just before the deferred lighting's global contribution
