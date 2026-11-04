@@ -335,6 +335,9 @@ uint8_t* XObject::CreateNative(uint32_t size) {
   SetNativePointer(mem + sizeof(X_OBJECT_HEADER), true);
 
   auto header = memory()->TranslateVirtual<X_OBJECT_HEADER*>(mem);
+  // Objects without a dispatch header (enumerators) have no room in their body for the
+  // handle; ObDereferenceObject finds them through this.
+  header->unk_04 = handle();
 
   auto object_type = memory()->SystemHeapAlloc(sizeof(X_OBJECT_TYPE));
   if (object_type) {

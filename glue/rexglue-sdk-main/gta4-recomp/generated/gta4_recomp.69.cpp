@@ -20959,8 +20959,9 @@ loc_829352EC:
 	// vexptefp v13,v13
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v13.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -20969,7 +20970,10 @@ loc_829352EC:
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v13.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v13.f32, r);
 	}
 	// vor v13,v13,v10
 	simde_mm_store_si128((simde__m128i*)ctx.v13.u8, simde_mm_or_si128(simde_mm_load_si128((simde__m128i*)ctx.v13.u8), simde_mm_load_si128((simde__m128i*)ctx.v10.u8)));
@@ -21551,8 +21555,9 @@ loc_82935620:
 	// vexptefp v13,v13
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v13.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -21561,7 +21566,10 @@ loc_82935620:
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v13.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v13.f32, r);
 	}
 	// vsel v0,v12,v0,v10
 	simde_mm_store_si128((simde__m128i*)ctx.v0.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*)ctx.v10.u8), simde_mm_load_si128((simde__m128i*)ctx.v12.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*)ctx.v10.u8), simde_mm_load_si128((simde__m128i*)ctx.v0.u8))));
@@ -21930,8 +21938,9 @@ DEFINE_REX_FUNC(sub_829357B8) {
 	ctx.fpscr.enableFlushModeUnconditional();
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v13.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -21940,7 +21949,10 @@ DEFINE_REX_FUNC(sub_829357B8) {
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v13.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v13.f32, r);
 	}
 	// vslw v12,v12,v4
 	{
@@ -26905,8 +26917,9 @@ loc_82937A20:
 	// vexptefp v8,v4
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v4.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -26915,7 +26928,10 @@ loc_82937A20:
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v8.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v8.f32, r);
 	}
 	// vrfiz v4,v12
 	simde_mm_store_ps(ctx.v4.f32, simde_mm_round_ps(simde_mm_load_ps(ctx.v12.f32), SIMDE_MM_FROUND_TO_ZERO | SIMDE_MM_FROUND_NO_EXC));
@@ -26997,8 +27013,9 @@ loc_82937A20:
 	// vexptefp v12,v12
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v12.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -27007,7 +27024,10 @@ loc_82937A20:
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v12.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v12.f32, r);
 	}
 	// vor v13,v12,v13
 	simde_mm_store_si128((simde__m128i*)ctx.v13.u8, simde_mm_or_si128(simde_mm_load_si128((simde__m128i*)ctx.v12.u8), simde_mm_load_si128((simde__m128i*)ctx.v13.u8)));
@@ -27315,8 +27335,9 @@ DEFINE_REX_FUNC(sub_82937C30) {
 	// vexptefp v12,v12
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v12.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -27325,7 +27346,10 @@ DEFINE_REX_FUNC(sub_82937C30) {
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v12.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v12.f32, r);
 	}
 	// vor v1,v0,v4
 	simde_mm_store_si128((simde__m128i*)ctx.v1.u8, simde_mm_or_si128(simde_mm_load_si128((simde__m128i*)ctx.v0.u8), simde_mm_load_si128((simde__m128i*)ctx.v4.u8)));
@@ -27443,8 +27467,9 @@ DEFINE_REX_FUNC(sub_82937C30) {
 	// vexptefp v13,v13
 	{
 		simde__m128 x = simde_mm_load_ps(ctx.v13.f32);
-		simde__m128 n = simde_mm_round_ps(x, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
-		simde__m128 f = simde_mm_sub_ps(x, n);
+		simde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));
+		simde__m128 n = simde_mm_round_ps(xc, SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);
+		simde__m128 f = simde_mm_sub_ps(xc, n);
 		simde__m128 p = simde_mm_set1_ps(1.8775767e-3f);
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(5.5826318e-2f));
@@ -27453,7 +27478,10 @@ DEFINE_REX_FUNC(sub_82937C30) {
 		p = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(1.0f));
 		simde__m128i exp_bits = simde_mm_slli_epi32(
 			simde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);
-		simde_mm_store_ps(ctx.v13.f32, simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));
+		simde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));
+		r = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));
+		r = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));
+		simde_mm_store_ps(ctx.v13.f32, r);
 	}
 	// vor v13,v13,v5
 	simde_mm_store_si128((simde__m128i*)ctx.v13.u8, simde_mm_or_si128(simde_mm_load_si128((simde__m128i*)ctx.v13.u8), simde_mm_load_si128((simde__m128i*)ctx.v5.u8)));

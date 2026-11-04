@@ -158,6 +158,16 @@ open "out/build/macos-release/LibertyRecomp/Liberty Recompiled.app"
 ```
 
 For Intel macOS, add `-DCMAKE_OSX_ARCHITECTURES=x86_64` to the configure command.
+
+The app bundles a Vulkan loader for the Vulkan renderers. Homebrew's `vulkan-loader` is built for the
+Mac it was poured on (macOS 27.0 for 1.4.363), and the bundle check refuses a library newer than the
+app's minimum (26.0). If the build stops with `Mach-O minimum ['27.0'] exceeds app minimum 26.0`, build
+the loader for 26.0 once and configure again; CMake picks up `out/vulkan-runtime` before Homebrew:
+
+```bash
+sh tools/macos/build_vulkan_runtime.sh
+cmake --preset macos-release
+```
 For Windows, substitute the appropriate Windows preset in the configure/build commands.
 The Windows and Linux presets set `VCPKG_ROOT` to the bundled checkout automatically.
 

@@ -97,13 +97,12 @@ set(MVK_INCLUDES
 add_library(MoltenVK SHARED ${MVK_SOURCES})
 target_include_directories(MoltenVK PRIVATE ${MVK_INCLUDES})
 target_compile_options(MoltenVK PRIVATE -w -Wno-elaborated-enum-base)
-# Match the selected LLVM installation on both Intel and Apple Silicon Macs.
+# Link the system libc++ like the rest of the app. Homebrew LLVM's own libc++ follows the
+# host macOS (23.1.4 is built for 27.0), so bundling it raised the app's real minimum above
+# CMAKE_OSX_DEPLOYMENT_TARGET and tools/verify_macos_bundle.py refused the bundle.
 get_filename_component(_mvk_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
 get_filename_component(_mvk_compiler_prefix "${_mvk_compiler_bin}" DIRECTORY)
 set(_mvk_llvm_cxx "${_mvk_compiler_prefix}/lib/c++")
-if(IS_DIRECTORY "${_mvk_llvm_cxx}")
-    target_link_options(MoltenVK PRIVATE "-L${_mvk_llvm_cxx}" "-Wl,-rpath,${_mvk_llvm_cxx}" -lc++)
-endif()
 target_link_libraries(MoltenVK PRIVATE
     ${APPKIT_LIBRARY} ${FOUNDATION_LIBRARY} ${IOKIT_LIBRARY} ${IOSURFACE_LIBRARY} ${METAL_LIBRARY} ${QUARTZCORE_LIBRARY}
     spirv-cross-msl MoltenVKCommon MoltenVKShaderConverter cereal::cereal)
