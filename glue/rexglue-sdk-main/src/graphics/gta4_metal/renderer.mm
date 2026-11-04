@@ -24,6 +24,9 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_material_bindings,true,"GPU","Reuse prepare
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_constant_sources, true, "GPU", "Keep bounded immutable CPU constant versions");
 REXCVAR_DEFINE_BOOL(gta4_metal_track_guest_constants, true, "GPU", "Reuse float banks while the guest reports no changes");
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
+REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
+REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
+REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_canary, false, "GPU/Diagnostics", "With gta4_metal_range_constants, upload whole banks with NaN in every register outside the read range, uncached");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_shadow, false, "GPU/Diagnostics", "Count what uploading only each shader's read constant range would send and reuse; changes no upload");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_pipeline_lookup, true, "GPU", "Reuse recent exact pipeline keys before the full cache lookup");
 REXCVAR_DEFINE_STRING(gta4_temporal_trace_vs, "", "GPU/Diagnostics", "Hex vertex shader hash whose draws log their temporal classification");
@@ -226,6 +229,9 @@ bool Renderer::State::Begin(std::string& error) {
   track_guest_constants = rex::cvar::Query<bool>("gta4_metal_track_guest_constants");
   audit_guest_constants = rex::cvar::Query<bool>("gta4_metal_audit_guest_constants");
   shadow_range_constants = rex::cvar::Query<bool>("gta4_metal_range_constants_shadow");
+  range_constants_enabled = rex::cvar::Query<bool>("gta4_metal_range_constants");
+  range_constants_vertex = rex::cvar::Query<bool>("gta4_metal_range_constants_vertex");
+  range_constants_canary = rex::cvar::Query<bool>("gta4_metal_range_constants_canary");
   guest_constants.Reset();
   cache_encoder_state = rex::cvar::Query<bool>("gta4_metal_cache_encoder_state");
   prepare_textures = rex::cvar::Query<bool>("gta4_metal_prepare_textures");
@@ -238,6 +244,7 @@ bool Renderer::State::Begin(std::string& error) {
   if (!cache_pipeline_lookup) pipeline_lookup.Reset();
   for (auto& bank : constant_banks) { bank.size = 0; bank.upload = {};bank.source_view=nullptr; }
   range_constants.Reset();
+  for (auto& bank : range_banks) bank.Reset();
   return true;
 }
 void Renderer::State::EndRender(std::source_location caller) {
@@ -351,6 +358,71 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
   }
   const auto* immutable_source=constants.Insert(hash,bytes,swap,upload,cache_constant_sources);
   return remember(upload,immutable_source);
+}
+
+Renderer::State::BankUpload Renderer::State::UploadRange(size_t index, std::span<const uint8_t> bytes,
+    ConstantRange requested, bool swap, std::string& error) {
+  if (bytes.empty() || !Begin(error)) return {};
+  if (swap && bytes.size() % sizeof(uint32_t)) { error = "Constant bank is not word-aligned"; return {}; }
+  const ConstantRange range = UploadRangeOf(requested, bytes.size());
+  const size_t offset = size_t(range.lo) * 16, size = size_t(range.registers()) * 16;
+  const auto view = bytes.subspan(offset, size);
+  const auto copy = [&](void* out) {
+    if (swap) gta4_native::core::CopyGuestWordsToHost(static_cast<uint8_t*>(out), view.data(), size);
+    else std::memcpy(out, view.data(), size);
+  };
+  const auto count = [&](size_t uploaded) {
+    constant_upload_bytes += uploaded;
+    if (index < guest_bank_upload_bytes.size()) { guest_bank_upload_bytes[index] += uploaded; ++guest_bank_uploads[index]; }
+  };
+  if (range_constants_canary) {
+    // Audit: whole bank, real values in [lo, hi] only. A read the mask missed sees NaN on screen.
+    // Uncached and never stored as a last bank, so tracking state is left as it is.
+    auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+    if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
+    std::fill_n(static_cast<uint32_t*>(upload.data), bytes.size() / sizeof(uint32_t), kConstantCanary);
+    copy(static_cast<uint8_t*>(upload.data) + offset);
+    ++range_constant_canaries; count(bytes.size());
+    return WholeBank(upload, bytes.size());
+  }
+  auto* last = index < range_banks.size() ? &range_banks[index] : nullptr;
+  const bool tracked = last && swap && track_guest_constants && !guest_constant_tracking_failed;
+  const auto result = [](const ui::metal::UploadSlice& slice, ConstantRange held) {
+    return BankUpload{slice, slice.gpu_address - uint64_t(held.lo) * 16, held};
+  };
+  if (last) {
+    const bool clean = tracked && guest_constants.Clean(index);
+    if (auto found = last->Find(range, bytes, clean)) {
+      if (clean) {
+        bool matches = true;
+        if (audit_guest_constants) { ++guest_constant_audits; matches = last->Matches(range, bytes); }
+        if (matches) { ++guest_constant_skips; return result(*found.upload, found.range); }
+        guest_constant_tracking_failed = true;
+        ++guest_constant_mismatches;
+        REXLOG_ERROR("gta4-metal-constant-audit: unreported change bank={} draw={} range=c{}-c{}; using exact snapshots",
+            index, draws, range.lo, range.hi);
+        found = last->Find(range, bytes, false);
+      }
+      if (found) {
+        ++constant_last_hits;
+        if (tracked && found.verified) guest_constants.Copied(index);
+        return result(*found.upload, found.range);
+      }
+    }
+  }
+  const auto remember = [&](const ui::metal::UploadSlice& upload) {
+    if (last) { last->Store(range, bytes, upload); if (tracked) guest_constants.Copied(index); }
+    return result(upload, range);
+  };
+  // Same key as Upload(): an entry with equal size and bytes holds these registers, whatever its origin.
+  const uint64_t hash = XXH3_64bits_withSeed(view.data(), size, swap ? 1 : 0);
+  if (const auto* cached = constants.Find(hash, view, swap)) { ++constant_hash_hits; return remember(*cached); }
+  auto upload = frame->uploads.Allocate(context->device, size, 16);
+  if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
+  copy(upload.data);
+  count(size);
+  constants.Insert(hash, view, swap, upload, cache_constant_sources);
+  return remember(upload);
 }
 
 bool Renderer::Submit(std::span<const std::byte> bytes,std::string& error,

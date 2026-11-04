@@ -754,6 +754,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   temporal_parameters.ui_mode=temporal_ui_mode;
   temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
   ui::metal::UploadSlice previous_vertex,previous_shared;
+  uint64_t previous_vertex_address=0;
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   if(targets.temporal_motion){
     std::array<uint8_t,4096> captured_vertex{};
@@ -799,7 +800,12 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       }
       std::memcpy(&prior_shared,history.previous->shared.data(),sizeof(prior_shared));
       standard_motion_depth&=temporal::StandardDepthViewport(prior_shared);
-      previous_vertex=Upload(history.previous->vertex,false,error);previous_shared=Upload(history.previous->shared,false,error);
+      // The variant runs the same vertex function on this bank, so it reads the current shader's range.
+      if(range_constants_enabled){
+        const auto previous=UploadRange(SIZE_MAX,history.previous->vertex,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
+        previous_vertex=previous.slice;previous_vertex_address=previous.address;
+      }else{previous_vertex=Upload(history.previous->vertex,false,error);previous_vertex_address=previous_vertex.gpu_address;}
+      previous_shared=Upload(history.previous->shared,false,error);
       if(shadow_range_constants){  // the variant reads the previous bank at the current shader's offsets
         ++previous_bank_uploads;previous_bank_range_bytes+=size_t(RangeOf(pipeline->vertex.float_constant_mask,256).registers())*16;
       }
@@ -821,10 +827,16 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     range_constants.Observe(0,guest.subspan(0x780,0x1000),RangeOf(pipeline->vertex.float_constant_mask,256),tracked&&guest_constants.Clean(0));
     if(pipeline->has_pixel)range_constants.Observe(1,guest.subspan(0x1780,0xE00),RangeOf(pipeline->pixel.float_constant_mask,224),tracked&&guest_constants.Clean(1));
   }
-  auto vertex_constants=Upload(guest.subspan(0x780,0x1000),true,error);
+  const auto vertex_bank=range_constants_enabled&&range_constants_vertex
+      ?UploadRange(0,guest.subspan(0x780,0x1000),RangeOf(pipeline->vertex.float_constant_mask,256),true,error)
+      :WholeBank(Upload(guest.subspan(0x780,0x1000),true,error),0x1000);
   // No fragment function can read this bank in a depth-only pipeline. Leave
   // its dirty observation pending so the next real fragment consumer refreshes.
-  auto pixel_constants=pipeline->has_pixel?Upload(guest.subspan(0x1780,0xE00),true,error):vertex_constants;
+  const auto pixel_bank=!pipeline->has_pixel?vertex_bank:range_constants_enabled
+      ?UploadRange(1,guest.subspan(0x1780,0xE00),RangeOf(pipeline->pixel.float_constant_mask,224),true,error)
+      :WholeBank(Upload(guest.subspan(0x1780,0xE00),true,error),0xE00);
+  const auto& vertex_constants=vertex_bank.slice;
+  const auto& pixel_constants=pixel_bank.slice;
   if(!pipeline->has_pixel)++skipped_pixel_constant_banks;
   auto shared_constants=Upload(Bytes(shared),false,error);
   auto heap_upload=Upload(Bytes(heaps),false,error);
@@ -878,16 +890,17 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         shared.modern_effects.azimuth_color_height[0],shared.modern_effects.azimuth_color_height[1],
         shared.modern_effects.azimuth_color_height[2],shared.modern_effects.azimuth_color_height[3],
         shared.modern_effects.cloud_mask_address!=0);
-    const auto constants=[&](const char* bank,const ui::metal::UploadSlice& slice,size_t first,size_t end){
-      const auto* values=static_cast<const std::array<float,4>*>(slice.data);
-      for(size_t i=first;i<end;++i){const auto& v=values[i];
+    const auto constants=[&](const char* bank,const BankUpload& upload,size_t first,size_t end){
+      const auto* values=static_cast<const std::array<float,4>*>(upload.slice.data);
+      // A range upload holds only the registers this shader reads.
+      for(size_t i=std::max<size_t>(first,upload.range.lo);i<end&&i<=upload.range.hi;++i){const auto& v=values[i-upload.range.lo];
         REXLOG_INFO("gta4-modern-exec: backend=metal event=sky-constant command={} bank={} register={} "
             "value={},{},{},{} finite={}",diagnostic_command,bank,i,v[0],v[1],v[2],v[3],
             std::all_of(v.begin(),v.end(),[](float x){return std::isfinite(x);}));
       }
     };
-    constants("vertex",vertex_constants,0,12); constants("vertex",vertex_constants,64,76);
-    constants("pixel",pixel_constants,64,91);
+    constants("vertex",vertex_bank,0,12); constants("vertex",vertex_bank,64,76);
+    constants("pixel",pixel_bank,64,91);
     for(uint32_t stage=0;stage<sampled_images.size();++stage)if(used&(1u<<stage)){
       const auto image=sampled_images[stage];
       REXLOG_INFO("gta4-modern-exec: backend=metal event=sky-texture command={} stage={} handle={:08X} "
@@ -909,11 +922,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   std::array<NSUInteger,5> argument_offsets{};
   for(size_t i=0;i<argument_offsets.size();++i) argument_offsets[i]=heap_upload.offset+i*sizeof(heaps[0]);
   bindings.Arguments(render,heap_upload.buffer,argument_offsets);
-  const std::array<uint64_t,3> push{vertex_constants.gpu_address,
-      pixel_constants.gpu_address,shared_constants.gpu_address};
+  const std::array<uint64_t,3> push{vertex_bank.address,
+      pixel_bank.address,shared_constants.gpu_address};
   bindings.Push(render,push);
   if(pipeline->temporal_variant){
-    const std::array<uint64_t,3> prior{previous_vertex?previous_vertex.gpu_address:push[0],push[1],previous_shared?previous_shared.gpu_address:push[2]};
+    const std::array<uint64_t,3> prior{previous_vertex?previous_vertex_address:push[0],push[1],previous_shared?previous_shared.gpu_address:push[2]};
     [render setVertexBytes:&temporal_parameters length:sizeof(temporal_parameters) atIndex:6];
     [render setFragmentBytes:&temporal_parameters length:sizeof(temporal_parameters) atIndex:6];
     [render setVertexBytes:prior.data() length:sizeof(prior) atIndex:7];

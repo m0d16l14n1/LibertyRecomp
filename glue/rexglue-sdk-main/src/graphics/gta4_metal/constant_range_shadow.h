@@ -117,4 +117,54 @@ class ConstantRangeShadow {
   std::vector<uint64_t> table_;
   size_t used_ = 0;
 };
+// Last upload of one float bank in range mode (gta4_metal_range_constants).
+// It holds the guest bytes of [lo, hi] only, at their bank offsets.
+inline constexpr uint32_t kConstantCanary = 0x7FC0DEADu;  // a quiet NaN: unread registers in the canary audit
+template <class Upload>
+class RangeBank {
+ public:
+  struct Found {
+    const Upload* upload = nullptr;  // holds the stored range, whose first register is `range.lo`
+    ConstantRange range;
+    // Every stored register was compared equal to the guest, so tracking may mark
+    // the bank copied. A clean or partial hit must not: registers outside the
+    // requested range were not checked, and a later clean skip would trust them.
+    bool verified = false;
+    explicit operator bool() const { return upload != nullptr; }
+  };
+  // `clean`: the guest bank is unchanged since this bank was last marked copied.
+  Found Find(ConstantRange range, std::span<const uint8_t> bank, bool clean) const {
+    if (!valid_ || !range_.Contains(range)) return {};
+    if (clean) return {&upload_, range_, false};
+    if (!Matches(range, bank)) return {};
+    return {&upload_, range_, range.lo == range_.lo && range.hi == range_.hi};
+  }
+  // Compares `range` (inside the stored one) with the guest bank.
+  bool Matches(ConstantRange range, std::span<const uint8_t> bank) const {
+    const size_t offset = size_t(range.lo) * 16, size = size_t(range.registers()) * 16;
+    return !std::memcmp(source_.data() + offset, bank.data() + offset, size);
+  }
+  void Store(ConstantRange range, std::span<const uint8_t> bank, const Upload& upload) {
+    const size_t offset = size_t(range.lo) * 16, size = size_t(range.registers()) * 16;
+    std::memcpy(source_.data() + offset, bank.data() + offset, size);
+    range_ = range; upload_ = upload; valid_ = true;
+  }
+  void Reset() { valid_ = false; upload_ = {}; }
+  bool valid() const { return valid_; }
+
+ private:
+  std::array<uint8_t, 4096> source_{};
+  ConstantRange range_;
+  Upload upload_{};
+  bool valid_ = false;
+};
+
+// The range a draw uploads: the shader's read range clamped to the bank. A shader
+// that reads nothing still gets one register, so its address stays inside a slice.
+inline ConstantRange UploadRangeOf(ConstantRange range, size_t bank_bytes) {
+  const uint32_t registers = uint32_t(bank_bytes / 16);
+  if (range.empty || !registers || range.lo >= registers) return {0, 0, false};
+  range.hi = std::min(range.hi, registers - 1);
+  return range;
+}
 }  // namespace rex::graphics::gta4_metal

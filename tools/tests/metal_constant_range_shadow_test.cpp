@@ -92,5 +92,31 @@ int main() {
     for (int i = 0; i < 5000; i += 7) { g[0] = uint8_t(i); g[1] = uint8_t(i >> 8); s.Observe(0, g, range(0, 0), false); }
     CHECK(s.statistics(0).misses == 5000 && s.statistics(0).hash_hits + s.statistics(0).last_hits == 715);
   }
+  {  // upload ranges: clamped to the bank; nothing read still gets one register
+    CHECK(UploadRangeOf(ConstantRange{}, 0xE00).registers() == 1 && UploadRangeOf(ConstantRange{}, 0xE00).lo == 0);
+    CHECK(UploadRangeOf(range(10, 255), 0xE00).hi == 223 && UploadRangeOf(range(10, 255), 0xE00).lo == 10);
+    CHECK(UploadRangeOf(range(230, 240), 0xE00).registers() == 1);
+    CHECK(UploadRangeOf(range(3, 255), 0x1000).hi == 255);
+  }
+  {  // range-mode last bank: clean hits trust only a fully verified store
+    RangeBank<int> last;
+    std::array<uint8_t, 4096> g{};
+    CHECK(!last.Find(range(0, 3), g, true));
+    last.Store(range(4, 69), g, 7);
+    auto found = last.Find(range(8, 11), g, true);
+    CHECK(found && *found.upload == 7 && found.range.lo == 4 && found.range.hi == 69 && !found.verified);
+    CHECK(!last.Find(range(0, 69), g, true));  // not covered: never a clean hit
+    found = last.Find(range(4, 69), g, false);
+    CHECK(found && found.verified);  // the whole stored range compared equal
+    Put(g, 60, 9);                   // the guest changes outside the next request
+    found = last.Find(range(8, 11), g, false);
+    CHECK(found && !found.verified);  // reusable now, but c60 is stale: tracking must not mark it copied
+    CHECK(!last.Find(range(8, 63), g, false));
+    CHECK(last.Matches(range(8, 11), g) && !last.Matches(range(4, 69), g));
+    last.Store(range(8, 63), g, 8);
+    CHECK(last.Find(range(60, 60), g, false) && *last.Find(range(60, 60), g, false).upload == 8);
+    last.Reset();
+    CHECK(!last.valid() && !last.Find(range(60, 60), g, true));
+  }
   std::printf("constant range shadow: %d checks passed\n", checks);
 }

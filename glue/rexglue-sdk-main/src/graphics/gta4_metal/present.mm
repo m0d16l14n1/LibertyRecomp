@@ -324,6 +324,10 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed);
+    if (range_constants_enabled)
+      REXLOG_INFO("gta4-metal-range-constants-live frame={} vertex={} canary={} vs-uploads={} vs-bytes={} ps-uploads={} ps-bytes={} canaries={}",
+          present.submitted_frame, range_constants_vertex, range_constants_canary, guest_bank_uploads[0], guest_bank_upload_bytes[0],
+          guest_bank_uploads[1], guest_bank_upload_bytes[1], range_constant_canaries);
     if (shadow_range_constants) for (size_t b = 0; b < ConstantRangeShadow::kBanks; ++b) {
       const auto& r = range_constants.statistics(b);
       REXLOG_INFO("gta4-metal-range-constants frame={} bank={} full-uploads={} full-bytes={} requests={} empty={} clean-hits={} clean-uncovered={} last-hits={} hash-hits={} misses={} range-bytes={} previous-uploads={} previous-range-bytes={}",

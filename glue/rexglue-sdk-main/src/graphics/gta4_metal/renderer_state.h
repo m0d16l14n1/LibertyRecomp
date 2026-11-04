@@ -90,6 +90,22 @@ struct Renderer::State {
   uint64_t previous_bank_uploads=0,previous_bank_range_bytes=0;  // temporal history VS banks (4 KB each today)
   bool shadow_range_constants=false;  // gta4_metal_range_constants_shadow, per frame
   ConstantRangeShadow range_constants;
+  // gta4_metal_range_constants: upload only [lo, hi] of a float bank and push its
+  // address moved back by lo registers (shaders index constants by absolute register).
+  bool range_constants_enabled=false,range_constants_vertex=true,range_constants_canary=false;
+  std::array<RangeBank<ui::metal::UploadSlice>,2> range_banks;  // VS, PS; the previous bank has none
+  uint64_t range_constant_canaries=0;
+  struct BankUpload {
+    ui::metal::UploadSlice slice;
+    uint64_t address=0;        // what the shader adds 16*register to
+    ConstantRange range{0,0,false};  // registers `slice` holds; slice.data is register range.lo
+    explicit operator bool() const { return bool(slice); }
+  };
+  // `index` 0/1 = guest VS/PS bank (tracked, last-bank reuse); any other value: hash cache only.
+  BankUpload UploadRange(size_t index,std::span<const uint8_t> bank,ConstantRange range,bool swap,std::string&);
+  static BankUpload WholeBank(const ui::metal::UploadSlice& slice,size_t bank_bytes) {
+    return {slice,slice.gpu_address,ConstantRange{0,uint32_t(bank_bytes/16)-1,false}};
+  }
   std::shared_ptr<ui::metal::MetalContext> context;
   GuestMemory memory;
   ui::Presenter* presenter=nullptr;
