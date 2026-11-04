@@ -324,6 +324,13 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed);
+    if (shadow_range_constants) for (size_t b = 0; b < ConstantRangeShadow::kBanks; ++b) {
+      const auto& r = range_constants.statistics(b);
+      REXLOG_INFO("gta4-metal-range-constants frame={} bank={} full-uploads={} full-bytes={} requests={} empty={} clean-hits={} clean-uncovered={} last-hits={} hash-hits={} misses={} range-bytes={} previous-uploads={} previous-range-bytes={}",
+          present.submitted_frame, b ? "ps" : "vs", guest_bank_uploads[b], guest_bank_upload_bytes[b], r.requests, r.empty,
+          r.clean_hits, r.clean_uncovered, r.last_hits, r.hash_hits, r.misses, r.bytes,
+          b ? 0 : previous_bank_uploads, b ? 0 : previous_bank_range_bytes);
+    }
     REXLOG_INFO("gta4-metal-pipeline-lookup frame={} lookups={} memo-hits={} compiled={} ready={} waited={} wait-ms={:.1f} deferred-draws={}",
         present.submitted_frame, pipeline_lookups, pipeline_lookup_hits,
         pipeline_creations, pipeline_ready, pipeline_waits, double(pipeline_wait_ns) / 1e6, pipeline_deferred_draws);

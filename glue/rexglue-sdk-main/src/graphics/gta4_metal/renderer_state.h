@@ -12,6 +12,7 @@
 #include "frame_work_qos.h"
 #include "encoder_bindings.h"
 #include "constant_upload_cache.h"
+#include "constant_range_shadow.h"
 #include "guest_constant_tracking.h"
 #include "profile_records.h"
 #include "render_phase_stack.h"
@@ -84,6 +85,11 @@ struct Renderer::State {
   uint64_t guest_constant_skips = 0, guest_constant_audits = 0, guest_constant_mismatches = 0;
   uint64_t constant_last_hits = 0, constant_hash_hits = 0, constant_upload_bytes = 0;
   uint64_t skipped_pixel_constant_banks=0;
+  // Real full-bank uploads of the VS/PS float banks, beside the range shadow's model.
+  std::array<uint64_t,2> guest_bank_upload_bytes{},guest_bank_uploads{};
+  uint64_t previous_bank_uploads=0,previous_bank_range_bytes=0;  // temporal history VS banks (4 KB each today)
+  bool shadow_range_constants=false;  // gta4_metal_range_constants_shadow, per frame
+  ConstantRangeShadow range_constants;
   std::shared_ptr<ui::metal::MetalContext> context;
   GuestMemory memory;
   ui::Presenter* presenter=nullptr;

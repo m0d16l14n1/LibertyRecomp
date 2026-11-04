@@ -81,6 +81,10 @@ if(REXGLUE_BUILD_TESTS)
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_constant_cache_test.cpp")
     target_include_directories(rex-metal-constant-cache-test PRIVATE "${REXGLUE_ROOT}/src")
     target_compile_options(rex-metal-constant-cache-test PRIVATE -UNDEBUG)
+    add_executable(rex-metal-constant-range-shadow-test EXCLUDE_FROM_ALL
+        "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_constant_range_shadow_test.cpp")
+    target_include_directories(rex-metal-constant-range-shadow-test PRIVATE "${REXGLUE_ROOT}/src")
+    target_link_libraries(rex-metal-constant-range-shadow-test PRIVATE xxHash::xxhash)
     add_executable(rex-metal-modern-sky-probe-test EXCLUDE_FROM_ALL
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_modern_sky_probe_test.mm")
     set_source_files_properties("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_modern_sky_probe_test.mm"

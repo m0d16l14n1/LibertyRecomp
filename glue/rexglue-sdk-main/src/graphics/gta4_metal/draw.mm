@@ -800,6 +800,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       std::memcpy(&prior_shared,history.previous->shared.data(),sizeof(prior_shared));
       standard_motion_depth&=temporal::StandardDepthViewport(prior_shared);
       previous_vertex=Upload(history.previous->vertex,false,error);previous_shared=Upload(history.previous->shared,false,error);
+      if(shadow_range_constants){  // the variant reads the previous bank at the current shader's offsets
+        ++previous_bank_uploads;previous_bank_range_bytes+=size_t(RangeOf(pipeline->vertex.float_constant_mask,256).registers())*16;
+      }
       if(!previous_vertex||!previous_shared)return false;
       temporal_parameters.valid_history=1;temporal_parameters.previous_jitter_clip=history.previous->jitter_clip;
     }
@@ -813,6 +816,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         !history.captured?"history-budget":!history.previous?"no-previous-key":"invalid-history");
   }
   diagnostic_point="draw.constants";
+  if(shadow_range_constants){  // BACKLOG 75 model; reads tracking state before Upload marks the banks copied
+    const bool tracked=track_guest_constants&&!guest_constant_tracking_failed;
+    range_constants.Observe(0,guest.subspan(0x780,0x1000),RangeOf(pipeline->vertex.float_constant_mask,256),tracked&&guest_constants.Clean(0));
+    if(pipeline->has_pixel)range_constants.Observe(1,guest.subspan(0x1780,0xE00),RangeOf(pipeline->pixel.float_constant_mask,224),tracked&&guest_constants.Clean(1));
+  }
   auto vertex_constants=Upload(guest.subspan(0x780,0x1000),true,error);
   // No fragment function can read this bank in a depth-only pipeline. Leave
   // its dirty observation pending so the next real fragment consumer refreshes.
