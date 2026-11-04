@@ -221,7 +221,7 @@ class GeometryHistory {
     if (lookup.previous) {
       // The key holds the guest address of the transform. Retail renders moving entities from
       // per-frame copies of their matrices, so an address can name another object next frame.
-      if (Distance(lookup.previous->vertex, vertex, false).max_world <= kMaximumWorldStep) {
+      if (Near(Distance(lookup.previous->vertex, vertex, false))) {
         ++statistics_.key;
         claimed_.insert(lookup.previous.get());
         return lookup;
@@ -237,6 +237,12 @@ class GeometryHistory {
     return lookup;
   }
   void set_transform_fallback(bool enabled) { transform_fallback_ = enabled; }
+  // Largest change of a rotation element of the world transform c0-c2 (.xyz in either matrix
+  // layout) a match may have: 0 off. The world step bounds translation only, and rotation
+  // elements change by at most 2, so a previous pose with another heading (a spawned car turned
+  // into place, another object of the same model) was always accepted and gave its pixels a
+  // rigid rotation in motion. 2*sin(angle/2): 0.35 is about 20 degrees per frame.
+  void set_rotation_limit(float limit) { rotation_limit_ = limit; }
   GeometryMatchStatistics TakeStatistics() {
     auto taken = statistics_;
     statistics_ = {};
@@ -338,7 +344,7 @@ class GeometryHistory {
     for (const auto& sibling : siblings) {
       const auto& old = sibling.snapshot->vertex;
       if (old.size() != vertex.size() || claimed_.count(sibling.snapshot.get())) continue;
-      if (Distance(old, vertex, false).max_world > kMaximumWorldStep) continue;
+      if (!Near(Distance(old, vertex, false))) continue;
       double sum = 0;
       bool finite = true;
       for (const uint32_t i : distinct) {
@@ -380,6 +386,7 @@ class GeometryHistory {
   // registers are not compared.
   struct Difference {
     float max_world = 0;  // largest change of a world-transform element (metres for translation)
+    float max_rotation = 0;  // largest change of a c0-c2 .xyz element (world transform at c0-c3 only)
     float max_any = 0;    // largest change of any finite read constant
     double sum = 0;       // squared change of every finite read constant
     uint32_t max_index = 0;  // float index of the largest change of any read constant
@@ -401,6 +408,7 @@ class GeometryHistory {
         if (!std::isfinite(x) || !std::isfinite(y)) continue;
         const float change = std::abs(x - y);
         if (world) d.max_world = std::max(d.max_world, change);
+        if (world && reg < 3 && i % 4 < 3) d.max_rotation = std::max(d.max_rotation, change);
         if (change > d.max_any && !Reads(kCameraRegisters, reg)) {
           d.max_any = change;
           d.max_index = uint32_t(i);
@@ -428,7 +436,7 @@ class GeometryHistory {
         continue;
       // One pass gives both the world step and the full difference (all includes world_).
       const auto d = Distance(candidate.snapshot->vertex, vertex, true);
-      if (d.max_world > kMaximumWorldStep) {
+      if (!Near(d)) {
         ++statistics_.far_world;
         continue;
       }
@@ -458,6 +466,11 @@ class GeometryHistory {
       }
     return nullptr;
   }
+  // A candidate within one frame's movement: translation, and rotation when limited.
+  bool Near(const Difference& d) const {
+    return d.max_world <= kMaximumWorldStep && (rotation_limit_ <= 0 || d.max_rotation <= rotation_limit_);
+  }
+  float rotation_limit_ = 0;
   static constexpr size_t kMaximumShapeCandidates = 32;
   static constexpr uint32_t kMaximumSiblings = 64;  // past this, the last one is ambiguous (a street of one tree model)
   static constexpr float kMaximumWorldStep = 6.0f;      // ~650 km/h at 30 fps
