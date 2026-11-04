@@ -112,18 +112,31 @@ Uncommitted batch, to build and bench together:
 8. **Dev pad `peds`.** `CREATE_RANDOM_CHAR` makes nothing while no ped models are streamed in around the
    player, which stopped the Metal 4 + FG pad. `peds` now retries each frame, falls back to `CREATE_CHAR`
    with `M_Y_THIEF` after 2 s, and replies `ok N` after 10 s at most, so the pad never stops there.
-9. **`gta4_temporal_history_rotation_limit` makes the car worse; keep it at 0 (off).** A/B on a drive
-   (Metal 4 + FG, 20 dumps each, scored by `tearscore.py`: per pixel, the generated image's distance to
-   the closer of `before`/`real`, in the car box and the sky band):
-   - **0 (off):** one mild frame, with the car-box p99 at 45. Every other frame had p99 ≤ 22.
-   - **0.35:** frames 22016-22057 had a car-box p99 of 100-121, with 5-8% of pixels more than 40 off.
-     - The generated image shows a rectangle of road carried along under the car and a duplicated strip
-       of bumper. The real frame is clean.
-     - So the limit refuses matches that were right, and the refused draws take the neighbour fill.
-   - `carmv.py` (the motion magnitude in a fixed screen box) cannot see this: while driving, the box
+9. **Car "tearing" under frame generation comes from low base fps, not from history matching.**
+   Drive A/B, Metal 4 + FG, 20 dumps per run, scored by `tearscore.py`. The score is, per pixel, the
+   generated image's distance to the closer of `before` and `real`, measured in a box over the car.
+   - **Runs:**
+     - r0a, limit off, 37 fps: clean. The worst car-box p99 was 45.
+     - r35a, `gta4_temporal_history_rotation_limit=0.35`, 13.5 fps: frames 22016-22057 bad (p99 100-121).
+     - rtq, limit off, 14 fps (with the render-thread patches): frames 14532-14562 bad in the same way.
+   - **What it looks like:** a block of road carried along under the car, and a copy of the bumper
+     pushed down by about 150 px at 2560x1440. That strip differs from both real frames by about 100
+     levels, while they differ from each other by 14.
+   - **Why:** the motion field is right (the car about 0 px, the road 40-70 px per real frame at 14
+     fps), and depth is reversed and reported as such. The road just below the bumper is nearer than
+     the bumper, so the interpolator gives the bumper's boundary pixels the road's motion.
+   - **When it shows:** at about 37 fps the road moves about 25 px per frame and the artifact is gone.
+     So it scales with the gap between real frames. Both slow runs were slow because of GPU contention
+     (see below).
+   - **The rotation limit** neither causes nor fixes this. It stays at 0 (off).
+   - **Mitigation candidates, untested:**
+     - skip interpolation when the real frame time is long, or when the motion's p99 is above a
+       threshold;
+     - mark large motion discontinuities as reactive.
+   - `carmv.py` (motion magnitude in a fixed screen box) cannot see any of this: while driving, the box
      also holds the moving road.
-   - The run also measured a second GPU user: WindowServer at 87-95% GPU time (ioreg `AppUsage`
-     `accumulatedGPUTime`) with the game closed. The fps numbers of that A/B are void.
+   - WindowServer used 83-95% of the GPU (ioreg `AppUsage` `accumulatedGPUTime`) with the game closed,
+     from about 22:10. The fps numbers of these runs are void.
 
 ## Measurements so far
 
