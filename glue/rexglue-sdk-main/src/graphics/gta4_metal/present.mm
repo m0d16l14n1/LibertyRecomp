@@ -293,9 +293,9 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   if(temporal.active&&present.submitted_frame%60==0){
     const auto m=temporal.geometry.TakeStatistics();
     REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} "
-                "sibling={} sibling-ambiguous={} far-world={} far-registers={} (60 frames)",
+                "sibling={} sibling-ambiguous={} far-world={} pooled={} far-registers={} (60 frames)",
         present.submitted_frame,m.key,m.transform,m.transform_ambiguous,m.transform_far,m.key_far,m.none,m.sibling,m.sibling_ambiguous,
-        m.far_world,[&]{
+        m.far_world,temporal.geometry.pooled_snapshots(),[&]{
           // The three registers that most often refused a transform match by their change.
           std::array<uint32_t,256> order{};for(uint32_t i=0;i<order.size();++i)order[i]=i;
           std::partial_sort(order.begin(),order.begin()+3,order.end(),[&](uint32_t a,uint32_t b){return m.far_register[a]>m.far_register[b];});

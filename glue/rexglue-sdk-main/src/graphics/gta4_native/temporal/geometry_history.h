@@ -118,9 +118,12 @@ class GeometryHistory {
     if (epoch == epoch_ && view == view_ && sequence < sequence_) return false;
     const bool continuous = !reset && epoch == epoch_ && view == view_ && sequence_ != UINT64_MAX &&
                             sequence == sequence_ + 1;
-    previous_.clear();
+    // `matched` serves repeats within the frame that recorded it; dropping it here lets the
+    // snapshots it names (now two frames old) return to the pool.
+    for (auto& [key, entry] : current_) entry.matched.reset();
     previous_shapes_.clear();
     previous_siblings_.clear();
+    Recycle(previous_);
     distinct_.clear();
     claimed_.clear();
     if (continuous) {
@@ -128,9 +131,9 @@ class GeometryHistory {
       previous_shapes_.swap(current_shapes_);
       previous_siblings_.swap(current_siblings_);
     } else {
-      current_.clear();
       current_shapes_.clear();
       current_siblings_.clear();
+      Recycle(current_);
     }
     epoch_ = epoch;
     view_ = view;
@@ -171,7 +174,13 @@ class GeometryHistory {
     const size_t bytes = vertex.size() + shared.size(),
                  used = budget_->used.load(std::memory_order_relaxed);
     if (used > budget_->limit || bytes > budget_->limit - used) return {};
-    auto snapshot = std::make_shared<GeometrySnapshot>();
+    std::shared_ptr<GeometrySnapshot> snapshot;
+    if (!pool_.empty()) {
+      snapshot = std::move(pool_.back());
+      pool_.pop_back();
+    } else {
+      snapshot = std::make_shared<GeometrySnapshot>();
+    }
     snapshot->vertex.assign(vertex.begin(), vertex.end());
     snapshot->shared.assign(shared.begin(), shared.end());
     snapshot->sequence = sequence_;
@@ -247,6 +256,7 @@ class GeometryHistory {
   size_t owned_bytes() const { return budget_->used.load(std::memory_order_relaxed); }
   size_t current_entries() const { return current_.size(); }
   size_t current_sibling_groups() const { return current_siblings_.size(); }
+  size_t pooled_snapshots() const { return pool_.size(); }
 
  private:
   struct Entry {
@@ -255,6 +265,22 @@ class GeometryHistory {
     std::shared_ptr<const GeometrySnapshot> matched;  // the previous draw this one continues
     bool unclear = false;  // several siblings last frame, none clearly this one
   };
+  // Two-frame-old snapshots that nothing else holds go back to a pool, keeping their vector
+  // storage: Record then copies into existing capacity instead of three allocations per draw.
+  // A snapshot someone still holds (a lookup, an upload map, a newer entry's `matched`) is
+  // simply released as before. The pool is not charged to the budget.
+  void Recycle(std::unordered_map<GeometryKey, Entry, GeometryKeyHash>& entries) {
+    for (auto& [key, entry] : entries) {
+      entry.matched.reset();
+      auto& snapshot = entry.snapshot;
+      if (!snapshot || snapshot.use_count() != 1 || pool_.size() >= kMaximumPooledSnapshots) continue;
+      if (snapshot->budget)
+        snapshot->budget->used.fetch_sub(snapshot->vertex.size() + snapshot->shared.size(), std::memory_order_relaxed);
+      snapshot->budget = nullptr;
+      pool_.push_back(std::move(snapshot));
+    }
+    entries.clear();
+  }
   std::shared_ptr<const GeometrySnapshot> Previous(const GeometryKey& key) const {
     const auto old = previous_.find(key);
     return old == previous_.end() || old->second.ambiguous ? nullptr : old->second.snapshot;
@@ -450,6 +476,8 @@ class GeometryHistory {
   bool transform_fallback_ = false;
   std::unordered_map<GeometryKey, Entry, GeometryKeyHash> previous_, current_;
   std::shared_ptr<GeometryBudget> budget_;
+  std::vector<std::shared_ptr<GeometrySnapshot>> pool_;
+  static constexpr size_t kMaximumPooledSnapshots = 4096;
   size_t maximum_entries_;
   uint64_t epoch_ = 0, view_ = 0, sequence_ = 0;
 };

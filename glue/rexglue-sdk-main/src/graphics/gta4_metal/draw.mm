@@ -367,8 +367,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     const auto vertex = shaders.find(vertex_shader);
     const uint32_t used = (vertex != shaders.end() ? vertex->second.used_texture_mask : 0) |
         (pixel != shaders.end() ? pixel->second.used_texture_mask : 0);
-    for (uint32_t stage = 0; stage < kTextureStageCount; ++stage) {
-      if (!(used & (1u << stage))) continue;
+    // Only the used stages (usually a handful of 26): the dense loop kept its counters on the stack.
+    for (uint32_t bits = used & ((1u << kTextureStageCount) - 1); bits; bits &= bits - 1) {
+      const uint32_t stage = uint32_t(std::countr_zero(bits));
       const uint32_t handle = GuestWord(guest, 0x30F8 + stage * sizeof(uint32_t));
       if (!handle) continue;
       xenos::xe_gpu_texture_fetch_t fetch{};
@@ -602,7 +603,10 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   for(uint32_t stage=0;stage<kTextureStageCount;++stage) {
     shared.texture_2d_indices[stage]=shared.texture_2d_array_indices[stage]=stage;
     shared.texture_3d_indices[stage]=shared.texture_cube_indices[stage]=shared.sampler_indices[stage]=stage;
-    if(!(used&(1u<<stage))) continue;
+  }
+  // Used stages only, in ascending order as before (indirect keeps the same order).
+  for(uint32_t bits=used&((1u<<kTextureStageCount)-1);bits;bits&=bits-1) {
+    const uint32_t stage=uint32_t(std::countr_zero(bits));
     const uint32_t handle=GuestWord(guest,0x30F8+stage*sizeof(uint32_t));
     diagnostic_texture_stage=stage; diagnostic_texture_handle=handle;
     xenos::xe_gpu_texture_fetch_t fetch{};
@@ -803,7 +807,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   raytracing::DrawGeometry capture_geometry;  // identity 0: this draw is not captured
   if(targets.temporal_motion){
-    std::array<uint8_t,4096> captured_vertex{};
+    std::array<uint8_t,4096> captured_vertex;  // every byte written below: no 4 KB zero fill first
     core::CopyGuestWordsToHost(captured_vertex.data(),guest.data()+0x780,captured_vertex.size());
     std::array<uint64_t,kVertexStreamCount+3> identities{};
     for(size_t i=0;i<vertices.size();++i)identities[i]=vertices[i]?resources.CapturedBufferGeneration(GuestWord(guest,12452+i*sizeof(uint32_t))):0;
