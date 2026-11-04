@@ -833,7 +833,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   raytracing::DrawGeometry capture_geometry;  // identity 0: this draw is not captured
   if(targets.temporal_motion){
-    std::array<uint8_t,4096> captured_vertex;  // every byte written below: no 4 KB zero fill first
+    // Captured straight into a history snapshot buffer, which Record adopts for a new entry.
+    auto captured_snapshot=temporal.geometry.TakeScratch();
+    const std::span<uint8_t,4096> captured_vertex(captured_snapshot->vertex.data(),4096);
     core::CopyGuestWordsToHost(captured_vertex.data(),guest.data()+0x780,captured_vertex.size());
     std::array<uint64_t,kVertexStreamCount+3> identities{};
     for(size_t i=0;i<vertices.size();++i)identities[i]=vertices[i]?resources.CapturedBufferGeneration(GuestWord(guest,12452+i*sizeof(uint32_t))):0;
@@ -870,7 +872,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       capture_geometry.identity=raytracing::GeometryIdentityOf(key);
       capture_geometry.placement=raytracing::PlacementOf(constant_reads,captured_vertex);
     }
-    auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
+    auto history=temporal.geometry.Record(key,captured_snapshot,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
     // A vertex shader reading a texture recomputes the previous position with this frame's
     // texture: exact while that texture is unchanged (vehicle damage changes rarely).
     const bool vertex_texture_history=!pipeline->vertex.used_texture_mask||temporal_vertex_texture_history;

@@ -146,6 +146,37 @@ class GeometryHistory {
   GeometryLookup Record(GeometryKey key, std::span<const uint8_t> vertex,
                         std::span<const uint8_t> shared, std::array<float, 2> jitter,
                         const ConstantMask& reads = kAllConstants) {
+    return RecordInto(key, vertex, shared, jitter, reads, nullptr);
+  }
+  // A 4 KB vertex-bank buffer for the caller to capture into, then pass to the Record below:
+  // a new entry adopts it instead of copying the bank a second time.
+  std::shared_ptr<GeometrySnapshot> TakeScratch() {
+    std::shared_ptr<GeometrySnapshot> scratch;
+    if (!pool_.empty()) {
+      scratch = std::move(pool_.back());
+      pool_.pop_back();
+    } else {
+      scratch = std::make_shared<GeometrySnapshot>();
+    }
+    scratch->vertex.resize(4096);
+    return scratch;
+  }
+  // `scratch` (from TakeScratch, filled) becomes the new entry's snapshot, or returns to the pool.
+  GeometryLookup Record(GeometryKey key, std::shared_ptr<GeometrySnapshot>& scratch,
+                        std::span<const uint8_t> shared, std::array<float, 2> jitter,
+                        const ConstantMask& reads = kAllConstants) {
+    if (!scratch) return {};
+    const auto lookup = RecordInto(key, scratch->vertex, shared, jitter, reads, &scratch);
+    if (scratch && scratch.use_count() == 1 && pool_.size() < kMaximumPooledSnapshots)
+      pool_.push_back(std::move(scratch));
+    scratch.reset();
+    return lookup;
+  }
+
+ private:
+  GeometryLookup RecordInto(GeometryKey key, std::span<const uint8_t> vertex,
+                            std::span<const uint8_t> shared, std::array<float, 2> jitter,
+                            const ConstantMask& reads, std::shared_ptr<GeometrySnapshot>* adopt) {
     if (!sequence_ || !key.instance || !key.vertex_shader || !key.geometry_generation ||
         vertex.size() != 4096 || shared.empty() || shared.size() > 2048)
       return {};
@@ -175,13 +206,17 @@ class GeometryHistory {
                  used = budget_->used.load(std::memory_order_relaxed);
     if (used > budget_->limit || bytes > budget_->limit - used) return {};
     std::shared_ptr<GeometrySnapshot> snapshot;
-    if (!pool_.empty()) {
-      snapshot = std::move(pool_.back());
-      pool_.pop_back();
+    if (adopt && *adopt) {
+      snapshot = std::move(*adopt);  // `vertex` already is its bank (it stays valid)
     } else {
-      snapshot = std::make_shared<GeometrySnapshot>();
+      if (!pool_.empty()) {
+        snapshot = std::move(pool_.back());
+        pool_.pop_back();
+      } else {
+        snapshot = std::make_shared<GeometrySnapshot>();
+      }
+      snapshot->vertex.assign(vertex.begin(), vertex.end());
     }
-    snapshot->vertex.assign(vertex.begin(), vertex.end());
     snapshot->shared.assign(shared.begin(), shared.end());
     snapshot->sequence = sequence_;
     snapshot->jitter_clip = jitter;
@@ -236,6 +271,8 @@ class GeometryHistory {
     lookup.matched_by_transform = bool(lookup.previous);
     return lookup;
   }
+
+ public:
   void set_transform_fallback(bool enabled) { transform_fallback_ = enabled; }
   // Largest change of a rotation element of the world transform c0-c2 (.xyz in either matrix
   // layout) a match may have: 0 off. The world step bounds translation only, and rotation
