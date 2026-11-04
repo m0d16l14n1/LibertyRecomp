@@ -29,6 +29,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_memo_targets, true, "GPU", "Reuse the last render
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
+REXCVAR_DEFINE_BOOL(gta4_metal_previous_bank_range, false, "GPU", "Temporal motion: upload only the registers the vertex shader reads of the previous frame's vertex bank (as gta4_metal_range_constants does), not the whole 4 KB snapshot");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_canary, false, "GPU/Diagnostics", "With gta4_metal_range_constants, upload whole banks with NaN in every register outside the read range, uncached");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_shadow, false, "GPU/Diagnostics", "Count what uploading only each shader's read constant range would send and reuse; changes no upload");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_pipeline_lookup, true, "GPU", "Reuse recent exact pipeline keys before the full cache lookup");
@@ -272,6 +273,7 @@ bool Renderer::State::Begin(std::string& error) {
   range_constants_enabled = rex::cvar::Query<bool>("gta4_metal_range_constants");
   range_constants_vertex = rex::cvar::Query<bool>("gta4_metal_range_constants_vertex");
   range_constants_canary = rex::cvar::Query<bool>("gta4_metal_range_constants_canary");
+  previous_bank_range = rex::cvar::Query<bool>("gta4_metal_previous_bank_range");
   guest_constants.Reset();
   cache_encoder_state = rex::cvar::Query<bool>("gta4_metal_cache_encoder_state");
   prepare_textures = rex::cvar::Query<bool>("gta4_metal_prepare_textures");

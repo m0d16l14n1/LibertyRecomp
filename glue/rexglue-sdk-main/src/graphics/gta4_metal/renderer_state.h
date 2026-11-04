@@ -109,6 +109,7 @@ struct Renderer::State {
   // gta4_metal_range_constants: upload only [lo, hi] of a float bank and push its
   // address moved back by lo registers (shaders index constants by absolute register).
   bool range_constants_enabled=false,range_constants_vertex=true,range_constants_canary=false;
+  bool previous_bank_range=false;  // gta4_metal_previous_bank_range, per frame
   std::array<RangeBank<ui::metal::UploadSlice>,2> range_banks;  // VS, PS; the previous bank has none
   uint64_t range_constant_canaries=0;
   struct BankUpload {

@@ -884,7 +884,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       std::memcpy(&prior_shared,history.previous->shared.data(),sizeof(prior_shared));
       standard_motion_depth&=temporal::StandardDepthViewport(prior_shared);
       // The variant runs the same vertex function on this bank, so it reads the current shader's range.
-      if(range_constants_enabled){
+      if(range_constants_enabled||previous_bank_range){
         const auto previous=UploadRange(SIZE_MAX,history.previous->vertex,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
         previous_vertex=previous.slice;previous_vertex_address=previous.address;
         previous_shared=Upload(history.previous->shared,false,error);
