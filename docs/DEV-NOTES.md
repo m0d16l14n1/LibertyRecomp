@@ -132,6 +132,20 @@ Installer: `APP/src/install/` (folder, `.iso`, or STFS/SVOD package input). Inst
 - `tools/ppc-mcp-server` — stale: expects `LibertyRecompLib/ppc/ppc_recomp.*`; real code is `APP/generated/gta4_recomp.*`.
 - `tools/*.lldb` — bug-specific scripts, need a running game.
 - `tools/analyze_native_*.py` — offline analysers for profiler/xctrace captures.
+- Benches (`tools/perf/`): `bench.sh` (new game → Roman's taxi, `pads/dock-bench.pad`) and
+  `route_bench.sh` for a career save. `route_bench.sh pad career-street pads/city-drive.pad <label>`
+  copies the save and settings snapshotted in `perf/routes/career-street/` into a throwaway home
+  (`local/route-home`, the real save is never written), loads it, and the dev pad's world commands
+  (`gta4_dev_world.cpp`: `await`, `road`, `car`, `drive`, `clock`, `weather`, `nowanted`, `invincible`)
+  put the player in a car in Downtown Broker and let the game's driving AI go for three minutes.
+  `route_bench.sh record <route>` / `replay <route>` record and replay your own keyboard, mouse and
+  pad input instead (the world is not deterministic: keyboard/trackpad routes drift within a
+  minute; pad routes held). Output per run in `perf/route-<route>-<date>-<label>/`: `summary.txt`
+  (per-window fps/GPU table, display pacing lines, process CPU), `frames.csv`, `marks.csv`,
+  `route.csv`, `shots/`, `game.log`. Runs are windowed and in the background
+  (`--background_window=true`: no focus, no mouse capture). On the fanless Air rest 3 min between
+  runs and interleave A/B runs. `sample <pid> 8 -file s.txt; tools/perf/sample_busy.py s.txt`
+  for per-thread busy shares (sampling stalls the audio, expect "output starved" lines).
 
 ## 9. Fork changes (branch `macos-build-fixes`)
 
