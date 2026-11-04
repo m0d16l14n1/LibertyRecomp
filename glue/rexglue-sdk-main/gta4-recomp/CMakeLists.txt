@@ -128,6 +128,9 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         src/gta4_sony_event_hooks.cpp
         src/gta4_loading_parallax_fix.cpp
         src/gta4_timer_carry_fix.cpp
+        src/gta4_cutscene_clock_fix.cpp
+        src/gta4_ped_ai_fixes.cpp
+        src/gta4_write_watch.cpp
         src/gta4_motion_bridge.cpp
         src/gta4_motion_hooks.cpp
         src/gta4_motion_vehicle_hooks.cpp

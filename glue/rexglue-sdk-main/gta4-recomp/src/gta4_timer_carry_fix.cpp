@@ -18,6 +18,7 @@
 #include <rex/logging.h>
 
 #include "gta4_init.h"
+#include "gta4_write_watch.h"
 
 REXCVAR_DEFINE_BOOL(gta4_timer_millisecond_carry, true, "GTA IV/Fixes",
                     "Carry the fraction of a millisecond the game's clocks drop every frame "
@@ -51,6 +52,7 @@ void ObserveRate(uint32_t game_clock) {
 }  // namespace
 
 extern "C" void sub_8227FE40(PPCContext& ctx, uint8_t* base) {
+  gta4::write_watch::Tick(base);  // diagnostic, off unless gta4_watch_write is set
   if (!REXCVAR_GET(gta4_timer_millisecond_carry)) {
     fraction = {};
     __imp__sub_8227FE40(ctx, base);
