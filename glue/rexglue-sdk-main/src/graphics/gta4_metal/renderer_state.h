@@ -148,6 +148,7 @@ struct Renderer::State {
   uint64_t raytracing_shadow_draws=0,raytracing_shadow_shown=0;
   // CPU on the encode thread: Draw() in every mode, and the ray-tracing parts of it.
   raytracing::CpuTime draw_cpu_time,raytracing_prelude_time,raytracing_hook_time,raytracing_site_time;
+  uint64_t submit_sampler=0x2545F4914F6CDD1Dull;  // Renderer::Submit's frame-log timing sample
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
   // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about
@@ -199,6 +200,18 @@ struct Renderer::State {
   std::unordered_map<uint32_t,ShaderMetadata> shaders;
   std::unordered_map<uint32_t,VertexDeclaration> declarations;
   std::array<gta4_native::SurfaceDescriptor,gta4_native::kRenderTargetCount> color_bindings{};
+  // CaptureTargets memo (gta4_metal_memo_targets): the last binding resolution, before the
+  // retained-attachment step. Invalid when its surface epoch or any input differs.
+  struct TargetMemo {
+    bool valid=false,depth=false,reflection=false;
+    uint32_t colors=0,route_samples=0;
+    uint64_t epoch=0;
+    std::array<gta4_native::SurfaceDescriptor,gta4_native::kRenderTargetCount> color_bindings{};
+    gta4_native::SurfaceDescriptor depth_binding{};
+    Targets result;
+  } target_memo;
+  bool memo_targets=true;
+  uint64_t target_memo_hits=0,target_memo_misses=0;
   gta4_native::SurfaceDescriptor depth_binding{};
   std::array<VertexStream,gta4_native::kVertexStreamCount> streams{};
   uint32_t vertex_shader=0,pixel_shader=0,declaration=0,index_buffer=0,device=0;

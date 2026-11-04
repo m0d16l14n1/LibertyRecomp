@@ -122,6 +122,9 @@ class ResourceStore {
   bool ExchangeResolveImages(const std::shared_ptr<SurfaceResource>& source,const std::shared_ptr<TextureResource>& destination);
   std::shared_ptr<TextureResource> FindTexture(uint32_t handle) const;
   std::shared_ptr<SurfaceResource> FindSurface(uint32_t handle) const;
+  // Changes whenever a surface is installed or erased, or a virtual / reflection registration
+  // changes: what Surface() returns for an unchanged descriptor can only change with it.
+  uint64_t surface_epoch() const;
   // Latest produced color view in the exact title sample space.
   // Explicit depth handoffs and reflection ownership remain separate.
   std::shared_ptr<SurfaceResource> FindColorResolveSource(
@@ -141,6 +144,7 @@ class ResourceStore {
   struct BufferCacheStatistics {
     size_t captured_bytes; size_t entries; uint64_t evictions;
     uint64_t validations, validation_skips, validation_mismatches;  // reused captures' shadow compare
+    uint64_t memo_hits;  // skips that also skipped the metadata decode and lookup
   };
   BufferCacheStatistics buffer_cache_statistics() const;
   struct VertexConversionStatistics {

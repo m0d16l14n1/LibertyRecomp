@@ -327,10 +327,12 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       static raytracing::CpuTime last; static uint64_t last_frame = 0;
       const uint64_t frames = present.submitted_frame - last_frame;
       if (frames) {
-        const double us = double(draw_cpu_time.ns - last.ns) / 1000.0 / double(frames);
-        const uint64_t draws = draw_cpu_time.calls - last.calls;
-        REXLOG_INFO("gta4-metal-draw-cpu frame={} draw-us={:.1f} draws={} ns-per-draw={:.0f}", present.submitted_frame, us,
-            draws / frames, draws ? double(draw_cpu_time.ns - last.ns) / double(draws) : 0.0);
+        // One draw in 16 is timed: the mean over the timed draws, scaled by the true count.
+        const uint64_t draws = draw_cpu_time.calls - last.calls, timed = draw_cpu_time.timed - last.timed;
+        const double per_draw = timed ? double(draw_cpu_time.ns - last.ns) / double(timed) : 0.0;
+        const double us = per_draw * double(draws) / 1000.0 / double(frames);
+        REXLOG_INFO("gta4-metal-draw-cpu frame={} draw-us={:.1f} draws={} ns-per-draw={:.0f} timed={}", present.submitted_frame, us,
+            draws / frames, per_draw, timed);
       }
       last = draw_cpu_time; last_frame = present.submitted_frame;
     }
@@ -348,9 +350,11 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         snapshot_upload_misses, snapshot_upload_hits);
     {
       const auto buffers = resources.buffer_cache_statistics();
-      REXLOG_INFO("gta4-metal-buffer-validation frame={} per-use={} validations={} skips={} mismatches={}",
+      REXLOG_INFO("gta4-metal-buffer-validation frame={} per-use={} validations={} skips={} mismatches={} memo-hits={} "
+          "target-memo={} target-memo-hits={} target-memo-misses={}",
           present.submitted_frame, rex::cvar::Query<bool>("gta4_metal_buffer_validation_per_use"),
-          buffers.validations, buffers.validation_skips, buffers.validation_mismatches);
+          buffers.validations, buffers.validation_skips, buffers.validation_mismatches, buffers.memo_hits,
+          memo_targets, target_memo_hits, target_memo_misses);
     }
     if (range_constants_enabled)
       REXLOG_INFO("gta4-metal-range-constants-live frame={} vertex={} canary={} vs-uploads={} vs-bytes={} ps-uploads={} ps-bytes={} canaries={}",

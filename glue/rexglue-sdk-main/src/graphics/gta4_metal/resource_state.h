@@ -8,6 +8,7 @@
 #include "../gta4_native/core/geometry.h"
 #include "../gta4_native/native_buffer_metadata.h"
 #include "../gta4_native/native_texture_image_identity.h"
+#include <array>
 #include <list>
 #include <map>
 #include <tuple>
@@ -69,10 +70,21 @@ struct ResourceStore::State {
   uint64_t buffer_evictions = 0;
   uint64_t buffer_validations = 0, buffer_validation_skips = 0, buffer_validation_mismatches = 0;
   bool buffer_validation_per_use = false;  // gta4_metal_buffer_validation_per_use, per frame
+  // Reused captures already validated this frame, by handle (direct-mapped): a byte-identical
+  // guest header skips the metadata decode and the map lookup. Any erase invalidates it.
+  struct BufferMemo {
+    uint32_t handle = 0;
+    uint64_t epoch = 0;
+    Buffer* buffer = nullptr;
+    std::array<uint8_t, 32> header{};
+  };
+  std::array<BufferMemo, 256> buffer_memo{};
+  uint64_t buffer_epoch = 1, buffer_memo_hits = 0;
   void TouchBuffer(Buffer& buffer) {
     buffer_lru.splice(buffer_lru.end(), buffer_lru, buffer.recency);
   }
   std::unordered_set<uint32_t> dirty;
+  uint64_t surface_epoch = 1;  // ResourceStore::surface_epoch()
   std::unordered_map<SamplerKey, id<MTLSamplerState>, SamplerKeyHash> samplers;
   uint64_t next_generation = 1, serial = 0;
   uint64_t binding_epoch=1,material_hits=0,material_misses=0;

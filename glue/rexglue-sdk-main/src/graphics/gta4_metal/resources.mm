@@ -246,6 +246,7 @@ bool ResourceStore::ExchangeResolveImages(const std::shared_ptr<SurfaceResource>
   source->generation=state_->next_generation++;destination->generation=state_->next_generation++;
   state_->InvalidateBindings();return true;
 }
+uint64_t ResourceStore::surface_epoch() const { return state_->surface_epoch; }
 std::shared_ptr<TextureResource> ResourceStore::FindTexture(uint32_t handle) const {
   auto found=state_->textures.find(handle); return found==state_->textures.end()?nullptr:found->second;
 }
@@ -288,6 +289,7 @@ bool ResourceStore::RegisterVirtual(const gta4_native::RegisterVirtualResourceCo
       command.physical_height>16384 || !command.guest_backing_width || !command.guest_backing_height ||
       (command.kind!=VirtualResourceKind::kTexture && command.kind!=VirtualResourceKind::kSurface)) return false;
   state_->InvalidateBindings();
+  ++state_->surface_epoch;
   if(state_->virtuals.Register(command)==VirtualResourceRegistrationResult::kReplaced) {
     state_->EraseSurface(command.resource); state_->EraseTexture(command.resource);
   }
@@ -303,6 +305,7 @@ void ResourceStore::RegisterReflection(const gta4_native::RegisterReflectionTarg
   if (surface != state_->reflections.end() && SameNativeReflectionRegistration(surface->second, next) &&
       (!next.texture || (texture != state_->reflections.end() &&
                         SameNativeReflectionRegistration(texture->second, next)))) return;
+  ++state_->surface_epoch;
   // A replaced pair must not leave a stale companion classified as a reflection.
   // GPU command buffers retain any retired physical images until completion.
   for (uint32_t handle : {next.surface, next.texture}) {
@@ -321,6 +324,7 @@ void ResourceStore::Invalidate(uint32_t handle) {
   state_->preparation.Invalidate(handle);
   state_->dirty.insert(handle);
   if(state_->virtuals.MarkGuestWrite(handle)) {
+    ++state_->surface_epoch;
     state_->EraseTexture(handle);
     if(const auto* record=state_->virtuals.Find(handle); record && record->companion) {
       state_->virtuals.MarkGuestWrite(record->companion); state_->EraseTexture(record->companion);
@@ -330,6 +334,7 @@ void ResourceStore::Invalidate(uint32_t handle) {
 }
 void ResourceStore::Release(uint32_t handle) {
   state_->InvalidateBindings();
+  ++state_->surface_epoch;
   state_->EraseTexture(handle); state_->EraseSurface(handle); state_->EraseBuffer(handle);
   state_->virtuals.Erase(handle); state_->font_ids.erase(handle);
   gta4_native::EraseNativeReflectionRegistration(state_->reflections, handle);
@@ -337,10 +342,11 @@ void ResourceStore::Release(uint32_t handle) {
 }
 void ResourceStore::Clear() {
   state_->InvalidateBindings();
+  ++state_->surface_epoch;
   state_->preparation.Clear();
   state_->vertex_conversion_lru.clear();
   state_->vertex_conversion_bytes = state_->vertex_conversion_budget_bytes = 0;
-  state_->textures.clear(); state_->surfaces.clear(); state_->buffers.clear();
+  state_->textures.clear(); state_->surfaces.clear(); state_->buffers.clear(); ++state_->buffer_epoch;
   state_->texture_lru.clear();
   state_->color_views.clear(); state_->buffer_lru.clear(); state_->font_ids.clear();
   state_->resident_texture_bytes = state_->captured_buffer_bytes = state_->resident_buffer_bytes = 0;
@@ -359,6 +365,7 @@ void ResourceStore::State::EraseTexture(uint32_t handle) {
   textures.erase(found);
 }
 void ResourceStore::State::EraseSurface(uint32_t handle) {
+  ++surface_epoch;  // InstallSurface comes through here too
   auto found = surfaces.find(handle);
   if (found == surfaces.end()) return;
   gta4_native::GuestSurfaceView view{};
@@ -412,6 +419,7 @@ void ResourceStore::State::InstallSurface(uint32_t handle, std::shared_ptr<Surfa
   resident_texture_bytes += value->image.allocatedSize;
 }
 void ResourceStore::State::EraseBuffer(uint32_t handle) {
+  ++buffer_epoch;  // buffer_memo holds node pointers
   auto found = buffers.find(handle);
   if (found == buffers.end()) return;
   captured_buffer_bytes -= found->second.payload.size();

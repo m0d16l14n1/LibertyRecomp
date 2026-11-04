@@ -25,6 +25,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_material_bindings,true,"GPU","Reuse prepare
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_constant_sources, true, "GPU", "Keep bounded immutable CPU constant versions");
 REXCVAR_DEFINE_BOOL(gta4_metal_track_guest_constants, true, "GPU", "Reuse float banks while the guest reports no changes");
 REXCVAR_DEFINE_BOOL(gta4_metal_delta_guest_constants, true, "GPU", "Rebuild a changed float bank from the last upload and the register groups the guest wrote");
+REXCVAR_DEFINE_BOOL(gta4_metal_memo_targets, true, "GPU", "Reuse the last render-target resolution while its bindings and surfaces are unchanged");
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
@@ -265,6 +266,8 @@ bool Renderer::State::Begin(std::string& error) {
   track_guest_constants = rex::cvar::Query<bool>("gta4_metal_track_guest_constants");
   audit_guest_constants = rex::cvar::Query<bool>("gta4_metal_audit_guest_constants");
   delta_guest_constants = rex::cvar::Query<bool>("gta4_metal_delta_guest_constants");
+  memo_targets = rex::cvar::Query<bool>("gta4_metal_memo_targets");
+  target_memo = {};  // per frame: no stale surface references across frames
   shadow_range_constants = rex::cvar::Query<bool>("gta4_metal_range_constants_shadow");
   range_constants_enabled = rex::cvar::Query<bool>("gta4_metal_range_constants");
   range_constants_vertex = rex::cvar::Query<bool>("gta4_metal_range_constants_vertex");
@@ -534,10 +537,25 @@ bool Renderer::Submit(std::span<const std::byte> bytes,std::string& error,
   state_->diagnostic_texture_stage = UINT32_MAX;
   state_->diagnostic_texture_handle = 0;
   state_->fire_context = trace ? *trace : gta4_native::FireTraceContext{};
-  const bool timed = !state_->frame_log_path.empty();
+  // gta4_metal_frame_log's submit time. Two clock reads per title command were about 5% of the
+  // render thread under the bench. Draws, clears, resolves, presents and the rest stay timed
+  // exactly; the many cheap state setters are timed about one in 8 (picked pseudo-randomly,
+  // so a periodic command pattern cannot alias) and scaled by 8.
+  uint64_t submit_scale = 0;
+  if (!state_->frame_log_path.empty()) {
+    using gta4_native::CommandType;
+    const auto type = bytes.size() >= sizeof(gta4_native::CommandHeader)
+        ? Command<gta4_native::CommandHeader>(bytes).type : CommandType::kDeviceCreated;
+    const bool cheap = type == CommandType::kSetRenderState || type == CommandType::kSetPixelShader ||
+        type == CommandType::kSetVertexShader || type == CommandType::kSetVertexDeclaration ||
+        type == CommandType::kSetVertexStream || type == CommandType::kSetIndexBuffer ||
+        type == CommandType::kRenderPhaseMarker;
+    submit_scale = !cheap ? 1 : raytracing::SampleOneIn(state_->submit_sampler, 7) ? 8 : 0;
+  }
+  const bool timed = submit_scale != 0;
   const auto submit_begin = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const bool ok = SubmitImpl(bytes, error);
-  if (timed) state_->frame_submit_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+  if (timed) state_->frame_submit_ns += submit_scale * uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now() - submit_begin).count());
   if (!ok) state_->TraceCommandFailure(bytes,error);
   if (state_->sky_visibility) { state_->EndRender(); state_->sky_visibility=nil; }

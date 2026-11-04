@@ -99,7 +99,27 @@ bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t col
   for(uint32_t i=0;i<kRenderTargetCount;++i)
     color_bindings[i]=memory.Surface(GuestWord(guest,12432+i*sizeof(uint32_t)));
   depth_binding=memory.Surface(GuestWord(guest,12448));
-  bool any=false,all_multisampled=true,reflection=false;
+  const uint32_t route_samples=GetAntiAliasingRoute(anti_aliasing).scene_sample_count;
+  bool reflection=false;
+  // gta4_metal_memo_targets: consecutive draws usually bind the same surfaces. The resolution
+  // below depends only on these descriptors, the masks, the AA route and the surface /
+  // virtual / reflection registries (ResourceStore::surface_epoch), so an exact repeat reuses
+  // it. Surface()'s one side effect on a found surface, refreshing its descriptor, is repeated.
+  const auto same_descriptor=[](const SurfaceDescriptor& a,const SurfaceDescriptor& b){
+    return !std::memcmp(&a,&b,sizeof(SurfaceDescriptor));
+  };
+  bool memo_hit=memo_targets&&target_memo.valid&&target_memo.colors==colors&&target_memo.depth==depth&&
+      target_memo.epoch==resources.surface_epoch()&&target_memo.route_samples==route_samples&&
+      same_descriptor(target_memo.depth_binding,depth_binding);
+  for(uint32_t i=0;memo_hit&&i<kRenderTargetCount;++i) memo_hit=same_descriptor(target_memo.color_bindings[i],color_bindings[i]);
+  if(memo_hit){
+    ++target_memo_hits;
+    target=target_memo.result; reflection=target_memo.reflection;
+    for(uint32_t i=0;i<kRenderTargetCount;++i) if(target.colors[i]) target.colors[i]->descriptor=color_bindings[i];
+    if(target.depth) target.depth->descriptor=depth_binding;
+  } else {
+  ++target_memo_misses;
+  bool any=false,all_multisampled=true;
   auto inspect=[&](const SurfaceDescriptor& descriptor) {
     if(!descriptor.handle) return;
     any=true; all_multisampled&=descriptor.sample_type!=0;
@@ -107,8 +127,7 @@ bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t col
   };
   for(uint32_t i=0;i<kRenderTargetCount;++i) if(colors&(1u<<i)) inspect(color_bindings[i]);
   if(depth) inspect(depth_binding);
-  const uint32_t override_samples=!reflection && any && all_multisampled ?
-      GetAntiAliasingRoute(anti_aliasing).scene_sample_count : 0;
+  const uint32_t override_samples=!reflection && any && all_multisampled ? route_samples : 0;
   auto admit=[&](const std::shared_ptr<SurfaceResource>& image) {
     if(!image) return false;
     if(!target.width) {
@@ -148,6 +167,13 @@ bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t col
       target.height = uint32_t(existing->image.height);
       target.samples = uint32_t(existing->image.sampleCount);
     }
+  }
+  if(memo_targets){
+    target_memo.valid=true; target_memo.colors=colors; target_memo.depth=depth;
+    target_memo.epoch=resources.surface_epoch(); target_memo.route_samples=route_samples;
+    target_memo.color_bindings=color_bindings; target_memo.depth_binding=depth_binding;
+    target_memo.reflection=reflection; target_memo.result=target;
+  }
   }
   // Pipeline write/test masks are not attachment bindings. Retain compatible
   // inactive attachments already in this encoder, rather than storing/loading
@@ -299,7 +325,7 @@ bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
 bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<const std::byte> bytes,
     std::string& error) {
   using namespace gta4_native;
-  raytracing::ScopedCpuTime draw_timed(draw_cpu_time);  // every mode: the off/on baseline (gta4-metal-draw-cpu)
+  raytracing::ScopedSampledCpuTime<16> draw_timed(draw_cpu_time);  // every mode, one draw in 16 timed (gta4-metal-draw-cpu)
   diagnostic_point="draw.guest-state";
   uint32_t guest_device=0,type=0,first=0,count=0,up_stride=0,up_address=0,up_size=0,restart_value=0;
   int32_t base_vertex=0;

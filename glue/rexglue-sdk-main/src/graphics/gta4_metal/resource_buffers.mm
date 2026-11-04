@@ -61,6 +61,13 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
   using namespace gta4_native;
   const auto header = memory.Read(handle,32);
   if (header.empty()) { error="Unmapped guest buffer header"; return nullptr; }
+  auto& memo=buffer_memo[(handle ^ handle >> 8 ^ handle >> 16) & (buffer_memo.size() - 1)];
+  if (!buffer_validation_per_use && memo.handle==handle && memo.epoch==buffer_epoch &&
+      memo.buffer->validated_frame==frame && !std::memcmp(memo.header.data(),header.data(),memo.header.size()) &&
+      !dirty.contains(handle)) {
+    // Same header as when this capture passed its slice this frame: same metadata, not locked.
+    ++buffer_validation_skips; ++buffer_memo_hits; TouchBuffer(*memo.buffer); return memo.buffer;
+  }
   const uint32_t flags=GuestWord(header,0);
   const auto metadata=DecodeNativeBufferMetadata(flags,GuestWord(header,24),GuestWord(header,28));
   if (!metadata || !metadata->HasValidPayload(64u*1024u*1024u)) {
@@ -74,8 +81,12 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
     // The rolling shadow comparison is a backstop for guest writes that skip the lock
     // contract. One slice per buffer per frame keeps the sweep (payload/64 per frame) at
     // a fixed cost; a buffer drawn 30 times a frame no longer compares 30 slices.
+    const auto remember = [&] {
+      memo.handle = handle; memo.epoch = buffer_epoch; memo.buffer = &cached;
+      std::memcpy(memo.header.data(), header.data(), memo.header.size());
+    };
     if (!buffer_validation_per_use && cached.validated_frame == frame) {
-      ++buffer_validation_skips; TouchBuffer(cached); return &cached;
+      ++buffer_validation_skips; remember(); TouchBuffer(cached); return &cached;
     }
     const auto range=GetNativeBufferShadowValidationRange(cached.payload.size(),cached.validation_offset);
     auto slice=memory.Read(metadata->guest_address+uint32_t(range.offset),range.length);
@@ -83,6 +94,7 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
     if (slice.size()==range.length && !std::memcmp(slice.data(),cached.payload.data()+range.offset,range.length)) {
       cached.validation_offset=range.next_offset;
       cached.validated_frame=frame;
+      remember();
       TouchBuffer(cached);
       return &cached;
     }
@@ -248,7 +260,8 @@ size_t ResourceStore::buffer_bytes() const {
 }
 ResourceStore::BufferCacheStatistics ResourceStore::buffer_cache_statistics() const {
   return {state_->captured_buffer_bytes, state_->buffers.size(), state_->buffer_evictions,
-          state_->buffer_validations, state_->buffer_validation_skips, state_->buffer_validation_mismatches};
+          state_->buffer_validations, state_->buffer_validation_skips, state_->buffer_validation_mismatches,
+          state_->buffer_memo_hits};
 }
 
 }  // namespace rex::graphics::gta4_metal
