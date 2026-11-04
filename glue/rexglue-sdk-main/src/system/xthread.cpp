@@ -900,7 +900,10 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
   } else {
-    REXSYS_WARN("Too few processor cores - scheduling will be wonky");
+    static std::atomic<bool> affinity_warning_logged = false;
+    if (!affinity_warning_logged.exchange(true, std::memory_order_relaxed)) {
+      REXSYS_WARN("Too few processor cores - scheduling will be wonky");
+    }
   }
 }
 
