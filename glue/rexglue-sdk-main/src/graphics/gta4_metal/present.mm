@@ -254,6 +254,11 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
       temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
       temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason);
+  if(temporal.active&&present.submitted_frame%60==0){
+    const auto m=temporal.geometry.TakeStatistics();
+    REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} (60 frames)",
+        present.submitted_frame,m.key,m.transform,m.transform_ambiguous,m.transform_far,m.key_far,m.none);
+  }
   if(temporal.active&&present.submitted_frame%60==0)
     REXLOG_INFO("gta4-metal-temporal-gbuffer-frame frame={} world={} gbuffer-active={} gbuffer-before-begin={} gbuffer-other-size={} other={}x{} input={}x{}",
         present.submitted_frame,temporal.world_draws,gbuffer_active,gbuffer_inactive,gbuffer_off_extent,gbuffer_last_w,gbuffer_last_h,

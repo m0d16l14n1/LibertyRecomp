@@ -7,6 +7,12 @@
 #include "pass_tags.h"
 // Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): "++" (verified,
 // BACKLOG 86) passes it unchanged; "--", "-+", "+-" negate x and/or y.
+// Retail draws moving entities (the player's car, peds) from per-frame copies of their
+// transforms, so the owner address in the history key changes every frame and they got no
+// motion: frame generation then moved them with the camera, and they jumped on turns.
+REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
+                    "Continue a moving object's motion history by its nearest transform when its "
+                    "owner address changed since the previous frame");
 REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
                       "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
 namespace rex::graphics::gta4_metal::temporal {
@@ -122,6 +128,7 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
   metadata.scene_without_ui = true;
   metadata.jitter_applied = c.flags & gta4_native::kTemporalJitterApplied;
   metadata.camera_cut = c.flags & gta4_native::kTemporalCameraCut;
+  geometry.set_transform_fallback(REXCVAR_GET(gta4_temporal_history_transform_match));
   if (!ValidConfiguration(config) ||
       !geometry.Begin(c.epoch, c.view, c.sequence, metadata.camera_cut)) {
     error = "temporal scene identity or dimensions invalid";

@@ -1,12 +1,15 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rex::graphics::gta4_native::temporal {
@@ -64,6 +67,11 @@ struct GeometrySnapshot {
 struct GeometryLookup {
   std::shared_ptr<const GeometrySnapshot> previous;
   bool captured = false, ambiguous = false;
+  bool matched_by_transform = false;  // found by the nearest-transform fallback, not the key
+};
+struct GeometryMatchStatistics {
+  uint64_t key = 0, transform = 0, transform_ambiguous = 0, transform_far = 0, key_far = 0,
+           none = 0;
 };
 class GeometryHistory {
  public:
@@ -79,10 +87,15 @@ class GeometryHistory {
     const bool continuous = !reset && epoch == epoch_ && view == view_ && sequence_ != UINT64_MAX &&
                             sequence == sequence_ + 1;
     previous_.clear();
-    if (continuous)
+    previous_shapes_.clear();
+    claimed_.clear();
+    if (continuous) {
       previous_.swap(current_);
-    else
+      previous_shapes_.swap(current_shapes_);
+    } else {
       current_.clear();
+      current_shapes_.clear();
+    }
     epoch_ = epoch;
     view_ = view;
     sequence_ = sequence;
@@ -101,7 +114,8 @@ class GeometryHistory {
                         !std::memcmp(stored.shared.data(), shared.data(), shared.size());
       existing->second.ambiguous |= !same;
       if (existing->second.ambiguous) return {{}, true, true};
-      return {Previous(key), true, false};
+      // An identical repeat (another pass of the same draw) keeps the first draw's match.
+      return {existing->second.matched, true, false};
     }
     if (current_.size() >= maximum_entries_) return {};
     const size_t bytes = vertex.size() + shared.size(),
@@ -114,12 +128,50 @@ class GeometryHistory {
     snapshot->jitter_clip = jitter;
     budget_->used.fetch_add(bytes, std::memory_order_relaxed);
     snapshot->budget = budget_;
-    current_.emplace(key, Entry{snapshot, false});
-    return {Previous(key), true, false};
+    auto& entry = current_.emplace(key, Entry{snapshot, false, nullptr}).first->second;
+    auto& shape = current_shapes_[Shape(key)];
+    if (shape.size() < kMaximumShapeCandidates) shape.push_back({key, snapshot});
+    GeometryLookup lookup{Previous(key), true, false};
+    // Every return below records what this draw matched for its repeats in this frame.
+    struct Remember {
+      Entry& entry; GeometryLookup& lookup;
+      ~Remember() { entry.matched = lookup.previous; }
+    } remember{entry, lookup};
+    if (!transform_fallback_) {
+      statistics_.key += bool(lookup.previous);
+      statistics_.none += !lookup.previous;
+      return lookup;
+    }
+    if (lookup.previous) {
+      // The key holds the guest address of the transform. Retail renders moving entities from
+      // per-frame copies of their matrices, so an address can name another object next frame.
+      if (Distance(lookup.previous->vertex, vertex, false).max_world <= kMaximumWorldStep) {
+        ++statistics_.key;
+        claimed_.insert(lookup.previous.get());
+        return lookup;
+      }
+      ++statistics_.key_far;
+      lookup.previous = nullptr;
+    } else if (PreviousAmbiguous(key)) {
+      ++statistics_.none;
+      return lookup;
+    }
+    lookup.previous = Nearest(key, vertex);
+    lookup.matched_by_transform = bool(lookup.previous);
+    return lookup;
+  }
+  void set_transform_fallback(bool enabled) { transform_fallback_ = enabled; }
+  GeometryMatchStatistics TakeStatistics() {
+    auto taken = statistics_;
+    statistics_ = {};
+    return taken;
   }
   void Reset() {
     current_.clear();
     previous_.clear();
+    current_shapes_.clear();
+    previous_shapes_.clear();
+    claimed_.clear();
     epoch_ = view_ = sequence_ = 0;
   }
   size_t owned_bytes() const { return budget_->used.load(std::memory_order_relaxed); }
@@ -129,11 +181,95 @@ class GeometryHistory {
   struct Entry {
     std::shared_ptr<GeometrySnapshot> snapshot;
     bool ambiguous = false;
+    std::shared_ptr<const GeometrySnapshot> matched;  // the previous draw this one continues
   };
   std::shared_ptr<const GeometrySnapshot> Previous(const GeometryKey& key) const {
     const auto old = previous_.find(key);
     return old == previous_.end() || old->second.ambiguous ? nullptr : old->second.snapshot;
   }
+  bool PreviousAmbiguous(const GeometryKey& key) const {
+    const auto old = previous_.find(key);
+    return old != previous_.end() && old->second.ambiguous;
+  }
+  // The same model and geometry without the owner: instance and pose name guest storage.
+  static GeometryKey Shape(GeometryKey key) {
+    key.instance = 0;
+    key.pose = 0;
+    return key;
+  }
+  // c0-c3 of the vertex bank is the world transform (the static fallback key hashes it); for
+  // skinned models it is shared and the bone palette further up tells two bodies apart.
+  struct Difference {
+    float max_world = 0;  // largest change of a world-transform element (metres for translation)
+    float max_any = 0;    // largest change of any finite constant
+    double sum = 0;       // squared change of every finite constant
+  };
+  static Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all) {
+    Difference d;
+    const size_t floats = std::min(a.size(), b.size()) / sizeof(float);
+    for (size_t i = 0; i < (all ? floats : std::min<size_t>(floats, 16)); ++i) {
+      float x, y;
+      std::memcpy(&x, a.data() + i * sizeof(float), sizeof(float));
+      std::memcpy(&y, b.data() + i * sizeof(float), sizeof(float));
+      if (!std::isfinite(x) || !std::isfinite(y)) continue;
+      const float change = std::abs(x - y);
+      if (i < 16) d.max_world = std::max(d.max_world, change);
+      d.max_any = std::max(d.max_any, change);
+      d.sum += double(change) * change;
+    }
+    return d;
+  }
+  // The previous frame's draw of the same shape whose constants moved least, if it is clearly
+  // nearer than any other and moved no further than an object can in one frame.
+  std::shared_ptr<const GeometrySnapshot> Nearest(const GeometryKey& key,
+                                                  std::span<const uint8_t> vertex) {
+    const auto shape = previous_shapes_.find(Shape(key));
+    if (shape == previous_shapes_.end()) { ++statistics_.none; return nullptr; }
+    const GeometrySnapshot* best = nullptr;
+    double best_sum = 0, second_sum = -1;
+    bool any_near = false;
+    for (const auto& candidate : shape->second) {
+      // Another frame's object still drawn under its own key this frame is not this one.
+      if (candidate.key == key || current_.count(candidate.key) || PreviousAmbiguous(candidate.key) ||
+          claimed_.count(candidate.snapshot.get()))
+        continue;
+      if (Distance(candidate.snapshot->vertex, vertex, false).max_world > kMaximumWorldStep) continue;
+      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
+      if (d.max_any > kMaximumConstantStep) continue;
+      any_near = true;
+      if (!best || d.sum < best_sum) {
+        if (best) second_sum = best_sum;
+        best = candidate.snapshot.get();
+        best_sum = d.sum;
+      } else if (second_sum < 0 || d.sum < second_sum) {
+        second_sum = d.sum;
+      }
+    }
+    if (!best) { ++(any_near ? statistics_.none : statistics_.transform_far); return nullptr; }
+    if (second_sum >= 0 && second_sum <= 2.25 * best_sum + 1e-6) {
+      ++statistics_.transform_ambiguous;
+      return nullptr;
+    }
+    for (const auto& candidate : shape->second)
+      if (candidate.snapshot.get() == best) {
+        claimed_.insert(best);
+        ++statistics_.transform;
+        return candidate.snapshot;
+      }
+    return nullptr;
+  }
+  static constexpr size_t kMaximumShapeCandidates = 32;
+  static constexpr float kMaximumWorldStep = 6.0f;      // ~650 km/h at 30 fps
+  static constexpr float kMaximumConstantStep = 12.0f;  // camera and bones included
+  struct Candidate {
+    GeometryKey key;
+    std::shared_ptr<GeometrySnapshot> snapshot;
+  };
+  std::unordered_map<GeometryKey, std::vector<Candidate>, GeometryKeyHash> previous_shapes_,
+      current_shapes_;
+  std::unordered_set<const GeometrySnapshot*> claimed_;
+  GeometryMatchStatistics statistics_{};
+  bool transform_fallback_ = false;
   std::unordered_map<GeometryKey, Entry, GeometryKeyHash> previous_, current_;
   std::shared_ptr<GeometryBudget> budget_;
   size_t maximum_entries_;

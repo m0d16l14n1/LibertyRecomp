@@ -2,6 +2,8 @@
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 #include <limits>
 #include <rex/graphics/gta4_native/temporal_commands.h>
 #include "graphics/gta4_metal/temporal/composite_contract.h"
@@ -56,6 +58,61 @@ void GeometryBindings() {
   CHECK(history.Record(base,vertex,shared,{}).ambiguous);
   CHECK(history.Begin(1,1,3,false));
   CHECK(!history.Record(base,vertex,shared,{}).previous);
+}
+// Moving entities are drawn from per-frame copies of their transforms: the owner changes.
+void GeometryTransformMatch() {
+  std::array<uint8_t,sizeof(core::SharedConstants)> shared{};
+  const auto bank=[](float x,float y){
+    std::array<uint8_t,4096> v{};
+    const std::array<float,16> world{1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,0,1};
+    std::memcpy(v.data(),world.data(),sizeof(world));
+    return v;
+  };
+  const auto key=[](uint64_t owner){temporal::GeometryKey k{owner,2,owner,4,5,6,7};return k;};
+  {  // one car, new owner address each frame, 1 m a frame: continued
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); CHECK(h.Record(key(100),bank(0,0),shared,{}).captured);
+    CHECK(h.Begin(1,1,2,false));
+    const auto r=h.Record(key(200),bank(1,0),shared,{});
+    CHECK(r.previous&&r.matched_by_transform);
+    CHECK(h.Record(key(200),bank(1,0),shared,{}).previous);  // the same draw again
+  }
+  {  // without the fallback: no history, as before
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false)); CHECK(!h.Record(key(200),bank(1,0),shared,{}).previous);
+  }
+  {  // two same-model cars equally near: refused
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{}); h.Record(key(101),bank(2,0),shared,{});
+    CHECK(h.Begin(1,1,2,false)); CHECK(!h.Record(key(200),bank(1,0),shared,{}).previous);
+  }
+  {  // the nearer of two is clear: taken, and not given to a second object
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{}); h.Record(key(101),bank(5,0),shared,{});
+    CHECK(h.Begin(1,1,2,false));
+    const auto a=h.Record(key(200),bank(0.5f,0),shared,{});
+    const auto origin=bank(0,0);
+    CHECK(a.previous&&a.previous->vertex==std::vector<uint8_t>(origin.begin(),origin.end()));
+    const auto b=h.Record(key(201),bank(0.6f,0),shared,{});
+    CHECK(!b.previous||b.previous->vertex!=a.previous->vertex);
+  }
+  {  // too far for one frame: none
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false)); CHECK(!h.Record(key(200),bank(20,0),shared,{}).previous);
+  }
+  {  // a reused owner address now holding an object 30 m away: not its history
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false)); CHECK(!h.Record(key(100),bank(30,0),shared,{}).previous);
+  }
+  {  // still drawn under its own key: not borrowed by another owner
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false)); CHECK(h.Record(key(100),bank(0,0),shared,{}).previous);
+    CHECK(!h.Record(key(300),bank(0.1f,0),shared,{}).previous);
+  }
 }
 void MaterialSampling() {
   temporal::Configuration c{1920,1080,3840,2160,temporal::Method::kMetalFx,false};
@@ -208,5 +265,5 @@ void DeclaredBoundaries() {
   CHECK(!registry.Find(1,5,11));
 }
 }  // namespace
-int main(){GeometryBindings();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
+int main(){GeometryBindings();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
   std::printf("temporal draw policy: %u checks passed\n",checks);return 0;}
