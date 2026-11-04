@@ -25,7 +25,7 @@ void ResourceStore::RegisterFont(uint32_t texture, uint32_t font_id) {
   if (inserted || entry->second != font_id) {
     state_->InvalidateBindings();
     entry->second = font_id;
-    state_->dirty.insert(texture);
+    state_->MarkDirty(texture);
   }
 }
 

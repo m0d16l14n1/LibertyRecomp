@@ -71,19 +71,35 @@ struct ResourceStore::State {
   uint64_t buffer_validations = 0, buffer_validation_skips = 0, buffer_validation_mismatches = 0;
   bool buffer_validation_per_use = false;  // gta4_metal_buffer_validation_per_use, per frame
   // Reused captures already validated this frame, by handle (direct-mapped): a byte-identical
-  // guest header skips the metadata decode and the map lookup. Any erase invalidates it.
-  struct BufferMemo {
+  // guest header skips the metadata decode and the map lookup. Any erase invalidates it
+  // (buffer_epoch); `frame` through Buffer::validated_frame; a later Invalidate through
+  // dirty_serial. One cache line per slot; 2048 slots so a frame's working set (often more
+  // than 256 distinct vertex and index buffers) does not evict itself.
+  struct alignas(64) BufferMemo {
     uint32_t handle = 0;
     uint64_t epoch = 0;
+    uint64_t dirty_serial = 0;  // State::dirty_serial when remembered: no insert since
     Buffer* buffer = nullptr;
     std::array<uint8_t, 32> header{};
   };
-  std::array<BufferMemo, 256> buffer_memo{};
+  static_assert(sizeof(BufferMemo) == 64);
+  static constexpr unsigned kBufferMemoBits = 11;
+  std::array<BufferMemo, size_t{1} << kBufferMemoBits> buffer_memo{};
+  BufferMemo& BufferMemoSlot(uint32_t handle) {
+    return buffer_memo[uint32_t(handle * 0x9E3779B1u) >> (32 - kBufferMemoBits)];
+  }
   uint64_t buffer_epoch = 1, buffer_memo_hits = 0;
   void TouchBuffer(Buffer& buffer) {
     buffer_lru.splice(buffer_lru.end(), buffer_lru, buffer.recency);
   }
   std::unordered_set<uint32_t> dirty;
+  // Bumped by every insert into `dirty` (always through MarkDirty): a memo remembered at the
+  // current serial cannot name a handle made dirty since, so its hit skips the set lookup.
+  uint64_t dirty_serial = 1;
+  void MarkDirty(uint32_t handle) {
+    dirty.insert(handle);
+    ++dirty_serial;
+  }
   uint64_t surface_epoch = 1;  // ResourceStore::surface_epoch()
   std::unordered_map<SamplerKey, id<MTLSamplerState>, SamplerKeyHash> samplers;
   uint64_t next_generation = 1, serial = 0;
