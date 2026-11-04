@@ -112,6 +112,18 @@ Uncommitted batch, to build and bench together:
 8. **Dev pad `peds`.** `CREATE_RANDOM_CHAR` makes nothing while no ped models are streamed in around the
    player, which stopped the Metal 4 + FG pad. `peds` now retries each frame, falls back to `CREATE_CHAR`
    with `M_Y_THIEF` after 2 s, and replies `ok N` after 10 s at most, so the pad never stops there.
+9. **`gta4_temporal_history_rotation_limit` makes the car worse; keep it at 0 (off).** A/B on a drive
+   (Metal 4 + FG, 20 dumps each, scored by `tearscore.py`: per pixel, the generated image's distance to
+   the closer of `before`/`real`, in the car box and the sky band):
+   - **0 (off):** one mild frame, with the car-box p99 at 45. Every other frame had p99 ≤ 22.
+   - **0.35:** frames 22016-22057 had a car-box p99 of 100-121, with 5-8% of pixels more than 40 off.
+     - The generated image shows a rectangle of road carried along under the car and a duplicated strip
+       of bumper. The real frame is clean.
+     - So the limit refuses matches that were right, and the refused draws take the neighbour fill.
+   - `carmv.py` (the motion magnitude in a fixed screen box) cannot see this: while driving, the box
+     also holds the moving road.
+   - The run also measured a second GPU user: WindowServer at 87-95% GPU time (ioreg `AppUsage`
+     `accumulatedGPUTime`) with the game closed. The fps numbers of that A/B are void.
 
 ## Measurements so far
 
