@@ -361,6 +361,16 @@ struct Renderer::State {
   }
   id<MTLDepthStencilState> DepthState(const FixedState&,bool attachment,std::string&);
   ui::metal::UploadSlice Upload(std::span<const uint8_t>,bool swap,std::string&);
+  // Previous-frame temporal snapshots (GeometryHistory): uploaded once per frame each, by
+  // identity, with no hash or last-bank lookup. The map holds the snapshot until the frame ends,
+  // so an address is never reused while it is a key. Cleared with the constant caches.
+  struct SnapshotUpload {
+    std::shared_ptr<const gta4_native::temporal::GeometrySnapshot> keep;
+    ui::metal::UploadSlice vertex,shared;
+  };
+  std::unordered_map<const gta4_native::temporal::GeometrySnapshot*,SnapshotUpload> snapshot_uploads;
+  uint64_t snapshot_upload_hits=0;
+  const SnapshotUpload* UploadSnapshot(const std::shared_ptr<const gta4_native::temporal::GeometrySnapshot>&,std::string&);
   bool Draw(const gta4_native::CommandHeader&,std::span<const std::byte>,std::string&);
   bool Clear(const gta4_native::ClearCommand&,std::string&);
   bool ClearSurface(const std::shared_ptr<SurfaceResource>&,uint32_t aspects,

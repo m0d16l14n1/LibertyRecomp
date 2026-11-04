@@ -850,8 +850,10 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       if(range_constants_enabled){
         const auto previous=UploadRange(SIZE_MAX,history.previous->vertex,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
         previous_vertex=previous.slice;previous_vertex_address=previous.address;
-      }else{previous_vertex=Upload(history.previous->vertex,false,error);previous_vertex_address=previous_vertex.gpu_address;}
-      previous_shared=Upload(history.previous->shared,false,error);
+        previous_shared=Upload(history.previous->shared,false,error);
+      }else if(const auto* snapshot=UploadSnapshot(history.previous,error)){
+        previous_vertex=snapshot->vertex;previous_vertex_address=previous_vertex.gpu_address;previous_shared=snapshot->shared;
+      }
       if(shadow_range_constants){  // the variant reads the previous bank at the current shader's offsets
         ++previous_bank_uploads;previous_bank_range_bytes+=size_t(RangeOf(pipeline->vertex.float_constant_mask,256).registers())*16;
       }
@@ -966,8 +968,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     static std::string dump_value; static uint64_t dump_sequence=~0ull;
     static bool dump_written=false; static uint32_t dump_logged=0;
     static __strong id<MTLTexture> dump_after=nil;
-    const std::string dump_dir=REXCVAR_GET(gta4_metal_lighting_dump);
     const bool deferred=lighting.stage==RenderExecutionStage::kDeferredLighting;
+    const std::string dump_dir=deferred?std::string(REXCVAR_GET(gta4_metal_lighting_dump)):std::string();
     if(dump_after&&deferred){
       EndRender();
       DumpLightingTexture(commands,dump_after,dump_value+"/global-target-after.raw");

@@ -248,7 +248,7 @@ bool Renderer::State::Begin(std::string& error) {
   profile_enabled=profile_elapsed>=profile_delay && profile_elapsed-profile_delay<profile_duration &&
       rex::diagnostics::IsEnabled(rex::diagnostics::Category::kNativeProfiler);
   resolve_profile.Begin();
-  constants.Clear();
+  constants.Clear(); snapshot_uploads.clear();
   part_first_draw = draws;
   split_commit_draws = rex::cvar::Query<uint32_t>("gta4_metal_split_commit_draws");
   temporal_vertex_texture_history = rex::cvar::Query<bool>("gta4_temporal_history_vertex_textures");
@@ -340,7 +340,7 @@ bool Renderer::State::CommitEncoded(std::string& error) {
     REXLOG_INFO("gta4-metal-capture: saved title submission {}", submitted);
   }
   frame_qos.End();
-  commands=nil; frame=nullptr; constants.Clear(); range_constants.Clear();
+  commands=nil; frame=nullptr; constants.Clear(); range_constants.Clear(); snapshot_uploads.clear();
   return true;
 }
 ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, bool swap, std::string& error) {
@@ -392,6 +392,23 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
   }
   const auto* immutable_source=constants.Insert(hash,bytes,swap,upload,cache_constant_sources);
   return remember(upload,immutable_source);
+}
+
+const Renderer::State::SnapshotUpload* Renderer::State::UploadSnapshot(
+    const std::shared_ptr<const gta4_native::temporal::GeometrySnapshot>& snapshot, std::string& error) {
+  if (!snapshot || snapshot->vertex.empty() || snapshot->shared.empty() || !Begin(error)) return nullptr;
+  auto [it, inserted] = snapshot_uploads.try_emplace(snapshot.get());
+  if (!inserted) { ++snapshot_upload_hits; return &it->second; }
+  const auto copy = [&](const std::vector<uint8_t>& bytes) {
+    auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+    if (upload) { std::memcpy(upload.data, bytes.data(), bytes.size()); constant_upload_bytes += bytes.size(); }
+    return upload;
+  };
+  it->second = {snapshot, copy(snapshot->vertex), copy(snapshot->shared)};
+  if (!it->second.vertex || !it->second.shared) {
+    snapshot_uploads.erase(it); error = "Metal frame upload budget exceeded"; return nullptr;
+  }
+  return &it->second;
 }
 
 Renderer::State::BankUpload Renderer::State::UploadRange(size_t index, std::span<const uint8_t> bytes,

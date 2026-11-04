@@ -47,12 +47,20 @@ struct GeometryKeyHash {
     };
     for (uint64_t v : {k.instance, k.drawable, k.pose, k.vertex_shader, k.layout,
                        k.geometry_generation, k.range}) add(v);
-    for (const auto& stream : k.streams) {
-      add(stream.generation); add(stream.offset); add(stream.stride);
+    // Most of the 17 streams are unused (all zero): skip those, and tag the rest with their
+    // slot so equal streams in different slots still hash apart. Hashed on every lookup
+    // (several per draw in Record), so the word count matters.
+    for (uint64_t slot = 0; slot < k.streams.size(); ++slot) {
+      const auto& stream = k.streams[slot];
+      const uint64_t layout = uint64_t(stream.offset) | uint64_t(stream.stride) << 32;
+      if (!stream.generation && !layout) continue;
+      add(stream.generation ^ slot << 59);
+      add(layout ^ slot << 59);
     }
-    add(k.pixel_shader); add(k.index_generation); add(uint32_t(k.base_vertex));
-    add(k.primitive); add(k.restart_index); add(k.indexed); add(k.restart);
-    add(k.occurrence);
+    add(k.pixel_shader); add(k.index_generation);
+    add(uint64_t(uint32_t(k.base_vertex)) | uint64_t(k.primitive) << 32);
+    add(uint64_t(k.restart_index) | uint64_t(k.occurrence) << 32);
+    add(uint64_t(k.indexed) | uint64_t(k.restart) << 1);
     return size_t(h);
   }
 };
@@ -353,9 +361,13 @@ class GeometryHistory {
   Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all) const {
     Difference d;
     const size_t registers = std::min<size_t>(std::min(a.size(), b.size()) / 16, 256);
-    for (size_t reg = 0; reg < registers; ++reg) {
+    // Only the compared registers, in ascending order (as a scan of all 256 would visit them,
+    // so ties and the double sum come out the same): world_ alone is at most four.
+    for (size_t word = 0; word < 4; ++word) {
+     for (uint64_t bits = all ? reads_[word] | world_[word] : world_[word]; bits; bits &= bits - 1) {
+      const size_t reg = word * 64 + size_t(std::countr_zero(bits));
+      if (reg >= registers) break;
       const bool world = Reads(world_, reg);
-      if (!(all ? Reads(reads_, reg) || world : world)) continue;
       for (size_t i = reg * 4; i < reg * 4 + 4; ++i) {
         float x, y;
         std::memcpy(&x, a.data() + i * sizeof(float), sizeof(float));
@@ -369,6 +381,7 @@ class GeometryHistory {
         }
         d.sum += double(change) * change;
       }
+     }
     }
     return d;
   }
@@ -383,14 +396,16 @@ class GeometryHistory {
     bool any_near = false;
     for (const auto& candidate : shape->second) {
       // Another frame's object still drawn under its own key this frame is not this one.
-      if (candidate.key == key || current_.count(candidate.key) || PreviousAmbiguous(candidate.key) ||
-          claimed_.count(candidate.snapshot.get()))
+      // The pointer and key compares go first; the two hash lookups after them.
+      if (claimed_.count(candidate.snapshot.get()) || candidate.key == key ||
+          current_.count(candidate.key) || PreviousAmbiguous(candidate.key))
         continue;
-      if (Distance(candidate.snapshot->vertex, vertex, false).max_world > kMaximumWorldStep) {
+      // One pass gives both the world step and the full difference (all includes world_).
+      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
+      if (d.max_world > kMaximumWorldStep) {
         ++statistics_.far_world;
         continue;
       }
-      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
       if (d.max_any > kMaximumConstantStep) {
         ++statistics_.far_register[(d.max_index / 4) % statistics_.far_register.size()];
         continue;
