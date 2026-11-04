@@ -7,6 +7,7 @@
 // (1% at 30 fps). Fades, script timers read from these clocks and mission timers stretch.
 // After the original update, each clock that advanced by exactly the truncated step this
 // frame gets its lost fraction carried, a whole millisecond at a time.
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -18,11 +19,16 @@
 #include <rex/logging.h>
 
 #include "gta4_init.h"
+#include "gta4_timer.h"
 #include "gta4_write_watch.h"
 
 REXCVAR_DEFINE_BOOL(gta4_timer_millisecond_carry, true, "GTA IV/Fixes",
                     "Carry the fraction of a millisecond the game's clocks drop every frame "
                     "(they run 4% slow at 60 fps, 1% at 30)");
+REXCVAR_DEFINE_UINT32(gta4_debug_fixed_step_hz, 0, "GTA IV/Diagnostics",
+                      "Debug: every game frame advances 1/N s whatever the real frame time (0 = "
+                      "off). 60 runs the game's above-30-fps paths on a slow GPU, in slow motion. "
+                      "31-300");
 
 namespace {
 
@@ -33,6 +39,46 @@ constexpr uint32_t kGameClockCopy = 0x82C6C2BC;  // = game clock unless sub_829E
 constexpr uint32_t kStepOffset = 8;
 
 // CTimer::Update runs on the game thread only.
+// The step comes from the timebase: f12 = (mftb - previous) * 1/49875000 (the float at
+// 0x82009988), then is clamped to [1/300, 1/15] (CTimer::Initialise sets 0x82A98B38/3C). The
+// previous reading is a u64 at 0x82C6C2C8, stored after the read.
+constexpr uint32_t kPreviousTimebase = 0x82C6C2C8;
+constexpr uint32_t kSecondsPerTick = 0x82009988;
+constexpr uint32_t kFrameCounter = 0x82C6C2B8;
+
+// Debug fixed step: move the previous reading back so this frame measures exactly 1/hz (plus
+// the few microseconds between here and the game's own mftb).
+void ForceFixedStep(uint8_t* base) {
+  const uint32_t hz = REXCVAR_GET(gta4_debug_fixed_step_hz);
+  if (hz == 0) return;
+  const float seconds_per_tick = std::bit_cast<float>(REX_LOAD_U32(kSecondsPerTick));
+  if (!(seconds_per_tick > 0.0f)) return;
+  const double step = 1.0 / double(std::clamp<uint32_t>(hz, 31, 300));
+  const uint64_t ticks = uint64_t(std::llround(step / double(seconds_per_tick)));
+  const uint64_t now = REX_QUERY_TIMEBASE();
+  if (now > ticks) REX_STORE_U64(kPreviousTimebase, now - ticks);
+}
+
+struct Logical { uint32_t frames = 0; uint32_t last_counter = 0; double seconds = 0; bool valid = false; };
+Logical logical;
+void AdvanceLogicalFrames(uint8_t* base) {
+  constexpr double kLogicalStep = 1.0 / 30.0;
+  const uint32_t counter = REX_LOAD_U32(kFrameCounter);
+  if (!logical.valid || counter == logical.last_counter) {
+    logical.valid = true;
+    logical.last_counter = counter;
+    return;
+  }
+  logical.last_counter = counter;
+  const float step = std::bit_cast<float>(REX_LOAD_U32(kClocks[kGameClock] + kStepOffset));
+  if (!std::isfinite(step) || step <= 0.0f) return;
+  logical.seconds += step;
+  // Allow a little float noise at exactly 30 fps; at most one logical frame per real frame.
+  if (logical.seconds + 1e-4 >= kLogicalStep) {
+    ++logical.frames;
+    logical.seconds = std::max(0.0, std::min(logical.seconds - kLogicalStep, kLogicalStep));
+  }
+}
 std::array<double, kClocks.size()> fraction{};
 // Every 600 updates: how far the game clock moved against the host clock (1.00 = real time
 // while unpaused; the truncation alone gives about 0.96 at 60 fps).
@@ -51,8 +97,20 @@ void ObserveRate(uint32_t game_clock) {
 
 }  // namespace
 
+namespace gta4::timer {
+uint32_t LogicalFrameCount() { return logical.frames; }
+}  // namespace gta4::timer
+
+static void UpdateWithCarry(PPCContext& ctx, uint8_t* base);
+
 extern "C" void sub_8227FE40(PPCContext& ctx, uint8_t* base) {
   gta4::write_watch::Tick(base);  // diagnostic, off unless gta4_watch_write is set
+  ForceFixedStep(base);           // diagnostic, off unless gta4_debug_fixed_step_hz is set
+  UpdateWithCarry(ctx, base);
+  AdvanceLogicalFrames(base);
+}
+
+static void UpdateWithCarry(PPCContext& ctx, uint8_t* base) {
   if (!REXCVAR_GET(gta4_timer_millisecond_carry)) {
     fraction = {};
     __imp__sub_8227FE40(ctx, base);

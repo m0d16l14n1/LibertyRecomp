@@ -1,0 +1,11 @@
+# Cutscene clock check: two cutscenes started through the dev pad.
+await 5m
+wait 10s
+nowanted
+invincible
+mark all
+cutscene rom2_a 240
+wait 2s
+cutscene intro 300
+mark all_end
+quit

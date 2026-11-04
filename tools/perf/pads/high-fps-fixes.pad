@@ -1,0 +1,33 @@
+# Task 27: heli warning lights and police chase blips at the 30 fps rate.
+# Run with --gta4_debug_fixed_step_hz=60 to get the above-30 path on a slow GPU (slow motion),
+# once with gta4_heli_blinker_fix / gta4_chase_blip_spin_fix on and once with both =false.
+# On: each heli lamp flashes about once a second (32 logical frames); off at a fixed 60 step:
+# twice a second, shorter. Chase blip: one turn per ~0.57 s on, twice as fast off (game time).
+await 5m
+wait 10s
+invincible
+nowanted
+mark all
+# On foot: the static counter (+0x268 calls) should be written about 30 times per 60 frames at a 60 Hz step.
+set gta4_watch_write player-ai:0x264:8
+wait 15s
+clock 22 0
+weather 1
+road 1040 150 20
+car sultan
+wait 6s
+# Heli 40 m up, hover with no input: the tail and belly lamps blink in the chase camera.
+heli maverick 40
+wait 2s
+trigger rt 0.55 20s
+release all
+shot {out}/shots/27-heli-night.png 0.5
+# Police chase: two stars, cop cars get the spinning radar blip.
+native SET_MAX_WANTED_LEVEL 6
+native ALTER_WANTED_LEVEL 0 2
+native APPLY_WANTED_LEVEL_CHANGE_NOW 0
+wait 25s
+shot {out}/shots/27-chase-blips.png 0.5
+where
+mark all_end
+quit
