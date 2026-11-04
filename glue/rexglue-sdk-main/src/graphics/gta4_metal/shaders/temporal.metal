@@ -52,21 +52,8 @@ kernel void liberty_temporal_background_motion(
   motion.write(float4(velocity,0,0),pixel);
   previous_depth.write(float4(far_depth),pixel);
 }
-// Frame generation only, after the temporal scaler has read the motion: world
-// pixels whose draw had no object history get the camera's motion at their
-// own depth (moving objects then move with the world for one generated frame,
-// as MCLA's camera-only motion vectors do). Sky pixels are left to the
-// background kernel; history-tracked pixels keep their object motion.
-kernel void liberty_temporal_camera_motion_fill(
-    texture2d<float,access::read> depth [[texture(0)]],
-    texture2d<float,access::read_write> motion [[texture(1)]],
-    texture2d<float,access::read> previous_depth [[texture(2)]],
-    constant BackgroundMotionConstants& c [[buffer(0)]],
-    uint2 pixel [[thread_position_in_grid]]) {
-  if(any(pixel>=c.extent))return;
-  const float far_depth=c.reversed?0.0f:1.0f;
-  const float z=depth.read(pixel).r;
-  if(previous_depth.read(pixel).r>=0||z==far_depth||!isfinite(z)||z<0||z>1)return;
+// Camera-only motion of the point at pixel/depth z (input pixels, current to previous).
+float2 temporal_camera_velocity(constant BackgroundMotionConstants& c,uint2 pixel,float z){
   const float2 uv=(float2(pixel)+0.5f-c.jitter)/float2(c.extent);
   const float2 current=(uv*2-1)*float2(1,-1)-c.half_pixel;
   const float4 previous=c.reprojection*float4(current,z,1);
@@ -74,7 +61,56 @@ kernel void liberty_temporal_camera_motion_fill(
   if(all(isfinite(previous))&&previous.w>1.0e-6f)
     velocity=(previous.xy/previous.w-current)*float2(c.extent)*float2(0.5f,-0.5f);
   if(!all(isfinite(velocity))||any(abs(velocity)>65504.0f))velocity=float2(0);
-  motion.write(float4(velocity,0,0),pixel);
+  return velocity;
+}
+float temporal_fill_view_depth(float z,float2 planes,bool reversed){
+  z=reversed?1-z:z;return planes.x*planes.y/max(planes.y-z*(planes.y-planes.x),1.0e-8f);
+}
+// Frame generation only, after the temporal scaler has read the motion: world pixels whose
+// draw had no object history. Retail draws a car or a ped in many parts and some of them still
+// have no history (refused as ambiguous, or new this frame); given the camera's motion they
+// were left behind by the rest of the object in every generated frame, so the player's car
+// tore and Niko shook on turns. Such a pixel first takes the motion of nearby pixels at the
+// same depth that do have history, preferring ones that move unlike the camera (a moving
+// object); only with none does it take the camera's motion. Sky pixels are left to the
+// background kernel; history-tracked pixels keep their object motion and are only read here.
+kernel void liberty_temporal_camera_motion_fill(
+    texture2d<float,access::read> depth [[texture(0)]],
+    texture2d<float,access::read_write> motion [[texture(1)]],
+    texture2d<float,access::read> previous_depth [[texture(2)]],
+    constant BackgroundMotionConstants& c [[buffer(0)]],
+    constant float4& fill [[buffer(1)]],  // near, far, neighbour search on (1/0), unused
+    uint2 pixel [[thread_position_in_grid]]) {
+  if(any(pixel>=c.extent))return;
+  const float far_depth=c.reversed?0.0f:1.0f;
+  const float z=depth.read(pixel).r;
+  if(previous_depth.read(pixel).r>=0||z==far_depth||!isfinite(z)||z<0||z>1)return;
+  if(fill.z>0&&fill.x>0&&fill.y>fill.x){
+    const float view=temporal_fill_view_depth(z,fill.xy,c.reversed);
+    const float tolerance=max(0.35f,0.08f*view);
+    constexpr int radii[6]={2,5,10,18,32,56};
+    const int2 directions[8]={int2(1,0),int2(-1,0),int2(0,1),int2(0,-1),
+                              int2(1,1),int2(-1,1),int2(1,-1),int2(-1,-1)};
+    float2 sum=float2(0);float weight=0;int found=0;
+    // Nearest rings first; stop after a ring that found enough of the same surface.
+    for(int r=0;r<6&&found<3;++r)for(int d=0;d<8;++d){
+      const int2 q=int2(pixel)+directions[d]*radii[r];
+      if(any(q<0)||any(q>=int2(c.extent)))continue;
+      if(previous_depth.read(uint2(q)).r<0)continue;
+      const float zq=depth.read(uint2(q)).r;
+      if(zq==far_depth||!isfinite(zq)||zq<0||zq>1)continue;
+      if(abs(temporal_fill_view_depth(zq,fill.xy,c.reversed)-view)>tolerance)continue;
+      const float2 mq=motion.read(uint2(q)).xy;
+      if(!all(isfinite(mq)))continue;
+      // An object moving unlike the camera (the car under the player) outweighs the static
+      // world around it at the same depth (the road under the car).
+      const bool moving=length(mq-temporal_camera_velocity(c,uint2(q),zq))>0.75f;
+      const float w=(moving?8.0f:1.0f)/float(1+radii[r]);
+      sum+=mq*w;weight+=w;++found;
+    }
+    if(weight>0){motion.write(float4(sum/weight,0,0),pixel);return;}
+  }
+  motion.write(float4(temporal_camera_velocity(c,pixel,z),0,0),pixel);
 }
 struct TemporalConstants {
   uint2 extent;float2 jitter;

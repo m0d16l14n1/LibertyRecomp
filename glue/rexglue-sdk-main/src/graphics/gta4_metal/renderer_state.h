@@ -275,6 +275,7 @@ struct Renderer::State {
   bool CommitEncoded(std::string& error);
   bool PassContinues(const Targets&) const;
   uint32_t split_commit_draws=0;
+  bool temporal_vertex_texture_history=false;
   uint64_t part_first_draw=0, split_commits=0;
   bool frame_split=false;
   bool CaptureTargets(std::span<const uint8_t>,uint32_t color_mask,bool depth,Targets&,std::string&);

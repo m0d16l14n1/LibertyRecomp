@@ -25,6 +25,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_constant_sources, true, "GPU", "Keep bounde
 REXCVAR_DEFINE_BOOL(gta4_metal_track_guest_constants, true, "GPU", "Reuse float banks while the guest reports no changes");
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_pipeline_lookup, true, "GPU", "Reuse recent exact pipeline keys before the full cache lookup");
+REXCVAR_DEFINE_BOOL(gta4_temporal_history_vertex_textures, false, "GPU", "Give draws whose vertex shader reads a texture motion history (previous position from this frame's texture)");
 REXCVAR_DEFINE_UINT32(gta4_metal_split_commit_draws, 0, "GPU", "Commit the frame's first part to the GPU once this many draws are encoded (at a render-pass break; once a frame; 0 = one command buffer a frame)");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_encoder_state, true, "GPU", "Reuse unchanged state in one Metal encoder");
 REXCVAR_DEFINE_BOOL(gta4_metal_foreground_qos, true, "GPU", "Bound recording work to foreground QoS");
@@ -209,6 +210,7 @@ bool Renderer::State::Begin(std::string& error) {
   constants.Clear();
   part_first_draw = draws;
   split_commit_draws = rex::cvar::Query<uint32_t>("gta4_metal_split_commit_draws");
+  temporal_vertex_texture_history = rex::cvar::Query<bool>("gta4_temporal_history_vertex_textures");
   cache_constant_sources = rex::cvar::Query<bool>("gta4_metal_cache_constant_sources");
   cache_material_bindings=rex::cvar::Query<bool>("gta4_metal_cache_material_bindings");
   track_guest_constants = rex::cvar::Query<bool>("gta4_metal_track_guest_constants");

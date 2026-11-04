@@ -13,6 +13,9 @@
 REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
                     "Continue a moving object's motion history by its nearest transform when its "
                     "owner address changed since the previous frame");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_neighbour_motion, true, "GPU",
+                    "Frame generation: a pixel without object history takes the motion of nearby "
+                    "pixels at its depth that have it (the rest of its object) before the camera's");
 REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
                       "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
 namespace rex::graphics::gta4_metal::temporal {
@@ -239,6 +242,10 @@ bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error) {
   if(!e){error="camera motion fill encoder creation failed";return false;}
   e.label=@"Liberty frame generation camera motion fill";
   [e setComputePipelineState:camera_motion_fill_];
+  // Pixels without history borrow the motion of the object around them before the camera's.
+  const std::array<float,4> fill{metadata.near_plane,metadata.far_plane,
+      REXCVAR_GET(gta4_metalfx_frame_generation_neighbour_motion)?1.0f:0.0f,0};
+  [e setBytes:fill.data() length:sizeof(fill) atIndex:1];
   [e setTexture:inputs.depth atIndex:0];
   [e setTexture:inputs.motion atIndex:1];
   [e setTexture:inputs.previous_depth atIndex:2];

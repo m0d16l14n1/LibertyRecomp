@@ -744,7 +744,10 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     key.primitive=type;key.indexed=source_indexed;key.restart=restart;
     key.restart_index=restart?restart_value:0;
     auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip);
-    if(history.previous&&!pipeline->vertex.used_texture_mask&&!temporal.metadata.camera_cut){
+    // A vertex shader reading a texture recomputes the previous position with this frame's
+    // texture: exact while that texture is unchanged (vehicle damage changes rarely).
+    const bool vertex_texture_history=!pipeline->vertex.used_texture_mask||temporal_vertex_texture_history;
+    if(history.previous&&vertex_texture_history&&!temporal.metadata.camera_cut){
       core::SharedConstants prior_shared{};
       if(history.previous->shared.size()!=sizeof(prior_shared)){
         error="temporal shared-constant history layout changed";return false;
@@ -760,7 +763,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       REXLOG_INFO("gta4-temporal-missing-motion frame={} vs={:016X} ps={:016X} owner={:X} scoped={} drawable={:X} pose={:X} generation={:X} range={:X} reason={}",
         temporal.metadata.sequence,pipeline->vertex.hash,key.pixel_shader,owner,bool(temporal.instance),temporal.drawable,temporal.pose,generation,key.range,
         temporal.metadata.camera_cut?"camera-cut":history.ambiguous?"ambiguous-owner":
-        pipeline->vertex.used_texture_mask?"vertex-texture-history":!generation?"uncaptured-geometry":
+        !vertex_texture_history?"vertex-texture-history":!generation?"uncaptured-geometry":
         !history.captured?"history-budget":!history.previous?"no-previous-key":"invalid-history");
   }
   diagnostic_point="draw.constants";

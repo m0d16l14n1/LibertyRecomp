@@ -52,6 +52,35 @@ void DumpFrameImage(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::st
   }];
 }
 
+// Raw texel dump for offline analysis of the frame generation inputs (motion RG16Float, depth and
+// history depth R32Float): "<w> <h> <bytes per texel>\n" then the rows.
+void DumpRawTexture(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::string path) {
+  if (!image) return;
+  NSUInteger texel = 0;
+  switch (image.pixelFormat) {
+    case MTLPixelFormatRG16Float: case MTLPixelFormatR32Float: texel = 4; break;
+    case MTLPixelFormatR8Unorm: texel = 1; break;
+    default: return;
+  }
+  const NSUInteger w = image.width, h = image.height, pitch = w * texel;
+  auto buffer = [commands.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
+  auto blit = [commands blitCommandEncoder];
+  if (!buffer || !blit) { [blit endEncoding]; return; }
+  blit.label = @"Liberty frame generation input dump";
+  [blit copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(w, h, 1) toBuffer:buffer destinationOffset:0
+        destinationBytesPerRow:pitch destinationBytesPerImage:pitch * h];
+  [blit endEncoding];
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    if (done.status != MTLCommandBufferStatusCompleted) return;
+    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+      std::fprintf(f, "%lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)texel);
+      std::fwrite(buffer.contents, 1, pitch * h, f);
+      std::fclose(f);
+    }
+  }];
+}
+
 // A fanless Mac slows its CPU and GPU after some minutes of play; without this the log shows only
 // the frame times rising. Serious and critical are warnings, so the quiet errors log has them too.
 void LogThermalStateChange(uint32_t frame) {
@@ -166,6 +195,9 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         ++dumped;
         DumpFrameImage(commands,generated_pair.generated,fmt::format("{}/framegen_{}_generated.ppm",folder,present.submitted_frame));
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_real.ppm",folder,present.submitted_frame));
+        DumpRawTexture(commands,temporal.inputs.motion,fmt::format("{}/framegen_{}_motion.raw",folder,present.submitted_frame));
+        DumpRawTexture(commands,temporal.inputs.previous_depth,fmt::format("{}/framegen_{}_history.raw",folder,present.submitted_frame));
+        DumpRawTexture(commands,temporal.inputs.depth,fmt::format("{}/framegen_{}_depth.raw",folder,present.submitted_frame));
       }
     }
   }
