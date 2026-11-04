@@ -109,5 +109,19 @@ int main() {
   assert(!banks.Clean(0) && !banks.Clean(1));
   banks.Copied(0); banks.Copied(1); banks.Reset();
   assert(!banks.Clean(0) && !banks.Clean(1));
+  // Dirty groups accumulate until the bank is copied; group g is bit 63-g.
+  assert(!banks.Known(0) && !banks.Dirty(0));
+  banks.Observe(2, GuestConstantTracking::GroupBit(0), GuestConstantTracking::GroupBit(55), false);
+  assert(!banks.Known(0) && banks.Dirty(0) == (uint64_t{1} << 63) && banks.Dirty(1) == (uint64_t{1} << 8));
+  banks.Copied(0); banks.Copied(1);
+  assert(banks.Known(0) && banks.Clean(0) && !banks.Dirty(0));
+  banks.Observe(2, GuestConstantTracking::GroupBit(3), 0, false);  // skipped draw
+  banks.Observe(2, GuestConstantTracking::GroupBit(9), 0, false);
+  assert(banks.Known(0) && !banks.Clean(0) && banks.Dirty(0) == (GuestConstantTracking::GroupBit(3) | GuestConstantTracking::GroupBit(9)));
+  assert(banks.Clean(1));
+  banks.Observe(2, 0, 0, true);
+  assert(banks.Dirty(0) == ~uint64_t{0} && banks.Dirty(1) == ~uint64_t{0});
+  banks.Observe(3, 0, 0, false);  // another device: nothing known
+  assert(!banks.Known(0) && !banks.Known(1) && !banks.Dirty(0));
   std::puts("metal_state_tracking=passed");
 }

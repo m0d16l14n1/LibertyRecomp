@@ -3,6 +3,7 @@
 #include <chrono>
 #include <xxhash.h>
 #include <tuple>
+#include <bit>
 #include "renderer_state.h"
 #include "gpu_pass_timer.h"
 #include "../gta4_native/modern_shader_options.h"
@@ -23,6 +24,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_exchange_resolve_clear,true,"GPU","Transfer a ful
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_material_bindings,true,"GPU","Reuse prepared immutable asset texture/sampler bindings");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_constant_sources, true, "GPU", "Keep bounded immutable CPU constant versions");
 REXCVAR_DEFINE_BOOL(gta4_metal_track_guest_constants, true, "GPU", "Reuse float banks while the guest reports no changes");
+REXCVAR_DEFINE_BOOL(gta4_metal_delta_guest_constants, true, "GPU", "Rebuild a changed float bank from the last upload and the register groups the guest wrote");
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
@@ -262,6 +264,7 @@ bool Renderer::State::Begin(std::string& error) {
   cache_material_bindings=rex::cvar::Query<bool>("gta4_metal_cache_material_bindings");
   track_guest_constants = rex::cvar::Query<bool>("gta4_metal_track_guest_constants");
   audit_guest_constants = rex::cvar::Query<bool>("gta4_metal_audit_guest_constants");
+  delta_guest_constants = rex::cvar::Query<bool>("gta4_metal_delta_guest_constants");
   shadow_range_constants = rex::cvar::Query<bool>("gta4_metal_range_constants_shadow");
   range_constants_enabled = rex::cvar::Query<bool>("gta4_metal_range_constants");
   range_constants_vertex = rex::cvar::Query<bool>("gta4_metal_range_constants_vertex");
@@ -367,6 +370,53 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
     ++guest_constant_mismatches;
     REXLOG_ERROR("gta4-metal-constant-audit: unreported change bank={} draw={}; using exact snapshots", guest_bank, draws);
   }
+  // gta4_metal_delta_guest_constants: the guest reports which 64-byte register groups it
+  // wrote since this bank was last copied. Rebuild from the last upload and those groups
+  // only, with no full compare, hash or cache lookup. Audit mode checks the other groups.
+  if (tracked && delta_guest_constants && !guest_constant_tracking_failed && bank->upload && bank->size == bytes.size() &&
+      guest_constants.Known(guest_bank) && bytes.size() % 64 == 0) {
+    constexpr size_t kGroup = 64;
+    const size_t groups = bytes.size() / kGroup;
+    const uint64_t dirty = guest_constants.Dirty(guest_bank);
+    bool reported = true;
+    if (audit_guest_constants) {
+      ++guest_constant_audits;
+      for (size_t g = 0; g < groups && reported; ++g)
+        if (!(dirty & GuestConstantTracking::GroupBit(g)))
+          reported = !std::memcmp(bank->source_view + g * kGroup, bytes.data() + g * kGroup, kGroup);
+      if (!reported) {
+        guest_constant_tracking_failed = true;
+        ++guest_constant_mismatches;
+        REXLOG_ERROR("gta4-metal-constant-audit: unreported group change bank={} draw={}; using exact snapshots", guest_bank, draws);
+      }
+    }
+    if (reported) {
+      uint64_t changed = 0;
+      for (uint64_t bits = dirty; bits; bits &= bits - 1) {
+        const size_t g = 63 - size_t(std::countr_zero(bits));
+        if (g < groups && std::memcmp(bank->source_view + g * kGroup, bytes.data() + g * kGroup, kGroup))
+          changed |= GuestConstantTracking::GroupBit(g);
+      }
+      if (!changed) { ++constant_delta_unchanged; guest_constants.Copied(guest_bank); return bank->upload; }
+      auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+      if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
+      std::memcpy(upload.data, bank->upload.data, bytes.size());
+      if (bank->source_view != bank->source.data()) std::memcpy(bank->source.data(), bank->source_view, bytes.size());
+      bank->source_view = bank->source.data();
+      for (uint64_t bits = changed; bits; bits &= bits - 1) {
+        const size_t g = 63 - size_t(std::countr_zero(bits));
+        gta4_native::core::CopyGuestWordsToHost(static_cast<uint8_t*>(upload.data) + g * kGroup, bytes.data() + g * kGroup, kGroup);
+        std::memcpy(bank->source.data() + g * kGroup, bytes.data() + g * kGroup, kGroup);
+        ++constant_delta_groups;
+      }
+      ++constant_delta_uploads;
+      constant_upload_bytes += bytes.size();
+      guest_bank_upload_bytes[guest_bank] += bytes.size(); ++guest_bank_uploads[guest_bank];
+      bank->upload = upload;
+      guest_constants.Copied(guest_bank);
+      return upload;
+    }
+  }
   if (bank && bank->upload && bank->size == bytes.size() &&
       !std::memcmp(bank->source_view, bytes.data(), bytes.size())) {++constant_last_hits; if (tracked) guest_constants.Copied(guest_bank); return bank->upload;}
   const auto remember = [&](ui::metal::UploadSlice upload,const uint8_t* source) {
@@ -405,6 +455,7 @@ const Renderer::State::SnapshotUpload* Renderer::State::UploadSnapshot(
     return upload;
   };
   it->second = {snapshot, copy(snapshot->vertex), copy(snapshot->shared)};
+  ++snapshot_upload_misses;
   if (!it->second.vertex || !it->second.shared) {
     snapshot_uploads.erase(it); error = "Metal frame upload budget exceeded"; return nullptr;
   }

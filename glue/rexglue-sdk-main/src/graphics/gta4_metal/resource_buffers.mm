@@ -5,9 +5,13 @@
 #include "guest_access_cache.h"
 #include "../gta4_native/native_frame_scheduling.h"
 #include <rex/memory.h>
+#include <rex/cvar.h>
 #include <algorithm>
 #include <cstring>
 #include <limits>
+
+REXCVAR_DEFINE_BOOL(gta4_metal_buffer_validation_per_use, false, "GPU/Diagnostics",
+    "Compare a slice of a reused guest buffer on every use (default: its first use each frame)");
 
 namespace rex::graphics::gta4_metal {
 namespace {
@@ -67,13 +71,22 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
       found->second.size==metadata->guest_size && (found->second.flags&0x8000000Fu)==(flags&0x8000000Fu);
   if (matches && !dirty.contains(handle) && !metadata->guest_locked) {
     auto& cached=found->second;
+    // The rolling shadow comparison is a backstop for guest writes that skip the lock
+    // contract. One slice per buffer per frame keeps the sweep (payload/64 per frame) at
+    // a fixed cost; a buffer drawn 30 times a frame no longer compares 30 slices.
+    if (!buffer_validation_per_use && cached.validated_frame == frame) {
+      ++buffer_validation_skips; TouchBuffer(cached); return &cached;
+    }
     const auto range=GetNativeBufferShadowValidationRange(cached.payload.size(),cached.validation_offset);
     auto slice=memory.Read(metadata->guest_address+uint32_t(range.offset),range.length);
+    ++buffer_validations;
     if (slice.size()==range.length && !std::memcmp(slice.data(),cached.payload.data()+range.offset,range.length)) {
       cached.validation_offset=range.next_offset;
+      cached.validated_frame=frame;
       TouchBuffer(cached);
       return &cached;
     }
+    ++buffer_validation_mismatches;
   }
   const auto bytes=memory.Read(metadata->guest_address,metadata->guest_size);
   if (bytes.empty()) { error="Unmapped guest buffer payload"; return nullptr; }
@@ -234,7 +247,8 @@ size_t ResourceStore::buffer_bytes() const {
   return state_->captured_buffer_bytes + state_->resident_buffer_bytes;
 }
 ResourceStore::BufferCacheStatistics ResourceStore::buffer_cache_statistics() const {
-  return {state_->captured_buffer_bytes, state_->buffers.size(), state_->buffer_evictions};
+  return {state_->captured_buffer_bytes, state_->buffers.size(), state_->buffer_evictions,
+          state_->buffer_validations, state_->buffer_validation_skips, state_->buffer_validation_mismatches};
 }
 
 }  // namespace rex::graphics::gta4_metal

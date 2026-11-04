@@ -95,10 +95,11 @@ struct Renderer::State {
   bool prepare_textures = true, fold_full_clears = true, defer_unrelated_clears = true,
        exchange_resolve_clear = true;
   GuestConstantTracking guest_constants;
-  bool track_guest_constants = true, audit_guest_constants = false;
+  bool track_guest_constants = true, audit_guest_constants = false, delta_guest_constants = true;
   bool guest_constant_tracking_failed = false;
   uint64_t guest_constant_skips = 0, guest_constant_audits = 0, guest_constant_mismatches = 0;
   uint64_t constant_last_hits = 0, constant_hash_hits = 0, constant_upload_bytes = 0;
+  uint64_t constant_delta_uploads = 0, constant_delta_unchanged = 0, constant_delta_groups = 0;  // gta4_metal_delta_guest_constants
   uint64_t skipped_pixel_constant_banks=0;
   // Real full-bank uploads of the VS/PS float banks, beside the range shadow's model.
   std::array<uint64_t,2> guest_bank_upload_bytes{},guest_bank_uploads{};
@@ -369,7 +370,7 @@ struct Renderer::State {
     ui::metal::UploadSlice vertex,shared;
   };
   std::unordered_map<const gta4_native::temporal::GeometrySnapshot*,SnapshotUpload> snapshot_uploads;
-  uint64_t snapshot_upload_hits=0;
+  uint64_t snapshot_upload_hits=0,snapshot_upload_misses=0;
   const SnapshotUpload* UploadSnapshot(const std::shared_ptr<const gta4_native::temporal::GeometrySnapshot>&,std::string&);
   bool Draw(const gta4_native::CommandHeader&,std::span<const std::byte>,std::string&);
   bool Clear(const gta4_native::ClearCommand&,std::string&);

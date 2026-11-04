@@ -157,8 +157,9 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       if (pass_breaks[reason]) REXLOG_INFO("gta4-metal-pass-break frame={} mask={} count={}",
           present.submitted_frame, reason, pass_breaks[reason]);
     const auto buffers = resources.buffer_cache_statistics();
-    REXLOG_INFO("gta4-metal-buffer-cache frame={} captured={} entries={} evictions={}",
-        present.submitted_frame, buffers.captured_bytes, buffers.entries, buffers.evictions);
+    REXLOG_INFO("gta4-metal-buffer-cache frame={} captured={} entries={} evictions={} validations={} validation-skips={} validation-mismatches={}",
+        present.submitted_frame, buffers.captured_bytes, buffers.entries, buffers.evictions,
+        buffers.validations, buffers.validation_skips, buffers.validation_mismatches);
     if (first_scene) traced_scene = true;
   }
   auto& temporal=temporal_scene;
@@ -339,9 +340,18 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
           present.submitted_frame, m4.command_buffers, m4.parts, m4.encoders, m4.barriers, m4.transient_bytes,
           m4.resident, m4.metal3_hops, m4.binds, m4.bind_hits, m4.fragment_barriers, m4.vertex_barriers, m4.evicted,
           m4.residency_commits);
-    REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
+    REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={} delta={} delta-uploads={} "
+        "delta-unchanged={} delta-groups={} last-hits={} hash-hits={} history-uploads={} history-reuses={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
-        guest_constant_mismatches, guest_constant_tracking_failed);
+        guest_constant_mismatches, guest_constant_tracking_failed, delta_guest_constants, constant_delta_uploads,
+        constant_delta_unchanged, constant_delta_groups, constant_last_hits, constant_hash_hits,
+        snapshot_upload_misses, snapshot_upload_hits);
+    {
+      const auto buffers = resources.buffer_cache_statistics();
+      REXLOG_INFO("gta4-metal-buffer-validation frame={} per-use={} validations={} skips={} mismatches={}",
+          present.submitted_frame, rex::cvar::Query<bool>("gta4_metal_buffer_validation_per_use"),
+          buffers.validations, buffers.validation_skips, buffers.validation_mismatches);
+    }
     if (range_constants_enabled)
       REXLOG_INFO("gta4-metal-range-constants-live frame={} vertex={} canary={} vs-uploads={} vs-bytes={} ps-uploads={} ps-bytes={} canaries={}",
           present.submitted_frame, range_constants_vertex, range_constants_canary, guest_bank_uploads[0], guest_bank_upload_bytes[0],

@@ -138,7 +138,10 @@ class ResourceStore {
   void Clear();
   size_t texture_bytes() const;
   size_t buffer_bytes() const;
-  struct BufferCacheStatistics { size_t captured_bytes; size_t entries; uint64_t evictions; };
+  struct BufferCacheStatistics {
+    size_t captured_bytes; size_t entries; uint64_t evictions;
+    uint64_t validations, validation_skips, validation_mismatches;  // reused captures' shadow compare
+  };
   BufferCacheStatistics buffer_cache_statistics() const;
   struct VertexConversionStatistics {
     size_t bytes, charged_bytes, budget, entries;

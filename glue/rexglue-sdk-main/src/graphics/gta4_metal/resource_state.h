@@ -32,6 +32,7 @@ struct ResourceStore::State {
     uint64_t generation = 0;
     uint32_t flags = 0, address = 0, size = 0;
     size_t validation_offset = 0;
+    uint64_t validated_frame = ~uint64_t{0};  // ResourceStore frame of the last passed slice
     std::vector<uint8_t> payload;
     // Stable nodes support keyed lookup and the global conversion LRU.
     std::map<ConversionKey, Conversion> vertices;
@@ -66,6 +67,8 @@ struct ResourceStore::State {
   std::list<uint32_t> buffer_lru;
   size_t buffer_capture_budget = ResourceStore::kDefaultBufferCaptureBudget;
   uint64_t buffer_evictions = 0;
+  uint64_t buffer_validations = 0, buffer_validation_skips = 0, buffer_validation_mismatches = 0;
+  bool buffer_validation_per_use = false;  // gta4_metal_buffer_validation_per_use, per frame
   void TouchBuffer(Buffer& buffer) {
     buffer_lru.splice(buffer_lru.end(), buffer_lru, buffer.recency);
   }

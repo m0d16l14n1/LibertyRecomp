@@ -587,7 +587,10 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   std::array<std::array<uint64_t,kTextureStageCount>,5> heaps{};
   for(size_t heap=0;heap<4;++heap) heaps[heap].fill(fallback_textures[heap].gpuResourceID._impl);
   heaps[4].fill(fallback_sampler.gpuResourceID._impl);
-  std::array<id<MTLResource>,kTextureStageCount+12> indirect{};
+  // Borrowed: every entry is owned for the whole draw by fallback_textures, sampled_images or
+  // indirect_keep (a strong array of 38 cost a retain/release per entry and a release per slot).
+  std::array<id<MTLResource> __unsafe_unretained,kTextureStageCount+12> indirect{};
+  std::array<id<MTLTexture>,3> indirect_keep{};  // textures indirect still names after they leave sampled_images
   std::array<id<MTLTexture>,kTextureStageCount> sampled_images{};
   std::array<ModernTextureTrace, 3> postfx_trace_inputs{};
   const bool trace_postfx = modern_diagnostics.enabled() && pipeline->has_pixel && SupportsSplitPostFx(pipeline->pixel.hash);
@@ -682,6 +685,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     const auto stage=composite_contract->scene_stage;
     temporal.composite_shader=pixel->second.hash;temporal.composite_scene_stage=stage;
     if(auto reconstructed=temporal.Resolve(commands,sampled_images[stage],temporal_error)){
+      indirect_keep[0]=sampled_images[stage];
       sampled_images[stage]=reconstructed;heaps[0][stage]=reconstructed.gpuResourceID._impl;indirect[indirect_count++]=reconstructed;
     }else{
       // A failed allocation/encode must not silently expose a jittered scene.
@@ -733,6 +737,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     }
     if (filtered) {
       heaps[0][2] = filtered.gpuResourceID._impl;
+      indirect_keep[1] = filtered;
       indirect[indirect_count++] = filtered;
       shared.split_postfx_applied = dof_applied ? 1.0f : 0.0f;
     }
@@ -1253,6 +1258,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     temporal.composite_shader=pixel->second.hash;temporal.composite_scene_stage=stage;
     auto reconstructed=temporal.Resolve(commands,filtered->image,error);
     if(!reconstructed)return false;
+    indirect_keep[2]=sampled_images[stage];
     sampled_images[stage]=reconstructed;
     heaps[0][stage]=reconstructed.gpuResourceID._impl;
     indirect[indirect_count++]=reconstructed;
