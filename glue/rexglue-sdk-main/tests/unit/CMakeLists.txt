@@ -16,6 +16,7 @@ add_executable(unit_tests
     core/diagnostics_policy_test.cpp
     core/fiber_test.cpp
     core/wait_multiple_test.cpp
+    core/event_handoff_test.cpp
     core/gta4_transition_test.cpp
     core/gpu_flight_recorder_test.cpp
     core/sha256_test.cpp
