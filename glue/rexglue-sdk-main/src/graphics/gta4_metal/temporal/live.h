@@ -68,6 +68,10 @@ class Live {
   Frame metadata{};
   Configuration config{};
   Inputs inputs{};
+  // Diagnostics: with snapshot_reactive set, Resolve copies the reactive mask the temporal scaler
+  // reads into reactive_snapshot (later passes of the frame may still write the live mask).
+  bool snapshot_reactive = false;
+  id<MTLTexture> reactive_snapshot = nil;
   id<MTLTexture> ui_add = nil, ui_transmit = nil, final_scene = nil;
   std::shared_ptr<SurfaceResource> depth_source, composite_source, executed_composite_source;
   GeometryHistory geometry;
@@ -79,7 +83,7 @@ class Live {
   // primary, the execution camera not adopted/matching.
   struct GbufferAudit { uint32_t total=0, ui=0, composite=0, screen=0, not_primary=0, camera=0, world=0; } gbuffer_audit;
   uint32_t gbuffer_audit_logs = 0;
-  uint32_t diagnostic_missing_motion = 0;
+  uint32_t diagnostic_missing_motion = 0, diagnostic_reactive = 0, diagnostic_trace = 0;
 
  private:
   std::shared_ptr<ui::metal::MetalContext> context_;
@@ -108,6 +112,7 @@ class Live {
   bool Clear(id<MTLCommandBuffer>, id<MTLTexture>, double, std::string&);
   void ResetHistory();
   bool CompleteBackgroundMotion(id<MTLCommandBuffer>, std::string&);
-  bool FillCameraMotion(id<MTLCommandBuffer>, std::string&);
+  bool FillCameraMotion(id<MTLCommandBuffer>, std::string&, float scaler_reactive = -1.0f);
+  bool FillScalerMotion(id<MTLCommandBuffer>, std::string&);
 };
 }  // namespace rex::graphics::gta4_metal::temporal

@@ -16,6 +16,12 @@ REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_neighbour_motion, true, "GPU",
                     "Frame generation: a pixel without object history takes the motion of nearby "
                     "pixels at its depth that have it (the rest of its object) before the camera's");
+REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
+                    "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
+REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
+                      "Before the temporal scaler, pixels without object history take the motion of "
+                      "the same surface next to them and this reactive value (0 = accumulate fully); "
+                      "below 0 off");
 REXCVAR_DEFINE_STRING(gta4_metalfx_jitter_sign, "++", "GPU/Diagnostics",
                       "MetalFX jitter sign (diagnostic): ++, --, -+ or +- for x and y");
 namespace rex::graphics::gta4_metal::temporal {
@@ -216,7 +222,8 @@ bool Live::CompleteBackgroundMotion(id<MTLCommandBuffer> cb, std::string& error)
   };
   static_assert(sizeof(Parameters)==96);
   const Parameters p{background_transform_,metadata.jitter,camera_half_pixel,
-                      config.input_width,config.input_height,config.depth_reversed,0};
+                      config.input_width,config.input_height,config.depth_reversed,
+                      REXCVAR_GET(gta4_temporal_reactive_sky)?1u:0u};
   auto e=ComputeEncoder(cb, "temporal/background-motion");
   if(!e){error="background motion encoder creation failed";return false;}
   e.label=@"Liberty infinite-background camera motion";
@@ -224,12 +231,13 @@ bool Live::CompleteBackgroundMotion(id<MTLCommandBuffer> cb, std::string& error)
   [e setTexture:inputs.depth atIndex:0];
   [e setTexture:inputs.motion atIndex:1];
   [e setTexture:inputs.previous_depth atIndex:2];
+  [e setTexture:inputs.reactive atIndex:3];
   [e setBytes:&p length:sizeof(p) atIndex:0];
   Dispatch(e,background_motion_,config.input_width,config.input_height);
   [e endEncoding];
   return true;
 }
-bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error) {
+bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error, float scaler_reactive) {
   struct Parameters {
     std::array<float,16> transform;
     std::array<float,2> jitter, half_pixel;
@@ -238,13 +246,16 @@ bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error) {
   static_assert(sizeof(Parameters)==96);
   const Parameters p{camera_transform_,metadata.jitter,camera_half_pixel,
                       config.input_width,config.input_height,config.depth_reversed,0};
-  auto e=ComputeEncoder(cb, "framegen/camera-motion-fill");
+  const bool scaler=scaler_reactive>=0;
+  auto e=ComputeEncoder(cb, scaler?"temporal/neighbour-motion-fill":"framegen/camera-motion-fill");
   if(!e){error="camera motion fill encoder creation failed";return false;}
-  e.label=@"Liberty frame generation camera motion fill";
+  e.label=scaler?@"Liberty temporal scaler neighbour motion fill":@"Liberty frame generation camera motion fill";
   [e setComputePipelineState:camera_motion_fill_];
   // Pixels without history borrow the motion of the object around them before the camera's.
   const std::array<float,4> fill{metadata.near_plane,metadata.far_plane,
-      REXCVAR_GET(gta4_metalfx_frame_generation_neighbour_motion)?1.0f:0.0f,0};
+      scaler||REXCVAR_GET(gta4_metalfx_frame_generation_neighbour_motion)?1.0f:0.0f,
+      scaler?std::min(scaler_reactive,1.0f):-1.0f};
+  [e setTexture:inputs.reactive atIndex:3];
   [e setBytes:fill.data() length:sizeof(fill) atIndex:1];
   [e setTexture:inputs.depth atIndex:0];
   [e setTexture:inputs.motion atIndex:1];
@@ -322,8 +333,15 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
   } else if (!depth_source || !depth_source->image || !world_draws) {
     error = "temporal scene depth/motion is incomplete";
   } else if (CaptureDepth(cb, error) && CompleteBackgroundMotion(cb, error) &&
-             CopyColor(cb, scene, converted_, error)) {
+             FillScalerMotion(cb, error) && CopyColor(cb, scene, converted_, error)) {
     inputs.color = converted_;
+    if (snapshot_reactive && inputs.reactive &&
+        CreateImage(reactive_snapshot, MTLPixelFormatR8Unorm, config.input_width, config.input_height,
+                    @"Liberty reactive mask snapshot", error)) {
+      auto copy = BlitEncoder(cb, "temporal/reactive-snapshot");
+      [copy copyFromTexture:inputs.reactive toTexture:reactive_snapshot];
+      [copy endEncoding];
+    }
     if (aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
         aa_.Encode(cb, inputs, metadata, resolved_, error)) {
       KeepUntilCompleted(cb, resolved_.lease);
@@ -492,6 +510,16 @@ bool Live::NeedsMotionCoverage() const {
   return active && frame_generation && resolved && final_scene && ui_active && ui_exact &&
          motion_coverage_complete && world_draws;
 }
+// Before the temporal scaler: a pixel whose draw had no history (some parts of the player's car,
+// Niko and peds are drawn from per-frame copies the history cannot always pair) has zero motion
+// and is reactive, so the scaler shows it from this frame's jittered samples alone and it
+// shimmers against the accumulated image around it, worst on turns. With a neighbour of the same
+// surface that has history it takes that motion and is accumulated like the rest of its object.
+bool Live::FillScalerMotion(id<MTLCommandBuffer> cb, std::string& error) {
+  const float reactive=REXCVAR_GET(gta4_temporal_scaler_neighbour_motion);
+  if(reactive<0||!world_draws||!camera_transform_valid_||metadata.camera_cut||!inputs.reactive)return true;
+  return FillCameraMotion(cb,error,reactive);
+}
 bool Live::ValidateMotionCoverage(id<MTLCommandBuffer> cb, std::string& error) {
   motion_coverage_.Invalidate();
   return !NeedsMotionCoverage() || motion_coverage_.Encode(cb, inputs, library_, error);
@@ -627,7 +655,7 @@ void Live::End() {
   execution_composite_scope = active_composite_scope = 0;
   diagnostic_depth_draws = 0;
   gbuffer_audit = {};
-  diagnostic_missing_motion = 0;
+  diagnostic_missing_motion = diagnostic_reactive = diagnostic_trace = 0;
   world_draws = history_draws = reactive_draws = ui_draws = jittered_draws = 0;
   instance = drawable = pose = 0;
   last_depth_serial = 0;

@@ -30,12 +30,13 @@ struct BackgroundMotionConstants {
   float4x4 reprojection;
   float2 jitter,half_pixel;
   uint2 extent;
-  uint reversed,padding;
+  uint reversed,accumulate_sky;  // accumulate_sky: background motion only
 };
 kernel void liberty_temporal_background_motion(
     texture2d<float,access::read> depth [[texture(0)]],
     texture2d<float,access::read_write> motion [[texture(1)]],
     texture2d<float,access::read_write> previous_depth [[texture(2)]],
+    texture2d<float,access::write> reactive [[texture(3)]],
     constant BackgroundMotionConstants& c [[buffer(0)]],
     uint2 pixel [[thread_position_in_grid]]) {
   if(any(pixel>=c.extent))return;
@@ -51,6 +52,8 @@ kernel void liberty_temporal_background_motion(
   if(!all(isfinite(velocity))||any(abs(velocity)>65504.0f))return;
   motion.write(float4(velocity,0,0),pixel);
   previous_depth.write(float4(far_depth),pixel);
+  // The sky moves with the camera alone: the scaler may accumulate it like tracked geometry.
+  if(c.accumulate_sky)reactive.write(float4(0),pixel);
 }
 // Camera-only motion of the point at pixel/depth z (input pixels, current to previous).
 float2 temporal_camera_velocity(constant BackgroundMotionConstants& c,uint2 pixel,float z){
@@ -79,7 +82,11 @@ kernel void liberty_temporal_camera_motion_fill(
     texture2d<float,access::read_write> motion [[texture(1)]],
     texture2d<float,access::read> previous_depth [[texture(2)]],
     constant BackgroundMotionConstants& c [[buffer(0)]],
-    constant float4& fill [[buffer(1)]],  // near, far, neighbour search on (1/0), unused
+    texture2d<float,access::write> reactive [[texture(3)]],
+    // near, far, neighbour search on (1/0), w: below 0 frame generation (camera motion when no
+    // neighbour has history); 0..1 before the temporal scaler: only neighbour motion, and the
+    // pixel's reactive value set to w so the scaler accumulates it like the rest of its object
+    constant float4& fill [[buffer(1)]],
     uint2 pixel [[thread_position_in_grid]]) {
   if(any(pixel>=c.extent))return;
   const float far_depth=c.reversed?0.0f:1.0f;
@@ -108,8 +115,13 @@ kernel void liberty_temporal_camera_motion_fill(
       const float w=(moving?8.0f:1.0f)/float(1+radii[r]);
       sum+=mq*w;weight+=w;++found;
     }
-    if(weight>0){motion.write(float4(sum/weight,0,0),pixel);return;}
+    if(weight>0){
+      motion.write(float4(sum/weight,0,0),pixel);
+      if(fill.w>=0)reactive.write(float4(fill.w),pixel);
+      return;
+    }
   }
+  if(fill.w>=0)return;
   motion.write(float4(temporal_camera_velocity(c,pixel,z),0,0),pixel);
 }
 struct TemporalConstants {

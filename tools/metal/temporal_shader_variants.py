@@ -24,6 +24,25 @@ constant LibertyTemporalDraw& temporal [[buffer(6)]],
 constant PushConstants& previousConstants [[buffer(7)]],
 constant PushConstants& g_PushConstants [[buffer(8)]]"""
 HEAPS = "g_Texture2DDescriptorHeap,g_Texture2DArrayDescriptorHeap,g_Texture3DDescriptorHeap,g_TextureCubeDescriptorHeap,g_SamplerDescriptorHeap"
+REACTIVE = """
+#ifdef __air__
+// The temporal scaler's reactive mask for this pixel. Motion-tracked draws (reactive 0): 1 only
+// without history. Untracked draws by what they add to colour 0 (draw.mm ReactiveMode): 1 all,
+// 2 alpha, 3 colour, 4 colour times alpha, 5 none. The mask is max-blended across draws.
+inline float liberty_reactive(bool valid, uint mode, float4 color) {
+    color=select(color,float4(0),!isfinite(color));
+    const float brightest=max(color.r,max(color.g,color.b));
+    switch(mode) {
+        case 0u: return valid?0.0f:1.0f;
+        case 2u: return saturate(color.a);
+        case 3u: return saturate(brightest);
+        case 4u: return saturate(brightest*color.a);
+        case 5u: return 0.0f;
+        default: return 1.0f;
+    }
+}
+#endif
+"""
 CONTRACT = """
 #ifdef __air__
 struct LibertyTemporalDraw {
@@ -125,7 +144,7 @@ fragment PixelShaderOutput shaderMain(Interpolators input [[stage_in]],bool iFac
     if(valid) velocity=(input.libertyPreviousClip.xy/input.libertyPreviousClip.w-input.libertyCurrentClip.xy/input.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
     valid=valid && all(isfinite(velocity)) && all(abs(velocity)<=65504.0f);
     result.libertyMotion=valid?velocity:float2(0);
-    result.libertyReactive=(!valid || temporal.reactive)?1.0f:0.0f;
+    result.libertyReactive=liberty_reactive(valid,temporal.reactive,{"result.oC0" if re.search(r"float4 oC0", prefix) else "float4(1)"});
     {ui_outputs("result.oC0" if re.search(r"float4 oC0", prefix) else "float4(0)")}
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?input.libertyPreviousClip.z/input.libertyPreviousClip.w:-1.0f;
@@ -140,7 +159,7 @@ fragment PixelShaderOutput shaderMain(Interpolators input [[stage_in]],bool iFac
             PARAMETERS+")",PARAMETERS+",float4 libertyDestination [[color(0)]])",1)
         ui_wrapper=ui_wrapper.replace(ui_outputs("result.oC0"),ui_outputs("result.oC0","libertyDestination.a"))
         wrapper+=ui_wrapper
-    return CONTRACT + prefix + body + wrapper
+    return CONTRACT + prefix + body + REACTIVE + wrapper
 
 
 def transform_override(source: str, stage: int) -> str:
@@ -213,7 +232,7 @@ def transform_override(source: str, stage: int) -> str:
     float2 velocity=float2(0);
     if(valid) velocity=({input_name}.libertyPreviousClip.xy/{input_name}.libertyPreviousClip.w-{input_name}.libertyCurrentClip.xy/{input_name}.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
     valid=valid && all(isfinite(velocity)) && all(abs(velocity)<=65504.0f);
-    result.libertyMotion=valid?velocity:float2(0);result.libertyReactive=(!valid || temporal.reactive)?1.0f:0.0f;
+    result.libertyMotion=valid?velocity:float2(0);result.libertyReactive=liberty_reactive(valid,temporal.reactive,{'result.' + color[1] if color else 'float4(1)'});
     {ui_outputs('result.' + color[1] if color else 'float4(0)')}
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?{input_name}.libertyPreviousClip.z/{input_name}.libertyPreviousClip.w:-1.0f;
@@ -227,7 +246,7 @@ def transform_override(source: str, stage: int) -> str:
             parameters+extra+")",parameters+extra+",float4 libertyDestination [[color(0)]])",1)
         ui_wrapper=ui_wrapper.replace(ui_outputs('result.'+color[1]),ui_outputs('result.'+color[1],'libertyDestination.a'))
         wrapper+=ui_wrapper
-    return CONTRACT+result+wrapper
+    return CONTRACT+result+REACTIVE+wrapper
 
 
 def main() -> None:

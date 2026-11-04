@@ -188,6 +188,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       static uint64_t generated_count=0,dumped=0;
       const auto folder=rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_dump");
       ++generated_count;
+      temporal.snapshot_reactive=!folder.empty();
       // The real frame before the generated one, so each check has both neighbours.
       if(!folder.empty()&&generated_count%120==119&&dumped<6)
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_before.ppm",folder,present.submitted_frame+1));
@@ -198,6 +199,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         DumpRawTexture(commands,temporal.inputs.motion,fmt::format("{}/framegen_{}_motion.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.previous_depth,fmt::format("{}/framegen_{}_history.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.depth,fmt::format("{}/framegen_{}_depth.raw",folder,present.submitted_frame));
+        if(temporal.reactive_snapshot)DumpRawTexture(commands,temporal.reactive_snapshot,fmt::format("{}/framegen_{}_reactive.raw",folder,present.submitted_frame));
       }
     }
   }
@@ -288,8 +290,17 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason);
   if(temporal.active&&present.submitted_frame%60==0){
     const auto m=temporal.geometry.TakeStatistics();
-    REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} (60 frames)",
-        present.submitted_frame,m.key,m.transform,m.transform_ambiguous,m.transform_far,m.key_far,m.none);
+    REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} "
+                "sibling={} sibling-ambiguous={} far-world={} far-registers={} (60 frames)",
+        present.submitted_frame,m.key,m.transform,m.transform_ambiguous,m.transform_far,m.key_far,m.none,m.sibling,m.sibling_ambiguous,
+        m.far_world,[&]{
+          // The three registers that most often refused a transform match by their change.
+          std::array<uint32_t,256> order{};for(uint32_t i=0;i<order.size();++i)order[i]=i;
+          std::partial_sort(order.begin(),order.begin()+3,order.end(),[&](uint32_t a,uint32_t b){return m.far_register[a]>m.far_register[b];});
+          std::string text;
+          for(int i=0;i<3;++i)if(m.far_register[order[i]])text+=fmt::format("{}c{}:{}",text.empty()?"":",",order[i],m.far_register[order[i]]);
+          return text.empty()?std::string("-"):text;
+        }());
   }
   if(temporal.active&&present.submitted_frame%60==0)
     REXLOG_INFO("gta4-metal-temporal-gbuffer-frame frame={} world={} gbuffer-active={} gbuffer-before-begin={} gbuffer-other-size={} other={}x{} input={}x{}",

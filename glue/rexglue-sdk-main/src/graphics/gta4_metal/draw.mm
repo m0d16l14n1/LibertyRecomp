@@ -29,6 +29,28 @@ template<class T> T ReadCommand(std::span<const std::byte> bytes) {
 template<class T> std::span<const uint8_t> Bytes(const T& value) {
   return {reinterpret_cast<const uint8_t*>(&value),sizeof(value)};
 }
+// How a reactive draw (not tracked by motion: glass, decals, particles, light effects) weights the
+// temporal scaler's reactive mask (temporal_shader_variants.py, liberty_reactive). Each used to write
+// 1.0 wherever it rasterized, so one full-screen pass made the whole frame reactive and MetalFX
+// accumulated nothing: textures shimmered with the camera jitter. Now by what reaches colour 0:
+// 1 the draw replaces it, 2 its alpha (alpha blending), 3 its colour (additive), 4 colour times
+// alpha (additive by alpha), 5 nothing. Nothing also for passes that are not over-draw: without a
+// depth test (the AA fragment merge, the depth-effects composite; light shafts and coronas are
+// `effect` and keep their weight), and unblended redraws onto existing depth that leave colour
+// to the surface below (the ped material-ID pass over Niko and every ped).
+template<class Fixed> uint32_t ReactiveMode(const Fixed& fixed,uint32_t requested_colors,bool effect){
+  using namespace gta4_native;
+  if(!(requested_colors&1u)||!(NativeColorWriteMaskForTarget(fixed.color_write_mask,0)&7u))return 5;
+  if(!effect&&!fixed.depth_enable)return 5;
+  if(!IsNativeBlendControlEnabled(fixed.blend_controls[0]))return fixed.depth_write_enable?1:5;
+  const auto b=DecodeNativeBlendControl(fixed.blend_controls[0]);
+  if(b.color_operation!=0)return 1;
+  if(b.source_color==6&&b.destination_color==7)return 2;
+  if(b.source_color==1&&b.destination_color==1)return 3;
+  if(b.source_color==6&&b.destination_color==1)return 4;
+  if(b.source_color==0&&b.destination_color==1)return 5;
+  return 1;
+}
 }
 
 bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t colors,bool depth,
@@ -376,6 +398,17 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     if((requested_colors&(uint32_t{1}<<i))&&IsNativeBlendControlEnabled(fixed.blend_controls[i]))scene_blending=true;
   targets.temporal_motion=world&&fixed.depth_enable&&fixed.depth_write_enable&&!scene_blending;
   targets.temporal_reactive=(world||scene_policy.effect)&&!targets.temporal_motion&&requested_colors;
+  // gta4_temporal_trace_vs=<hex>: how that vertex shader's draws are classified (12 per 120th frame).
+  const auto traced_vertex=temporal_trace_vs?shaders.find(vertex_shader):shaders.end();
+  if(traced_vertex!=shaders.end()&&traced_vertex->second.hash==temporal_trace_vs&&temporal.metadata.sequence%120==0&&temporal.diagnostic_trace++<12)
+    REXLOG_INFO("gta4-temporal-trace frame={} vs={:016X} ps={:016X} extent={} samples={} size={}x{} active={} ui={} composite={} "
+                "registered-primary={} screen={} camera-match={} world={} effect={} motion={} reactive={} blend={} depth={}/{} colors={:X} "
+                "role={} stage={}",
+      temporal.metadata.sequence,traced_vertex->second.hash,pixel!=shaders.end()?pixel->second.hash:0,temporal_extent,targets.samples,
+      targets.width,targets.height,temporal.active,temporal.ui_active,composite_draw,registered_primary,
+      temporal::IsScreenExecution(temporal.execution_screen_space,lighting),execution_camera_matches,world,scene_policy.effect,
+      targets.temporal_motion,targets.temporal_reactive,scene_blending,fixed.depth_enable,fixed.depth_write_enable,requested_colors,
+      uint32_t(lighting.role),uint32_t(lighting.stage));
   targets.temporal_jitter=world&&temporal::AdmitJitter(temporal.jitter_decided,temporal.jitter_eligible,
       temporal.metadata.jitter_applied,execution_camera_matches,scene_policy.primary);
   targets.temporal_ui=temporal_extent&&temporal.ui_active&&temporal.composite_source&&targets.colors[0]==temporal.composite_source&&requested_colors;
@@ -718,7 +751,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   temporal::DrawParameters temporal_parameters{};
   temporal_parameters.input_extent={float(targets.width),float(targets.height)};
   if(targets.temporal_jitter)temporal_parameters.jitter_clip={2*temporal.metadata.jitter[0]/targets.width,-2*temporal.metadata.jitter[1]/targets.height};
-  temporal_parameters.ui_mode=temporal_ui_mode;temporal_parameters.reactive=targets.temporal_reactive;
+  temporal_parameters.ui_mode=temporal_ui_mode;
+  temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
   ui::metal::UploadSlice previous_vertex,previous_shared;
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   if(targets.temporal_motion){
@@ -759,7 +793,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       temporal_parameters.valid_history=1;temporal_parameters.previous_jitter_clip=history.previous->jitter_clip;
     }
     if(history.ambiguous){temporal_parameters.valid_history=0;temporal_parameters.reactive=1;}
-    if(!temporal_parameters.valid_history&&temporal.metadata.sequence%60==0&&temporal.diagnostic_missing_motion++<12)
+    const bool traced=temporal_trace_vs&&pipeline->vertex.hash==temporal_trace_vs;
+    if(!temporal_parameters.valid_history&&temporal.metadata.sequence%60==0&&(traced||temporal.diagnostic_missing_motion++<12))
       REXLOG_INFO("gta4-temporal-missing-motion frame={} vs={:016X} ps={:016X} owner={:X} scoped={} drawable={:X} pose={:X} generation={:X} range={:X} reason={}",
         temporal.metadata.sequence,pipeline->vertex.hash,key.pixel_shader,owner,bool(temporal.instance),temporal.drawable,temporal.pose,generation,key.range,
         temporal.metadata.camera_cut?"camera-cut":history.ambiguous?"ambiguous-owner":
@@ -1001,6 +1036,15 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   if(draw_encoded&&temporal.active&&final_composite_execution&&temporal_extent&&(requested_colors&1u)&&targets.colors[0])
     temporal.executed_composite_source=targets.colors[0];
   if(draw_encoded&&targets.temporal_reactive)++temporal.reactive_draws;
+  // gta4_temporal_reactive_log: which draws mark the temporal scaler's reactive mask (every 300th frame).
+  if(temporal_reactive_log&&draw_encoded&&targets.temporal_reactive&&temporal.metadata.sequence%300==0&&temporal.diagnostic_reactive++<120)
+    REXLOG_INFO("gta4-temporal-reactive-draw frame={} vs={:016X} ps={:016X} mode={} factors={}/{}/{} world={} effect={} role={} stage={} "
+                "blend={} depth-test={} depth-write={} count={} type={} colors={:X} viewport={}x{}",
+      temporal.metadata.sequence,pipeline->vertex.hash,pipeline->has_pixel?pipeline->pixel.hash:0,temporal_parameters.reactive,
+      uint32_t(DecodeNativeBlendControl(fixed.blend_controls[0]).source_color),uint32_t(DecodeNativeBlendControl(fixed.blend_controls[0]).destination_color),
+      uint32_t(DecodeNativeBlendControl(fixed.blend_controls[0]).color_operation),world,scene_policy.effect,
+      uint32_t(lighting.role),uint32_t(lighting.stage),scene_blending,fixed.depth_enable,fixed.depth_write_enable,count,
+      uint32_t(type),requested_colors,std::bit_cast<float>(fixed.viewport_bits[2]),std::bit_cast<float>(fixed.viewport_bits[3]));
   if(draw_encoded&&targets.temporal_ui)++temporal.ui_draws;
   if(draw_encoded&&composite_draw&&temporal.HasSceneOutput()&&targets.colors[0]){
     temporal.composite_source=targets.colors[0];

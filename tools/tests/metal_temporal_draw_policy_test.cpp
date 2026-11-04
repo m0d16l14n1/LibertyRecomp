@@ -1,5 +1,6 @@
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,10 +55,107 @@ void GeometryBindings() {
   CHECK(history.Record(base,vertex,shared,{}).captured);
   CHECK(history.Begin(1,1,2,false));
   CHECK(history.Record(base,vertex,shared,{}).previous);
+  // A second draw under the key with other constants is a sibling, not a collision...
   vertex[0]=1;
-  CHECK(history.Record(base,vertex,shared,{}).ambiguous);
+  const auto sibling=history.Record(base,vertex,shared,{});
+  CHECK(sibling.captured&&!sibling.ambiguous&&!sibling.previous);
+  // ...and next frame a draw that no sibling constant tells apart is ambiguous.
   CHECK(history.Begin(1,1,3,false));
-  CHECK(!history.Record(base,vertex,shared,{}).previous);
+  const auto unclear=history.Record(base,vertex,shared,{});
+  CHECK(!unclear.previous&&unclear.ambiguous);
+}
+// gta_vehicle_tire VS_VehicleTransformD reads matWheelTransform at c64-c67; c0-c3 still holds
+// the body gWorld, so every wheel of one car shares the unscoped owner key.
+void GeometrySiblings() {
+  std::array<uint8_t,sizeof(core::SharedConstants)> shared{};
+  const std::array<std::array<float,2>,4> hubs{{{-0.8f,1.3f},{0.8f,1.3f},{-0.8f,-1.3f},{0.8f,-1.3f}}};
+  const auto bank=[&](float body,size_t wheel,float angle,float camera){
+    std::array<uint8_t,4096> v{};
+    const std::array<float,16> world{1,0,0,0, 0,1,0,0, 0,0,1,0, body,0,0,1};
+    std::memcpy(v.data(),world.data(),sizeof(world));
+    const std::array<float,4> view{1,0,0,camera};  // c8: changes for every wheel alike
+    std::memcpy(v.data()+8*16,view.data(),sizeof(view));
+    const float c=std::cos(angle),s=std::sin(angle);
+    const std::array<float,16> spin{1,0,0,0, 0,c,-s,0, 0,s,c,0, hubs[wheel][0],hubs[wheel][1],0.35f,1};
+    std::memcpy(v.data()+64*16,spin.data(),sizeof(spin));
+    return v;
+  };
+  const auto key=[](uint64_t owner){temporal::GeometryKey k{owner,2,0,4,5,6,7};return k;};
+  const auto same=[](const auto& lookup,const std::array<uint8_t,4096>& expected){
+    return lookup.previous&&lookup.previous->vertex==std::vector<uint8_t>(expected.begin(),expected.end());
+  };
+  for(const bool fallback:{false,true}){
+    temporal::GeometryHistory h; h.set_transform_fallback(fallback);
+    CHECK(h.Begin(1,1,1,false));
+    for(size_t w=0;w<4;++w){
+      CHECK(h.Record(key(100),bank(0,w,0.1f*w,0),shared,{}).captured);
+      CHECK(h.Record(key(200),bank(10,w,0.1f*w,0),shared,{}).captured);
+    }
+    // Four wheels of one car plus a second car of the same model, drawn in another order,
+    // spun 0.4 rad, with the camera moved: each wheel continues its own previous pose.
+    CHECK(h.Begin(1,1,2,false));
+    for(size_t i=0;i<4;++i){
+      const size_t w=3-i;
+      const auto a=h.Record(key(100),bank(0.2f,w,0.1f*w+0.4f,5),shared,{});
+      CHECK(!a.ambiguous&&same(a,bank(0,w,0.1f*w,0)));
+      const auto b=h.Record(key(200),bank(10.2f,w,0.1f*w+0.4f,5),shared,{});
+      CHECK(!b.ambiguous&&same(b,bank(10,w,0.1f*w,0)));
+      // Another pass of the same wheel is a repeat, not a fifth sibling.
+      CHECK(same(h.Record(key(100),bank(0.2f,w,0.1f*w+0.4f,5),shared,{}),bank(0,w,0.1f*w,0)));
+    }
+    const auto statistics=h.TakeStatistics();
+    CHECK(statistics.sibling==8&&statistics.sibling_ambiguous==0);
+    CHECK(h.Begin(1,1,3,false));  // and the frame after, from the new poses
+    for(size_t w=0;w<4;++w)
+      CHECK(same(h.Record(key(100),bank(0.4f,w,0.1f*w+0.8f,9),shared,{}),bank(0.2f,w,0.1f*w+0.4f,5)));
+  }
+  {  // a wheel half-way between two of last frame's wheels: refused, as before
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    h.Record(key(100),bank(0,0,0,0),shared,{}); h.Record(key(100),bank(0,1,0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false));
+    auto middle=bank(0,0,0,0); const float x=0; std::memcpy(middle.data()+64*16+12*4,&x,sizeof(x));
+    const auto r=h.Record(key(100),middle,shared,{});
+    CHECK(!r.previous&&r.ambiguous);
+    CHECK(h.Record(key(100),middle,shared,{}).ambiguous);  // its repeat too
+  }
+  {  // a car that lost a wheel this frame: the other three still match
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    for(size_t w=0;w<4;++w) h.Record(key(100),bank(0,w,0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false));
+    for(size_t w=1;w<4;++w) CHECK(same(h.Record(key(100),bank(0,w,0.2f,1),shared,{}),bank(0,w,0,0)));
+  }
+  {  // keys drawn once (nearly all of them) make no sibling group; a second wheel makes one
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    h.Record(key(100),bank(0,0,0,0),shared,{}); h.Record(key(200),bank(10,0,0,0),shared,{});
+    h.Record(key(100),bank(0,0,0,0),shared,{});  // an identical repeat is not a sibling
+    CHECK(h.current_sibling_groups()==0);
+    h.Record(key(100),bank(0,1,0,0),shared,{});
+    CHECK(h.current_sibling_groups()==1);
+    h.Record(key(100),bank(0,2,0,0),shared,{});
+    CHECK(h.current_sibling_groups()==1);
+  }
+  {  // a NaN where this draw has a number rules that sibling out, whatever follows it
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    auto with_nan=bank(0,1,0,0); const float nan=std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(with_nan.data()+200*4,&nan,sizeof(nan));  // this draw has 0 here
+    std::memcpy(with_nan.data()+300*4,&nan,sizeof(nan));  // a later NaN both share
+    h.Record(key(100),bank(0,0,0,0),shared,{}); h.Record(key(100),with_nan,shared,{});
+    CHECK(h.Begin(1,1,2,false));
+    auto draw=bank(0,1,0,0); std::memcpy(draw.data()+300*4,&nan,sizeof(nan));
+    const auto r=h.Record(key(100),draw,shared,{});
+    CHECK(!same(r,with_nan));  // the shared NaN at 300 must not undo the mismatch at 200
+    CHECK(!r.previous&&r.ambiguous);  // and the other wheel has 0 where this draw has NaN
+  }
+  {  // more siblings than tracked: the overflow draw is ambiguous
+    temporal::GeometryHistory h;
+    CHECK(h.Begin(1,1,1,false));
+    for(int i=0;i<64;++i) CHECK(!h.Record(key(100),bank(float(i),0,0,0),shared,{}).ambiguous);
+    CHECK(h.Record(key(100),bank(64,0,0,0),shared,{}).ambiguous);
+  }
 }
 // Moving entities are drawn from per-frame copies of their transforms: the owner changes.
 void GeometryTransformMatch() {
@@ -106,6 +204,15 @@ void GeometryTransformMatch() {
     temporal::GeometryHistory h; h.set_transform_fallback(true);
     CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
     CHECK(h.Begin(1,1,2,false)); CHECK(!h.Record(key(100),bank(30,0),shared,{}).previous);
+  }
+  {  // a register the shader may not even read (stale c100) jumps: refused, and counted
+    temporal::GeometryHistory h; h.set_transform_fallback(true);
+    CHECK(h.Begin(1,1,1,false)); h.Record(key(100),bank(0,0),shared,{});
+    CHECK(h.Begin(1,1,2,false));
+    auto moved=bank(1,0); const float stale=50; std::memcpy(moved.data()+100*16+8,&stale,sizeof(stale));
+    CHECK(!h.Record(key(200),moved,shared,{}).previous);
+    const auto statistics=h.TakeStatistics();
+    CHECK(statistics.far_register[100]==1&&statistics.far_world==0&&statistics.transform_far==1);
   }
   {  // still drawn under its own key: not borrowed by another owner
     temporal::GeometryHistory h; h.set_transform_fallback(true);
@@ -265,5 +372,5 @@ void DeclaredBoundaries() {
   CHECK(!registry.Find(1,5,11));
 }
 }  // namespace
-int main(){GeometryBindings();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
+int main(){GeometryBindings();GeometrySiblings();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
   std::printf("temporal draw policy: %u checks passed\n",checks);return 0;}
