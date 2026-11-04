@@ -66,6 +66,10 @@ u32 XamTaskSchedule_entry(mapped_void callback, ppc_ptr_t<XTASK_MESSAGE> message
     return result;
   }
 
+  // The guest only gets a dummy task handle, so nothing else will release the handle that
+  // Create() took. The thread keeps its own reference until it exits.
+  thread->ReleaseHandle();
+
   REXKRNL_DEBUG("XAM task ({:08X}) scheduled asynchronously", callback.guest_address());
 
   return X_STATUS_SUCCESS;

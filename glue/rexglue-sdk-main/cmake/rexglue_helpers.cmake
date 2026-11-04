@@ -37,6 +37,10 @@ function(rexglue_find_macos_vulkan_runtime out_var)
         _rexglue_append_macos_vulkan_root(_rexglue_roots "${REXGLUE_VULKAN_RUNTIME_DIR}")
     endif()
 
+    # Built for the app's minimum macOS by tools/macos/build_vulkan_runtime.sh. Homebrew's
+    # bottles follow the host macOS, which the bundle verifier refuses.
+    _rexglue_append_macos_vulkan_root(_rexglue_roots "${CMAKE_SOURCE_DIR}/out/vulkan-runtime")
+
     if(DEFINED REXGLUE_SHARE_DIR AND EXISTS "${REXGLUE_SHARE_DIR}/vulkan")
         _rexglue_append_macos_vulkan_root(_rexglue_roots "${REXGLUE_SHARE_DIR}/vulkan")
     endif()

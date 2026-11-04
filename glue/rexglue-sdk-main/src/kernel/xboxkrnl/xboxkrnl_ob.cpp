@@ -161,8 +161,23 @@ u32 ObDereferenceObject_entry(u32 native_ptr) {
     return 0;
   }
 
-  auto object = XObject::GetNativeObject<XObject>(
-      REX_KERNEL_STATE(), REX_KERNEL_MEMORY()->TranslateVirtual(native_ptr));
+  // Objects allocated by XObject::CreateNative keep their handle in the header in front of
+  // them. Some have no dispatch header (enumerators), so the handle stashed in the body is
+  // not reliable for those: it may be overwritten by the object's own fields.
+  object_ref<XObject> object;
+  // (Not for an object at the start of a page: the header would be on the previous one.)
+  if ((native_ptr & 0xFFF) >= sizeof(X_OBJECT_HEADER)) {
+    auto header = REX_KERNEL_MEMORY()->TranslateVirtual<X_OBJECT_HEADER*>(native_ptr -
+                                                                          sizeof(X_OBJECT_HEADER));
+    object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(header->unk_04);
+    if (object && object->guest_object() != native_ptr) {
+      object.reset();
+    }
+  }
+  if (!object) {
+    object = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(),
+                                               REX_KERNEL_MEMORY()->TranslateVirtual(native_ptr));
+  }
   if (object) {
     object->ReleaseHandle();
   }

@@ -1481,6 +1481,10 @@ void XHostThread::Execute() {
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
 
+  // Host threads can run guest callbacks (the audio worker does), which switch flush modes
+  // from the cached FPSCR/FPCR value: start from the same host state as guest threads.
+  thread_state_->context()->fpscr.InitHost();
+
   int ret = host_fn_();
 
   // Exit.

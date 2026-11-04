@@ -60,11 +60,12 @@ X_HRESULT XamApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t item_count = 0;
       auto result = e->WriteItems(data->buffer_ptr, buffer, &item_count);
 
+      // The caller reads the count whatever the result, so always write it.
+      if (data->length_ptr) {
+        auto length_ptr = memory_->TranslateVirtual<be<uint32_t>*>(data->length_ptr);
+        *length_ptr = (result == X_ERROR_SUCCESS && item_count >= 1) ? 1 : 0;
+      }
       if (result == X_ERROR_SUCCESS && item_count >= 1) {
-        if (data->length_ptr) {
-          auto length_ptr = memory_->TranslateVirtual<be<uint32_t>*>(data->length_ptr);
-          *length_ptr = 1;
-        }
         return X_E_SUCCESS;
       }
       return X_E_NO_MORE_FILES;

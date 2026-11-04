@@ -148,10 +148,16 @@ bool build_vexptefp(BuilderContext& ctx) {
   ctx.emit_set_flush_mode(true);
   ctx.println("\t{{");
   ctx.println("\t\tsimde__m128 x = simde_mm_load_ps({}.f32);", vA);
+  // The exponent field only holds n in [-126, 127]: clamp x into that range
+  // (NaN passes through, max/min return the second operand) and fix up the
+  // out-of-range lanes after.
   ctx.println(
-      "\t\tsimde__m128 n = simde_mm_round_ps(x, "
+      "\t\tsimde__m128 xc = simde_mm_min_ps(simde_mm_set1_ps(127.99999f), "
+      "simde_mm_max_ps(simde_mm_set1_ps(-126.0f), x));");
+  ctx.println(
+      "\t\tsimde__m128 n = simde_mm_round_ps(xc, "
       "SIMDE_MM_FROUND_TO_NEG_INF | SIMDE_MM_FROUND_NO_EXC);");
-  ctx.println("\t\tsimde__m128 f = simde_mm_sub_ps(x, n);");
+  ctx.println("\t\tsimde__m128 f = simde_mm_sub_ps(xc, n);");
   // 4th-order minimax polynomial for 2^f, f in [0,1), ~12-bit accuracy
   ctx.println("\t\tsimde__m128 p = simde_mm_set1_ps(1.8775767e-3f);");
   ctx.println("\t\tp = simde_mm_add_ps(simde_mm_mul_ps(p, f), simde_mm_set1_ps(8.9893397e-3f));");
@@ -162,10 +168,15 @@ bool build_vexptefp(BuilderContext& ctx) {
   // Construct 2^n by adding n to the IEEE 754 exponent bias and shifting into place
   ctx.println("\t\tsimde__m128i exp_bits = simde_mm_slli_epi32(");
   ctx.println("\t\t\tsimde_mm_add_epi32(simde_mm_cvttps_epi32(n), simde_mm_set1_epi32(127)), 23);");
+  ctx.println("\t\tsimde__m128 r = simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits));");
+  // Below 2^-126 flush to 0 (non-Java mode), from 2^128 up +inf.
   ctx.println(
-      "\t\tsimde_mm_store_ps({}.f32, "
-      "simde_mm_mul_ps(p, simde_mm_castsi128_ps(exp_bits)));",
-      vD);
+      "\t\tr = simde_mm_blendv_ps(r, simde_mm_setzero_ps(), "
+      "simde_mm_cmplt_ps(x, simde_mm_set1_ps(-126.0f)));");
+  ctx.println(
+      "\t\tr = simde_mm_blendv_ps(r, simde_mm_castsi128_ps(simde_mm_set1_epi32(0x7F800000)), "
+      "simde_mm_cmpge_ps(x, simde_mm_set1_ps(128.0f)));");
+  ctx.println("\t\tsimde_mm_store_ps({}.f32, r);", vD);
   ctx.println("\t}}");
   return true;
 }
@@ -1507,13 +1518,16 @@ bool build_vupkd3d128(BuilderContext& ctx) {
       // x, y, z --> floats, w --> float
       ctx.println("\t{}.u64[0] = {}.u64[1];", ctx.v_temp(), vSrc);
       // x (bits 0-19) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 44) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = int32_t({}.u64[0] & 0xFFFFF);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = ({}.s32 ^ 0x80000) - 0x80000;", ctx.temp(), ctx.temp());
       ctx.println("\t{}.f32[0] = float({}.s32);", vDst, ctx.temp());
       // y (bits 20-39) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 24) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = int32_t(({}.u64[0] >> 20) & 0xFFFFF);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = ({}.s32 ^ 0x80000) - 0x80000;", ctx.temp(), ctx.temp());
       ctx.println("\t{}.f32[1] = float({}.s32);", vDst, ctx.temp());
       // z (bits 40-59) - sign extend from 20 bits
-      ctx.println("\t{}.s32 = (int32_t({}.u64[0] << 4) >> 44);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = int32_t(({}.u64[0] >> 40) & 0xFFFFF);", ctx.temp(), ctx.v_temp());
+      ctx.println("\t{}.s32 = ({}.s32 ^ 0x80000) - 0x80000;", ctx.temp(), ctx.temp());
       ctx.println("\t{}.f32[2] = float({}.s32);", vDst, ctx.temp());
       // w (bits 60-63) - 4 bits
       ctx.println("\t{}.f32[3] = float({}.u64[0] >> 60);", vDst, ctx.v_temp());
