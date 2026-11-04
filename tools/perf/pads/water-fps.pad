@@ -1,0 +1,59 @@
+# Water at any frame rate (task 28): heli downwash and boat buoyancy, measured by
+# gta4_water_speed_log ("gta4-water ... change/s=" per writer, every 60 frames).
+# Four segments each: fixed 30 / fixed 60 step, fix on / off, switched live with `set`.
+# Expect: fix on, 30 and 60 give the same downwash and buoyancy change/s (within noise).
+# Fix off: downwash change/s about 2x at 60; buoyancy converges faster (change/s higher at first).
+await 5m
+wait 10s
+invincible
+nowanted
+clock 13 0
+weather 1
+set gta4_water_speed_log true
+mark all
+
+# 1. Boat buoyancy: a speedboat in open water, slow throttle so the hull keeps stirring the grid.
+water 1500
+car jetmax
+wait 3s
+set gta4_debug_fixed_step_hz 30
+set gta4_water_speed_fps_fix true
+mark boat30on
+trigger rt 0.3 12s
+set gta4_debug_fixed_step_hz 60
+mark boat60on
+trigger rt 0.3 12s
+set gta4_water_speed_fps_fix false
+mark boat60off
+trigger rt 0.3 12s
+set gta4_debug_fixed_step_hz 30
+mark boat30off
+trigger rt 0.3 12s
+release all
+mark boat_end
+
+# 2. Heli downwash: a Maverick 12 m over the water, about hover throttle.
+set gta4_water_speed_fps_fix true
+water 1500
+heli maverick 12
+wait 2s
+set gta4_debug_fixed_step_hz 30
+mark heli30on
+trigger rt 0.5 12s
+set gta4_debug_fixed_step_hz 60
+mark heli60on
+trigger rt 0.5 12s
+set gta4_water_speed_fps_fix false
+mark heli60off
+trigger rt 0.5 12s
+set gta4_debug_fixed_step_hz 30
+mark heli30off
+trigger rt 0.5 12s
+release all
+mark heli_end
+shot {out}/shots/28-downwash.png 0.5
+set gta4_debug_fixed_step_hz 0
+set gta4_water_speed_fps_fix true
+where
+mark all_end
+quit

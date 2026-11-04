@@ -131,6 +131,7 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         src/gta4_cutscene_clock_fix.cpp
         src/gta4_ped_ai_fixes.cpp
         src/gta4_vehicle_fps_fixes.cpp
+        src/gta4_water_fps_fixes.cpp
         src/gta4_write_watch.cpp
         src/gta4_motion_bridge.cpp
         src/gta4_motion_hooks.cpp

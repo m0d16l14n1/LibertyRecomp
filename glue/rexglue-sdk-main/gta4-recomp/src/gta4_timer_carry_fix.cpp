@@ -27,8 +27,8 @@ REXCVAR_DEFINE_BOOL(gta4_timer_millisecond_carry, true, "GTA IV/Fixes",
                     "(they run 4% slow at 60 fps, 1% at 30)");
 REXCVAR_DEFINE_UINT32(gta4_debug_fixed_step_hz, 0, "GTA IV/Diagnostics",
                       "Debug: every game frame advances 1/N s whatever the real frame time (0 = "
-                      "off). 60 runs the game's above-30-fps paths on a slow GPU, in slow motion. "
-                      "31-300");
+                      "off). 60 runs the game's above-30-fps paths on a slow GPU, in slow motion; 30 "
+                      "gives the matching 30 fps reference. 15-300");
 
 namespace {
 
@@ -53,7 +53,7 @@ void ForceFixedStep(uint8_t* base) {
   if (hz == 0) return;
   const float seconds_per_tick = std::bit_cast<float>(REX_LOAD_U32(kSecondsPerTick));
   if (!(seconds_per_tick > 0.0f)) return;
-  const double step = 1.0 / double(std::clamp<uint32_t>(hz, 31, 300));
+  const double step = 1.0 / double(std::clamp<uint32_t>(hz, 15, 300));
   const uint64_t ticks = uint64_t(std::llround(step / double(seconds_per_tick)));
   const uint64_t now = REX_QUERY_TIMEBASE();
   if (now > ticks) REX_STORE_U64(kPreviousTimebase, now - ticks);
