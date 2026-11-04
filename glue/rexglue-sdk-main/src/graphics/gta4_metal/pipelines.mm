@@ -1,3 +1,4 @@
+#include <atomic>
 #include "renderer_state.h"
 #include "override_metadata.h"
 #include "../gta4_native/native_fixed_function_policy.h"
@@ -235,6 +236,32 @@ Renderer::State::Pipeline* Renderer::State::DrawPipeline(const Targets& targets,
     NSError* native_error = nil;
     result.state = [context->device newRenderPipelineStateWithDescriptor:descriptor error:&native_error];
     if (!result.state) { error = ui::metal::MetalError(native_error, "Metal title pipeline creation failed"); return nullptr; }
+  }
+  if(raytracing_mode!=raytracing::Mode::kOff&&targets.temporal_motion&&!selection.vertex_override&&!up){
+    // Vertex shaders the capture generator refused have no variant; their draws are not captured.
+    std::string capture_error;
+    id<MTLFunction> capture_vertex=capture_stock.Function(vs->hash,ShaderStage::kVertex,0,false,capture_error);
+    static std::atomic<uint64_t> requested{0},absent{0};
+    ++(capture_vertex?requested:absent);
+    if((requested+absent)%50==0)
+      REXLOG_INFO("gta4-metal-raytracing: capture pipelines requested={} without-variant={} last={:016X} {}",
+                  requested.load(),absent.load(),vs->hash,capture_error);
+    if(capture_vertex){
+      auto build=std::make_shared<PipelineBuild>(); result.capture=build;
+      raytracing::CreateCapturePipeline(context->device,descriptor,capture_vertex,
+          ^(id<MTLRenderPipelineState> state,NSError* native_error){
+        { std::lock_guard lock(build->mutex);
+          build->state=state;
+          if(!state){
+            build->error=ui::metal::MetalError(native_error,"Metal capture pipeline creation failed");
+            static std::atomic<int> logged{0};
+            if(logged.fetch_add(1)<5)REXLOG_WARN("gta4-metal-raytracing: {}",build->error);
+          }
+          build->complete=true;
+        }
+        build->wake.notify_all();
+      });
+    }
   }
   ++pipeline_creations;
   if(profile_enabled) REXLOG_INFO("gta4-metal-profile-shader vs={:016X} ps={:016X} variant={:X} selected-vs={} selected-ps={}",

@@ -83,7 +83,7 @@ class CaptureVariantTests(unittest.TestCase):
         self.assertIn("slot>=capture.vertexCount", wrapper)
         self.assertIn(f"SharedConstants+{capture.HALF_PIXEL_OFFSET}", wrapper)  # unjittered, offset removed
         self.assertIn(f"SharedConstants+{capture.DEPTH_RANGE}", wrapper)
-        self.assertIn("capture.clipToWorld*clip", wrapper)
+        self.assertIn("capture.clipToWorld[3]*clip.w", wrapper)
         self.assertIn("0x7FC00000u", wrapper)  # unplaced vertices are NaN, inactive in a build
         self.assertIn("struct LibertyCaptureDraw", out)
 

@@ -69,9 +69,13 @@ struct AccelerationStructureOp {
   uint32_t instance_count = 0;
 };
 
-// Metal 3 implementation: one MTLAccelerationStructureCommandEncoder for the whole list.
+// One MTLAccelerationStructureCommandEncoder for the whole list, in a Metal 3 command
+// buffer: `commands` itself, or on a Metal 4 proxy a side-queue hop at this point of
+// it (rex::ui::metal::EncodeMetal3). No encoder may be open on `commands`.
+// `resident_heap`: structures the ops reference only by gpuResourceID (the instances
+// of a kBuildInstances op) live there, so the encoder makes it resident.
 bool EncodeAccelerationStructureWork(id<MTLCommandBuffer> commands, std::span<const AccelerationStructureOp> ops,
-                                     std::string& error);
+                                     std::string& error, id<MTLHeap> resident_heap = nil);
 
 // Descriptors the ops above use, for size queries (accelerationStructureSizesWithDescriptor).
 MTLPrimitiveAccelerationStructureDescriptor* PrimitiveDescriptor(const TriangleGeometry& geometry, bool refittable,

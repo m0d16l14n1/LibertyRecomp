@@ -114,6 +114,8 @@ class AccelCache {
       ++builds_;
       ++statistics_.rebuilt;
       resident_bytes_ -= slot.bytes;
+      // Earlier frames' scenes may still reference the old structure on the GPU.
+      if (slot.ready) pending_release_.push_back(std::move(slot.payload));
       slot = Slot{request.identity, occurrence, request.motion, estimate, frame_, false, Payload{}};
       resident_bytes_ += estimate;
       return {CaptureAction::kBuild, &slot};
@@ -141,7 +143,9 @@ class AccelCache {
     scene_.push_back(&slot);
   }
   // A build that could not be encoded: forget it so the next frame tries again.
+  // The caller keeps any payload it had already reported through Built().
   void Abandon(Slot& slot) {
+    scene_.erase(std::remove(scene_.begin(), scene_.end(), &slot), scene_.end());
     for (auto it = slots_.begin(); it != slots_.end(); ++it)
       if (&it->second == &slot) { resident_bytes_ -= slot.bytes; slots_.erase(it); return; }
   }

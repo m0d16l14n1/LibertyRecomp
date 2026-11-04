@@ -9,6 +9,7 @@
 #include "sun_shafts.h"
 #include "modern_sky_probe.h"
 #include "temporal/live.h"
+#include "raytracing/capture.h"
 #include "frame_work_qos.h"
 #include "encoder_bindings.h"
 #include "constant_upload_cache.h"
@@ -64,6 +65,10 @@ struct Renderer::State {
     bool has_pixel=false,temporal_variant=false;
     uint64_t variant=0;
     std::array<uint32_t,gta4_native::kVertexStreamCount> strides{};
+    // Ray tracing (gta4_metal_raytracing): the geometry-capture replay of this pipeline's
+    // vertex shader, compiled asynchronously; capture_state is set once it is ready.
+    std::shared_ptr<PipelineBuild> capture;
+    id<MTLRenderPipelineState> capture_state=nil;
   };
   // Guest, shared and descriptor banks retain their latest exact source bytes
   // to reject unchanged values before hashing or inspecting immutable uploads.
@@ -111,6 +116,10 @@ struct Renderer::State {
   ui::Presenter* presenter=nullptr;
   ResourceStore resources;
   ShaderCache stock,overrides,temporal_stock,temporal_overrides;
+  ShaderCache capture_stock;  // ray-tracing capture variants of the stock vertex shaders
+  raytracing::Mode raytracing_mode=raytracing::Mode::kOff;  // read at Initialize
+  raytracing::Capture raytracing_capture;
+  uint64_t raytracing_sequence=~0ull;  // temporal sequence of the open capture frame
   // Recipes of every built pipeline + a binary archive of their compiled forms (launch precompile).
   PipelineStore pipeline_store;
   // Opt-in per-frame timing (gta4_metal_frame_log): kept in memory and appended to the file about

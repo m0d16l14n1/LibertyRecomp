@@ -100,4 +100,25 @@ function(liberty_add_metal_shader_archive app_target workspace_root)
         target_sources("${app_target}" PRIVATE "${temporal_archive}")
         set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${temporal_archive}")
     endforeach()
+    # Ray tracing: geometry-capture variants of the stock vertex shaders (loaded only when
+    # gta4_metal_raytracing is not off). Converted overrides are not captured. Without the
+    # archive the renderer logs a warning and keeps ray tracing off.
+    option(LIBERTY_METAL_RT_CAPTURE_ARCHIVE "Compile the ray-tracing geometry-capture shader archive" ON)
+    if(NOT LIBERTY_METAL_RT_CAPTURE_ARCHIVE)
+        return()
+    endif()
+    set(capture_builder "${workspace_root}/tools/metal/raytracing_capture_variants.py")
+    set(capture_archive "${archive_dir}/stock_capture_shader_archive.bin")
+    add_custom_command(OUTPUT "${capture_archive}"
+        COMMAND "${Python3_EXECUTABLE}" "${capture_builder}"
+            --archive "${archive}" --sources "${archive_dir}/work/sources"
+            --work "${archive_dir}/stock-capture-work" --output "${capture_archive}"
+            --jobs 2 --deployment "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        DEPENDS "${archive}" "${capture_builder}" "${builder}"
+        COMMENT "Compiling ray-tracing geometry-capture shader variants" VERBATIM)
+    add_custom_target(liberty_stock_capture_archive DEPENDS "${capture_archive}")
+    add_dependencies("${app_target}" liberty_stock_capture_archive)
+    set_source_files_properties("${capture_archive}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources/metal")
+    target_sources("${app_target}" PRIVATE "${capture_archive}")
+    set_property(TARGET "${app_target}" APPEND PROPERTY LINK_DEPENDS "${capture_archive}")
 endfunction()

@@ -39,7 +39,7 @@ constant PushConstants& g_PushConstants [[buffer(8)]]"""
 CONTRACT = """
 #ifdef __air__
 struct LibertyCaptureDraw {
-    float4x4 clipToWorld;
+    float4 clipToWorld[4];  // columns; declared before metal_stdlib, so no float4x4
     uint firstVertex;
     uint vertexCount;
     uint flags;
@@ -85,7 +85,7 @@ def transform(source: str, stage: int) -> str:
     const float2 halfPixel=*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants+{HALF_PIXEL_OFFSET}));
     clip.xy-=halfPixel*clip.w;
     const float2 depthRange=*(reinterpret_cast<device float2*>(g_PushConstants.SharedConstants+{DEPTH_RANGE}));
-    const float4 world=capture.clipToWorld*clip;
+    const float4 world=capture.clipToWorld[0]*clip.x+capture.clipToWorld[1]*clip.y+capture.clipToWorld[2]*clip.z+capture.clipToWorld[3]*clip.w;
     const bool placed=all(depthRange==float2(0,1)) && clip.w!=0.0f && isfinite(world.w) && abs(world.w)>1.0e-20f;
     const float3 position=world.xyz/world.w;
     libertyPositions[slot]=placed&&all(isfinite(position))?float4(position,1.0f):float4(as_type<float>(0x7FC00000u));

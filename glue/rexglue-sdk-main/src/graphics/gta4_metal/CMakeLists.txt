@@ -36,7 +36,7 @@ target_link_libraries(rex-gta4-metal-temporal PUBLIC "-framework Metal" "-framew
 set(METAL_RENDERER_SOURCES renderer.mm pipelines.mm pipeline_store.mm gpu_pass_timer.mm draw.mm attachment_passes.mm modern_sky_probe.mm
     resolve.mm depth_passes.mm readback.mm present.mm post_processing.mm depth_of_field.mm sun_shafts.mm shaders.mm
     resources.mm resource_buffers.mm resource_textures.mm resource_samplers.mm resource_fonts.mm
-    texture_preparation.mm temporal/live.mm raytracing/raytracing.mm)
+    texture_preparation.mm temporal/live.mm raytracing/raytracing.mm raytracing/capture.mm)
 set_source_files_properties(${METAL_RENDERER_SOURCES} graphics_system.mm
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 add_library(rex-gta4-metal-renderer STATIC ${METAL_RENDERER_SOURCES}
@@ -94,6 +94,7 @@ if(REXGLUE_BUILD_TESTS)
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_raytracing_test.cpp")
     target_include_directories(rex-metal-raytracing-test PRIVATE "${REXGLUE_ROOT}/src")
     target_compile_options(rex-metal-raytracing-test PRIVATE -UNDEBUG)
+    target_link_libraries(rex-metal-raytracing-test PRIVATE xxHash::xxhash)
     add_executable(rex-metal-constant-range-shadow-test EXCLUDE_FROM_ALL
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_constant_range_shadow_test.cpp")
     target_include_directories(rex-metal-constant-range-shadow-test PRIVATE "${REXGLUE_ROOT}/src")

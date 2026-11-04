@@ -61,7 +61,7 @@ template<class T> T Command(std::span<const std::byte> bytes) {
 Renderer::State::State(std::shared_ptr<ui::metal::MetalContext> c,memory::Memory* m,ui::Presenter* p)
     :context(std::move(c)),memory(m),presenter(p),resources(context,memory),stock(context),
      overrides(context,"override_shader_archive"),temporal_stock(context,"stock_temporal_shader_archive"),
-     temporal_overrides(context,"override_temporal_shader_archive"),frames(64u*1024u*1024u,
+     temporal_overrides(context,"override_temporal_shader_archive"),capture_stock(context,"stock_capture_shader_archive"),frames(64u*1024u*1024u,
        // Running a frame ahead of presentation needs a third slot or Begin() blocks on the GPU.
        std::max(rex::cvar::Query<uint32_t>("gta4_native_frames_in_flight"),
                 2u+rex::cvar::Query<uint32_t>("present_frames_ahead"))) {}
@@ -150,6 +150,21 @@ bool Renderer::Initialize(std::string& error,const std::filesystem::path& direct
                !s.temporal_overrides.InitializeFile((directory/"override_temporal_shader_archive.bin").string(),error))return false;
       if(!s.temporal_scene.Initialize(s.context,error))return false;
       REXLOG_INFO("gta4-metal-temporal: enabled method={} upscale={} frame-generation={}",gta4_native::AntiAliasingModeName(s.anti_aliasing),s.temporal_upscale,s.temporal_generation);
+    }
+    s.raytracing_mode=raytracing::CurrentMode();
+    if(s.raytracing_mode!=raytracing::Mode::kOff){
+      // Capture needs the temporal path: the adopted camera places captured vertices.
+      std::string reason;
+      bool ok=s.temporal_enabled;
+      if(!ok)reason="needs temporal anti-aliasing or the MetalFX upscaler";
+      else ok=directory.empty()?s.capture_stock.Initialize(reason):
+          s.capture_stock.InitializeFile((directory/"stock_capture_shader_archive.bin").string(),reason);
+      raytracing::CaptureSettings settings;
+      settings.frames_in_flight=std::max(rex::cvar::Query<uint32_t>("gta4_native_frames_in_flight"),
+                                         2u+rex::cvar::Query<uint32_t>("present_frames_ahead"));
+      if(ok)ok=s.raytracing_capture.Initialize(s.context->device,settings,reason);
+      if(ok)REXLOG_INFO("gta4-metal-raytracing: geometry capture enabled mode={}",rex::cvar::GetFlagByName("gta4_metal_raytracing"));
+      else{REXLOG_WARN("gta4-metal-raytracing: disabled: {}",reason);s.raytracing_mode=raytracing::Mode::kOff;}
     }
     if (!s.post_processing.Initialize(s.context, error)) return false;
     gpu_pass_timer::Initialize(s.context->device,rex::cvar::GetFlagByName("gta4_metal_gpu_pass_log"));
@@ -523,6 +538,18 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
         if(!s.Begin(error))return false;
         s.EndRender();
         if(c.event==TemporalEvent::kBeginScene){
+          // The title emits no kEndFrame: the previous capture frame ends at the next scene.
+          if(s.raytracing_mode!=raytracing::Mode::kOff){
+            s.raytracing_capture.EndFrame();
+            static uint64_t raytracing_frames=0;
+            if(++raytracing_frames%300==0){
+              const auto& r=s.raytracing_capture.statistics();
+              REXLOG_INFO("gta4-metal-raytracing: frame={} captured={} rejected={} built={} rebuilt={} refit={} reused={} "
+                  "stale={} skipped-builds={} skipped-bytes={} evicted={} bytes={} instances={}",t.metadata.sequence,
+                  s.raytracing_capture.captured_draws(),s.raytracing_capture.rejected_draws(),r.built,r.rebuilt,r.refit,
+                  r.reused,r.stale,r.skipped_builds,r.skipped_bytes,r.evicted,r.bytes,r.instances);
+            }
+          }
           if(c.sequence%60==0)REXLOG_INFO("gta4-temporal-begin sequence={} epoch={} view={:X} previous-sequence={} previous-view={:X} previous-world={} phase={}",c.sequence,c.epoch,c.view,t.metadata.sequence,t.metadata.view,t.world_draws,uint32_t(s.Phase()));
           const auto method=s.anti_aliasing==AntiAliasingMode::kTaa?temporal::Method::kTaa:temporal::Method::kMetalFx;
           return t.Begin(s.commands,c,method,s.temporal_upscale?c.output_width:c.width,s.temporal_upscale?c.output_height:c.height,
@@ -534,6 +561,14 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
           if(!executed)return true;
           t.active_composite_scope=c.time_ns;t.executed_composite_source.reset();
           if(t.depth_source&&!s.SettlePendingResolves(t.depth_source->image,false,error))return false;
+          if(s.raytracing_capture.has_camera()){
+            // Stage 2: the frame's builds and refits are encoded here so their cost shows.
+            // Stage 3 moves this before the lighting pass and traces from it.
+            s.EndRender();
+            std::string rt_error;
+            if(!s.raytracing_capture.EncodeScene(s.commands,rt_error)&&!rt_error.empty())
+              REXLOG_ERROR("gta4-metal-raytracing: scene encode failed: {}",rt_error);
+          }
           return t.CaptureDepth(s.commands,error);
         }
         if(c.event==TemporalEvent::kAfterPostFx){
@@ -560,6 +595,7 @@ bool Renderer::SubmitImpl(std::span<const std::byte> bytes,std::string& error) {
         if(!s.Flush(true,error)) return false;
         s.pending_resolves.clear();
         s.temporal_scene.Reset();
+        s.raytracing_capture.Reset(); s.raytracing_sequence=~0ull;
         s.resources.Clear(); s.shaders.clear(); s.declarations.clear(); s.modern.Reset(); s.phases.Reset();
         s.postfx_half_scene_handle = 0; s.depth_of_field.ReleaseExtentResources(); s.sun_shafts.ReleaseExtentResources();
         s.fusion_cloud_mask = nil; s.fusion_cloud_ready = false; return true;

@@ -1,5 +1,6 @@
 #include "raytracing.h"
 #include <rex/cvar.h>
+#include "../../../ui/metal/metal4_queue.h"
 #include <string>
 
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing, "off", "GPU",
@@ -60,15 +61,11 @@ void FillInstance(MTLIndirectAccelerationStructureInstanceDescriptor& instance, 
   instance.accelerationStructureID = structure.gpuResourceID;
 }
 
-bool EncodeAccelerationStructureWork(id<MTLCommandBuffer> commands, std::span<const AccelerationStructureOp> ops,
-                                     std::string& error) {
-  if (ops.empty()) return true;
-  id<MTLAccelerationStructureCommandEncoder> encoder = [commands accelerationStructureCommandEncoder];
-  if (!encoder) { error = "Metal acceleration-structure encoder unavailable"; return false; }
-  encoder.label = @"Liberty ray tracing structures";
-  bool ok = true;
+namespace {
+bool EncodeOps(id<MTLAccelerationStructureCommandEncoder> encoder, std::span<const AccelerationStructureOp> ops,
+               std::string& error) {
   for (const auto& op : ops) {
-    if (!op.destination || !op.scratch) { error = "acceleration-structure op without destination or scratch"; ok = false; break; }
+    if (!op.destination || !op.scratch) { error = "acceleration-structure op without destination or scratch"; return false; }
     switch (op.kind) {
       case AccelerationStructureOp::Kind::kBuildPrimitive:
         [encoder buildAccelerationStructure:op.destination
@@ -85,16 +82,35 @@ bool EncodeAccelerationStructureWork(id<MTLCommandBuffer> commands, std::span<co
                         scratchBufferOffset:op.scratch_offset];
         break;
       case AccelerationStructureOp::Kind::kBuildInstances:
-        if (!op.instances || !op.instance_count) { error = "instance build without instances"; ok = false; break; }
+        if (!op.instances || !op.instance_count) { error = "instance build without instances"; return false; }
         [encoder buildAccelerationStructure:op.destination
                                  descriptor:InstanceDescriptor(op.instances, op.instance_offset, op.instance_count)
                               scratchBuffer:op.scratch
                         scratchBufferOffset:op.scratch_offset];
         break;
     }
-    if (!ok) break;
   }
-  [encoder endEncoding];
+  return true;
+}
+}  // namespace
+
+bool EncodeAccelerationStructureWork(id<MTLCommandBuffer> commands, std::span<const AccelerationStructureOp> ops,
+                                     std::string& error, id<MTLHeap> resident_heap) {
+  if (ops.empty()) return true;
+  // EncodeMetal3 runs the block before it returns (on `commands`, or on a hop), so the
+  // block may use `ops` and write `error` through a pointer.
+  __block bool ok = false;
+  std::string* failure = &error;
+  const auto* first = ops.data();
+  const size_t count = ops.size();
+  rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> metal3) {
+    id<MTLAccelerationStructureCommandEncoder> encoder = [metal3 accelerationStructureCommandEncoder];
+    if (!encoder) { *failure = "Metal acceleration-structure encoder unavailable"; return; }
+    encoder.label = @"Liberty ray tracing structures";
+    if (resident_heap) [encoder useHeap:resident_heap];
+    ok = EncodeOps(encoder, std::span(first, count), *failure);
+    [encoder endEncoding];
+  });
   return ok;
 }
 

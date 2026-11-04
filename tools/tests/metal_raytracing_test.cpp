@@ -1,5 +1,8 @@
-// CPU-side ray-tracing policy: acceleration-structure cache keying, budgets and eviction.
+// CPU-side ray-tracing policy: acceleration-structure cache keying, budgets and eviction,
+// and the capture policy (geometry identity, placement, clip-to-world, triangle lists).
 #include "graphics/gta4_metal/raytracing/accel_cache.h"
+#include "graphics/gta4_metal/raytracing/capture_policy.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -21,7 +24,81 @@ static CaptureAction Draw(Cache& cache, const CaptureRequest& request, uint64_t 
   return decision.action;
 }
 
+static std::vector<uint32_t> Indices(const std::optional<TriangleList>& list) { return list ? list->indices : std::vector<uint32_t>{}; }
+
+static void CapturePolicy() {
+  namespace t = rex::graphics::gta4_native::temporal;
+  {  // identity: what is drawn, not where, by whom or with which pixel shader
+    t::GeometryKey a;
+    a.vertex_shader = 11; a.layout = 12; a.geometry_generation = 13; a.range = 14; a.index_generation = 15;
+    a.primitive = 4; a.indexed = true; a.streams[0] = {16, 0, 32};
+    auto b = a;
+    b.instance = 99; b.drawable = 98; b.pose = 97; b.pixel_shader = 96; b.occurrence = 3;
+    CHECK(GeometryIdentityOf(a) == GeometryIdentityOf(b));
+    auto c = a; c.streams[0].generation = 17;  // vertex data replaced
+    CHECK(GeometryIdentityOf(a) != GeometryIdentityOf(c));
+    auto d = a; d.indexed = false;
+    CHECK(GeometryIdentityOf(a) != GeometryIdentityOf(d));
+    auto e = a; e.base_vertex = 4;
+    CHECK(GeometryIdentityOf(a) != GeometryIdentityOf(e));
+  }
+  {  // placement: hash of the world registers the shader reads; a0 palettes are dynamic
+    std::array<uint8_t, 4096> bank{};
+    const std::array<uint64_t, 4> world{0xF, 0, 0, 0}, wheel{0, 0xF, 0, 0}, skinned{0xF, 0xF, ~0ull, ~0ull};
+    const auto base = PlacementOf(world, bank);
+    bank[16 * 68] = 1;  // c68: not read as a world register
+    CHECK(PlacementOf(world, bank).motion == base.motion);
+    bank[16 * 2 + 4] = 1;  // c2 moved
+    CHECK(PlacementOf(world, bank).motion != base.motion);
+    const auto wheel_before = PlacementOf(wheel, bank);
+    bank[16 * 65] = 1;  // matWheelTransform
+    CHECK(PlacementOf(wheel, bank).motion != wheel_before.motion);
+    CHECK(!base.dynamic && PlacementOf(skinned, bank).dynamic);
+  }
+  {  // clip-to-world: a view-space point projected and taken back lands where it started
+    t::CameraMatrix projection{1.5f, 0, 0, 0, 0, 2.0f, 0, 0, 0, 0, 1.001f, 1, 0, 0, -0.1001f, 0};
+    t::CameraMatrix camera_to_world{0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 10, 20, 30, 1};  // turned 90 degrees, moved
+    const auto m = ClipToWorldColumns(projection, camera_to_world);
+    CHECK(m.has_value());
+    const float view[4]{1, 2, 5, 1};
+    float clip[4]{}, world[4]{}, expected[4]{};
+    for (int j = 0; j < 4; ++j) for (int i = 0; i < 4; ++i) clip[j] += view[i] * projection[i * 4 + j];
+    for (int j = 0; j < 4; ++j) for (int i = 0; i < 4; ++i) expected[j] += view[i] * camera_to_world[i * 4 + j];
+    // Columns: element (row r, column c) of the column-vector matrix is (*m)[c * 4 + r].
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) world[r] += (*m)[c * 4 + r] * clip[c];
+    for (int k = 0; k < 3; ++k) CHECK(std::fabs(world[k] / world[3] - expected[k]) < 1e-3f);
+    t::CameraMatrix singular{};
+    CHECK(!ClipToWorldColumns(singular, camera_to_world).has_value());
+  }
+  {  // triangle lists: relative to the lowest vertex, degenerates dropped, strips split at restarts
+    const std::vector<uint32_t> list{10, 11, 12, 12, 12, 13, 13, 14, 15};
+    auto l = BuildTriangleList(Topology::kList, 9, [&](uint32_t i) { return list[i]; }, 100, std::nullopt);
+    CHECK(l && l->first_vertex == 110 && l->vertex_count == 6);
+    CHECK((Indices(l) == std::vector<uint32_t>{0, 1, 2, 3, 4, 5}));
+    const std::vector<uint32_t> strip{0, 1, 2, 3, 0xFFFF, 5, 6, 7, 7, 8};
+    auto s = BuildTriangleList(Topology::kStrip, uint32_t(strip.size()), [&](uint32_t i) { return strip[i]; }, 0,
+                               std::optional<uint32_t>(0xFFFF));
+    CHECK(s && s->first_vertex == 0 && s->vertex_count == 8);  // vertex 8 is only in degenerates
+    // 0-1-2, 1-2-3 | 5-6-7, (6-7-7 and 7-7-8 degenerate)
+    CHECK((Indices(s) == std::vector<uint32_t>{0, 1, 2, 1, 2, 3, 5, 6, 7}));
+    auto n = BuildTriangleList(Topology::kList, 6, [](uint32_t i) { return 40 + i; }, 0, std::nullopt);
+    CHECK(n && n->first_vertex == 40 && (Indices(n) == std::vector<uint32_t>{0, 1, 2, 3, 4, 5}));
+    auto empty = BuildTriangleList(Topology::kList, 3, [](uint32_t) { return 7u; }, 0, std::nullopt);
+    CHECK(empty && empty->indices.empty());
+    const std::vector<uint32_t> wide{0, 1, kMaximumCapturedVertices};
+    CHECK(!BuildTriangleList(Topology::kList, 3, [&](uint32_t i) { return wide[i]; }, 0, std::nullopt));
+    CHECK(!BuildTriangleList(Topology::kList, 3, [](uint32_t i) { return i; }, -1, std::nullopt));
+  }
+  {  // cache identity: index count or primitive change forces a rebuild
+    CHECK(CacheIdentityOf(5, Topology::kList, 30).triangles == 10);
+    CHECK(CacheIdentityOf(5, Topology::kStrip, 30).triangles == 28);
+    CHECK(!(CacheIdentityOf(5, Topology::kList, 30) == CacheIdentityOf(5, Topology::kStrip, 30)));
+    CHECK(!(CacheIdentityOf(5, Topology::kList, 30) == CacheIdentityOf(5, Topology::kList, 33)));
+  }
+}
+
 int main() {
+  CapturePolicy();
   std::vector<std::string> released;
   const auto release = [&](std::string& payload) { released.push_back(payload); };
   {  // static geometry: built once, then only instanced

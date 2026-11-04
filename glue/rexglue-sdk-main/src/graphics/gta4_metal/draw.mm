@@ -756,6 +756,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   ui::metal::UploadSlice previous_vertex,previous_shared;
   uint64_t previous_vertex_address=0;
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
+  raytracing::DrawGeometry capture_geometry;  // identity 0: this draw is not captured
   if(targets.temporal_motion){
     std::array<uint8_t,4096> captured_vertex{};
     core::CopyGuestWordsToHost(captured_vertex.data(),guest.data()+0x780,captured_vertex.size());
@@ -789,6 +790,10 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       key.streams[i]={identities[i],streams[i].offset,pipeline->strides[i]};
     key.primitive=type;key.indexed=source_indexed;key.restart=restart;
     key.restart_index=restart?restart_value:0;
+    if(raytracing_mode!=raytracing::Mode::kOff&&generation&&pipeline->capture){
+      capture_geometry.identity=raytracing::GeometryIdentityOf(key);
+      capture_geometry.placement=raytracing::PlacementOf(constant_reads,captured_vertex);
+    }
     auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
     // A vertex shader reading a texture recomputes the previous position with this frame's
     // texture: exact while that texture is unchanged (vehicle damage changes rarely).
@@ -974,6 +979,27 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   else [render drawPrimitives:primitive vertexStart:first vertexCount:count];
   draw_encoded=true;
   if (fire_active) [render popDebugGroup];
+  if(capture_geometry.identity&&execution_camera_matches&&!sky_capture){
+    if(!pipeline->capture_state){
+      std::lock_guard lock(pipeline->capture->mutex);
+      if(pipeline->capture->complete)pipeline->capture_state=pipeline->capture->state;
+    }
+    if(pipeline->capture_state){
+      if(raytracing_sequence!=temporal.metadata.sequence){
+        raytracing_capture.BeginFrame(); raytracing_sequence=temporal.metadata.sequence;
+      }
+      if(!raytracing_capture.has_camera())
+        if(const auto m=raytracing::ClipToWorldColumns(temporal.actual_projection,temporal.actual_inverse))
+          raytracing_capture.SetCamera(*m);
+      auto& g=capture_geometry;
+      g.primitive=primitive; g.indexed=indexed; g.index32=index32; g.indices=indices; g.index_offset=index_offset;
+      g.first=indexed?0:first; g.count=count; g.base_vertex=base_vertex;
+      // Rebinds the capture pipeline and buffers 6/7; the next draw rebinds its own
+      // pipeline through `bindings`, and temporal draws set 6/7 every time.
+      std::string capture_error;
+      raytracing_capture.Draw(render,g,[&]{bindings.Pipeline(render,pipeline->capture_state);},capture_error);
+    }
+  }
   if(sky_capture){
     [render setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
     sky_capture->queried=true; EndRender(); sky_visibility=nil;
