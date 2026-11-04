@@ -36,6 +36,16 @@ bool IsMetal4(id<MTLCommandBuffer> commands);
 // on `commands` itself. No encoder may be open on `commands`.
 void EncodeMetal3(id<MTLCommandBuffer> commands, void (^body)(id<MTLCommandBuffer>));
 
+// Encodes Metal 4 native work (MTL4FX) into the open MTL4 command buffer of a proxy
+// `commands`. `resources` join its residency set. An empty encoder first waits for all
+// earlier queue work and then updates `fence`, which the MetalFX object waits for (set it
+// as the object's fence); the next proxy encoder's queue barrier orders what follows.
+// No encoder may be open on `commands`. Returns false on a Metal 3 buffer.
+bool EncodeMetal4(id<MTLCommandBuffer> commands, id<MTLFence> fence, NSArray<id<MTLResource>>* resources,
+                  void (^body)(id<MTL4CommandBuffer>));
+// One MTL4Compiler per Metal 4 queue (nil on Metal 3), for MTL4FX objects.
+id<MTL4Compiler> Metal4Compiler(id<MTLCommandQueue> queue);
+
 // Drawables of `layer` become resident on a Metal 4 queue (no-op on Metal 3).
 void AddLayerResidency(id<MTLCommandQueue> queue, CAMetalLayer* layer);
 

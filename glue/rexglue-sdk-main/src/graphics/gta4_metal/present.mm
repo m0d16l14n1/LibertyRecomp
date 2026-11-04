@@ -1,6 +1,7 @@
 #include "renderer_state.h"
 #include "gpu_pass_timer.h"
 #include "../../ui/metal/guest_output_context.h"
+#include "../../ui/metal/metal4_queue.h"
 #include <rex/cvar.h>
 #include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
@@ -321,6 +322,10 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   fusion_cloud_ready = false;
   if (present.submitted_frame % 60 == 0) LogThermalStateChange(present.submitted_frame);
   if (present.submitted_frame <= 3 || present.submitted_frame % 300 == 0) {
+    if (const auto m4 = ui::metal::Metal4StatisticsOf(context->queue); m4.command_buffers)
+      REXLOG_INFO("gta4-metal4 frame={} command-buffers={} parts={} encoders={} barriers={} transient-bytes={} resident-adds={} metal3-hops={}",
+          present.submitted_frame, m4.command_buffers, m4.parts, m4.encoders, m4.barriers, m4.transient_bytes,
+          m4.resident, m4.metal3_hops);
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed);

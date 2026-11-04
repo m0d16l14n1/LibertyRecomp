@@ -36,6 +36,7 @@ constexpr MTLStages kComputeStages = MTLStageDispatch | MTLStageBlit;
   NSMutableArray<id<MTL4ArgumentTable>>* _tables;
   NSUInteger _tableTextures;
   NSString* _label;
+  id<MTL4Compiler> _compiler;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
 }
 - (id<MTL4CommandAllocator>)takeAllocator;
@@ -69,13 +70,17 @@ constexpr MTLStages kComputeStages = MTLStageDispatch | MTLStageBlit;
   std::atomic<int> _status;
   NSError* _error;
   CFTimeInterval _gpuStart, _gpuEnd;
+  std::atomic<uint64_t> _earlierGpuNs;  // GPU time of the parts before the last one
+  std::atomic<double> _firstStart;
   NSString* _label;
   dispatch_group_t _done;
   BOOL _committed;
 }
 - (void)track:(id<MTLResource>)resource;
+- (void)trackHeap:(id<MTLHeap>)heap;
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length;
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
+- (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body;
 @end
 
 static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
@@ -163,6 +168,10 @@ static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NS
 - (void)useResources:(const id<MTLResource> __unsafe_unretained[])r count:(NSUInteger)n usage:(MTLResourceUsage)u
               stages:(MTLRenderStages)s {
   for (NSUInteger i = 0; i < n; ++i) [_owner track:r[i]];
+}
+- (void)useHeap:(id<MTLHeap>)h stages:(MTLRenderStages)s { [_owner trackHeap:h]; }
+- (void)useHeaps:(const id<MTLHeap> __unsafe_unretained[])h count:(NSUInteger)n stages:(MTLRenderStages)s {
+  for (NSUInteger i = 0; i < n; ++i) [_owner trackHeap:h[i]];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)c {
   [_e drawPrimitives:t vertexStart:s vertexCount:c];
@@ -271,6 +280,10 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (void)useResources:(const id<MTLResource> __unsafe_unretained[])r count:(NSUInteger)n usage:(MTLResourceUsage)u {
   for (NSUInteger i = 0; i < n; ++i) [_owner track:r[i]];
 }
+- (void)useHeap:(id<MTLHeap>)h { [_owner trackHeap:h]; }
+- (void)useHeaps:(const id<MTLHeap> __unsafe_unretained[])h count:(NSUInteger)n {
+  for (NSUInteger i = 0; i < n; ++i) [_owner trackHeap:h[i]];
+}
 - (void)orderDispatch {
   // A serial Metal 3 compute encoder orders dependent dispatches; keep that order.
   if (_serial && _dispatched) {
@@ -355,6 +368,12 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
     if (id<MTLBuffer> buffer = texture.buffer) { [self track:buffer]; return; }
   }
   [_set addAllocation:allocation];
+  ++_q->_resident;
+}
+- (void)trackHeap:(id<MTLHeap>)heap {
+  if (!heap || !_seen.insert((__bridge const void*)heap).second) return;
+  [_retained addObject:heap];
+  [_set addAllocation:heap];
   ++_q->_resident;
 }
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length {
@@ -459,7 +478,19 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   id<MTL4CommandBuffer> buffers[1] = {_cb};
   [_finished addObject:_cb]; [_finished addObject:_allocator];
   _cb = nil; _allocator = nil;
-  if (!last) { [q4 commit:buffers count:1]; return; }
+  if (!last) {
+    MTL4CommitOptions* options = [MTL4CommitOptions new];
+    __block LXCommandBuffer* me = self;
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+      const double start = feedback.GPUStartTime, end = feedback.GPUEndTime;
+      if (end > start) me->_earlierGpuNs += uint64_t((end - start) * 1e9);
+      double none = 0;
+      me->_firstStart.compare_exchange_strong(none, start);
+      me = nil;
+    }];
+    [q4 commit:buffers count:1 options:options];
+    return;
+  }
   for (id<MTLDrawable> d in _drawables) [q4 waitForDrawable:d];
   MTL4CommitOptions* options = [MTL4CommitOptions new];
   __block LXCommandBuffer* me = self;  // released by the feedback handler
@@ -484,7 +515,11 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 }
 - (void)complete:(id<MTL4CommitFeedback>)feedback {
   _error = feedback.error;
-  _gpuStart = feedback.GPUStartTime; _gpuEnd = feedback.GPUEndTime;
+  // Start of the first part; end such that end - start is the GPU time of all parts.
+  const double last = feedback.GPUEndTime > feedback.GPUStartTime ? feedback.GPUEndTime - feedback.GPUStartTime : 0;
+  const double first = _firstStart.load();
+  _gpuStart = first > 0 ? first : feedback.GPUStartTime;
+  _gpuEnd = _gpuStart + last + double(_earlierGpuNs.load()) * 1e-9;
   _status = _error ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
   for (MTLCommandBufferHandler h in _completed) h(self);
   [_completed removeAllObjects];
@@ -510,6 +545,15 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (void)waitUntilScheduled {}
 - (void)waitUntilCompleted {
   if (_committed) dispatch_group_wait(_done, DISPATCH_TIME_FOREVER);
+}
+- (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body {
+  for (id<MTLResource> r in resources) [self track:r];
+  id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
+  Barrier(_q, e, kComputeStages);
+  if (fence) [e updateFence:fence afterEncoderStages:kComputeStages];
+  [e endEncoding];
+  ++_q->_encoders;
+  body(_cb);
 }
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body {
   id<MTLEvent> event = [_q->_device newEvent];
@@ -632,6 +676,21 @@ bool IsMetal4(id<MTLCommandBuffer> commands) { return [(NSObject*)commands isKin
 void EncodeMetal3(id<MTLCommandBuffer> commands, void (^body)(id<MTLCommandBuffer>)) {
   if (IsMetal4(commands)) [(LXCommandBuffer*)commands hop:body];
   else body(commands);
+}
+
+bool EncodeMetal4(id<MTLCommandBuffer> commands, id<MTLFence> fence, NSArray<id<MTLResource>>* resources,
+                  void (^body)(id<MTL4CommandBuffer>)) {
+  if (!IsMetal4(commands)) return false;
+  [(LXCommandBuffer*)commands native:fence resources:resources body:body];
+  return true;
+}
+
+id<MTL4Compiler> Metal4Compiler(id<MTLCommandQueue> queue) {
+  if (!IsMetal4(queue)) return nil;
+  LXQueue* q = (LXQueue*)queue;
+  std::lock_guard<std::mutex> lock(q->_lock);
+  if (!q->_compiler) q->_compiler = [q->_device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:nil];
+  return q->_compiler;
 }
 
 void AddLayerResidency(id<MTLCommandQueue> queue, CAMetalLayer* layer) {

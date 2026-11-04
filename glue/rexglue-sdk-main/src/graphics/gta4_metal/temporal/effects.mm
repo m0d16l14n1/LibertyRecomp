@@ -190,6 +190,10 @@ struct AntiAliasing::State {
   Configuration config{};
   History history;
   id<MTLFXTemporalScaler> scaler = nil;
+  // Metal 4 queue: the same scaler as MTL4FX, made at the first Metal 4 encode.
+  MTLFXTemporalScalerDescriptor* scaler_descriptor = nil;
+  id<MTL4FXTemporalScaler> scaler4 = nil;
+  id<MTLFence> scaler_fence = nil;
   id<MTLComputePipelineState> taa = nil;
   std::array<Slot, 3> slots{};
   size_t cursor = 0, previous = 0, owned = 0, limit = 0;
@@ -256,6 +260,7 @@ bool AntiAliasing::Configure(id<MTLDevice> device, id<MTLLibrary> library, Confi
       descriptor.autoExposureEnabled = NO;
       descriptor.requiresSynchronousInitialization = YES;
       next->scaler = [descriptor newTemporalScalerWithDevice:device];
+      next->scaler_descriptor = descriptor;
       if (!next->scaler) {
         error = "MetalFX temporal scaler creation failed";
         return false;
@@ -372,8 +377,20 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       error = "temporal AA input aliases the next history output";
       return false;
     }
+    const bool metal4 = rex::ui::metal::IsMetal4(commands);
+    if (s.scaler && metal4 && !s.scaler4 && s.scaler_descriptor) {
+      if (auto compiler = rex::ui::metal::Metal4Compiler(commands.commandQueue)) {
+        s.scaler4 = [s.scaler_descriptor newTemporalScalerWithDevice:s.device compiler:compiler];
+        s.scaler_fence = [s.device newFence];
+        s.scaler4.fence = s.scaler_fence;
+      }
+      if (!s.scaler4) {
+        error = "MetalFX Metal 4 temporal scaler creation failed";
+        return false;
+      }
+    }
     if (s.scaler) {
-      auto scaler = s.scaler;
+      id<MTLFXTemporalScalerBase> scaler = metal4 ? s.scaler4 : s.scaler;
       if ((in.color.usage & scaler.colorTextureUsage) != scaler.colorTextureUsage ||
           (in.depth.usage & scaler.depthTextureUsage) != scaler.depthTextureUsage ||
           (in.motion.usage & scaler.motionTextureUsage) != scaler.motionTextureUsage ||
@@ -431,7 +448,16 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       scaler.depthReversed = s.config.depth_reversed;
       scaler.reset = decision.reset;
       // MetalFX takes a Metal 3 command buffer; on the Metal 4 queue it runs in an ordered hop.
-      rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [scaler encodeToCommandBuffer:m3]; });
+      if (metal4) {
+        NSMutableArray<id<MTLResource>>* used = [NSMutableArray arrayWithObjects:in.color, in.depth, in.motion, slot.color, nil];
+        if (in.reactive) [used addObject:in.reactive];
+        if (scaler.exposureTexture) [used addObject:scaler.exposureTexture];
+        id<MTL4FXTemporalScaler> scaler4 = s.scaler4;
+        rex::ui::metal::EncodeMetal4(commands, s.scaler_fence, used,
+                                     ^(id<MTL4CommandBuffer> cb) { [scaler4 encodeToCommandBuffer:cb]; });
+      } else {
+        [s.scaler encodeToCommandBuffer:commands];
+      }
     } else {
       TaaConstants c;
       c.extent = {s.config.input_width, s.config.input_height};
