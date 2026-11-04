@@ -57,6 +57,8 @@ class Capture {
   // ClipToWorldColumns() of the camera the frame's world draws use, once it is adopted.
   void SetCamera(const std::array<float, 16>& clip_to_world_columns);
   bool has_camera() const;
+  // Diagnostics: this frame's captured positions (float4 each) and how many were written.
+  id<MTLBuffer> positions(NSUInteger& vertices) const;
   // After a world draw: encodes its capture replay when the cache asks for one.
   // `select_pipeline` binds the capture pipeline through the renderer's binding cache.
   bool Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,

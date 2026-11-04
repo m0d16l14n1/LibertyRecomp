@@ -2,13 +2,15 @@
 #include "raytracing.h"
 #include "metal_raytracing_library.h"
 #include <rex/cvar.h>
+#include <rex/logging.h>
 #include <simd/simd.h>
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
 
 REXCVAR_DEFINE_STRING(gta4_metal_raytracing_ao_view, "apply", "GPU",
-    "Ray-traced AO output: apply (darken the lit image), show (AO in grey instead of lighting) or none (trace only)");
+    "Ray-traced AO output: apply (darken the lit image), show (AO in grey instead of lighting), "
+    "debug (r = world x / 10, g = hit within radius, b = long-ray hit distance) or none (trace only)");
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_radius, 2.0, "GPU", "Ray-traced AO ray length in metres")
     .range(0.25, 8.0);
 REXCVAR_DEFINE_DOUBLE(gta4_metal_raytracing_ao_occlusion, 0.85, "GPU",
@@ -23,7 +25,8 @@ namespace rex::graphics::gta4_metal::raytracing {
 AoSettings CurrentAoSettings() {
   AoSettings settings;
   const auto view = rex::cvar::GetFlagByName("gta4_metal_raytracing_ao_view");
-  settings.view = view == "show" ? AoView::kShow : view == "none" ? AoView::kNone : AoView::kApply;
+  settings.view = view == "show" ? AoView::kShow : view == "debug" ? AoView::kDebug
+                : view == "none" ? AoView::kNone : AoView::kApply;
   settings.radius = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_radius"));
   settings.occlusion = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_occlusion"));
   settings.apply_strength = float(rex::cvar::Query<double>("gta4_metal_raytracing_ao_strength"));
@@ -53,6 +56,8 @@ struct AmbientOcclusion::Impl {
   id<MTLDevice> device = nil;
   id<MTLLibrary> library = nil;
   id<MTLComputePipelineState> trace = nil, temporal = nil, atrous = nil, upsample = nil;
+  id<MTLComputePipelineState> debug_trace = nil, debug_ao = nil, debug_positions = nil;
+  id<MTLTexture> debug = nil;  // trace size, see rtao_debug_trace
   id<MTLTexture> no_normals = nil, no_motion = nil;  // bound where the kernels take an unused input
   // Trace size: raw (r visibility, g view distance), two histories, a filter pair.
   id<MTLTexture> raw = nil, history[2] = {nil, nil}, filter[2] = {nil, nil}, ao = nil;
@@ -61,7 +66,7 @@ struct AmbientOcclusion::Impl {
   bool history_valid = false;
   uint64_t frames = 0;
   simd_float4x4 previous_clip_to_world = matrix_identity_float4x4;
-  std::unordered_map<uint64_t, id<MTLRenderPipelineState>> apply;  // (format << 1) | show
+  std::unordered_map<uint64_t, id<MTLRenderPipelineState>> apply;  // (format << 2) | view
 
   id<MTLComputePipelineState> Kernel(NSString* name, std::string& error) {
     id<MTLFunction> function = [library newFunctionWithName:name];
@@ -82,17 +87,20 @@ struct AmbientOcclusion::Impl {
       filter[i] = Texture(device, MTLPixelFormatRGBA16Float, tw, th, @"Liberty RTAO filter");
     }
     ao = Texture(device, MTLPixelFormatR16Float, w, h, @"Liberty RTAO");
+    debug = Texture(device, MTLPixelFormatRGBA16Float, tw, th, @"Liberty RTAO debug");
     width = w; height = h;
     history_valid = false;
-    return raw && history[0] && history[1] && filter[0] && filter[1] && ao;
+    return raw && history[0] && history[1] && filter[0] && filter[1] && ao && debug;
   }
-  id<MTLRenderPipelineState> ApplyPipeline(MTLPixelFormat format, bool show, std::string& error) {
-    const uint64_t key = uint64_t(format) << 1 | uint64_t(show);
+  id<MTLRenderPipelineState> ApplyPipeline(MTLPixelFormat format, AoView view, std::string& error) {
+    const bool show = view != AoView::kApply;
+    const uint64_t key = uint64_t(format) << 2 | uint64_t(view);
     if (auto found = apply.find(key); found != apply.end()) return found->second;
     auto* descriptor = [MTLRenderPipelineDescriptor new];
     descriptor.label = show ? @"Liberty RTAO show" : @"Liberty RTAO apply";
     descriptor.vertexFunction = [library newFunctionWithName:@"rtao_apply_vertex"];
-    descriptor.fragmentFunction = [library newFunctionWithName:show ? @"rtao_apply_show" : @"rtao_apply_multiply"];
+    descriptor.fragmentFunction = [library newFunctionWithName:view == AoView::kDebug ? @"rtao_apply_debug"
+                                                              : show ? @"rtao_apply_show" : @"rtao_apply_multiply"];
     auto* color = descriptor.colorAttachments[0];
     color.pixelFormat = format;
     color.writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
@@ -129,7 +137,9 @@ bool AmbientOcclusion::Initialize(id<MTLDevice> device, std::string& error) {
     return false;
   }
   if (!(s.trace = s.Kernel(@"rtao_trace", error)) || !(s.temporal = s.Kernel(@"rtao_temporal", error)) ||
-      !(s.atrous = s.Kernel(@"rtao_atrous", error)) || !(s.upsample = s.Kernel(@"rtao_upsample", error)))
+      !(s.atrous = s.Kernel(@"rtao_atrous", error)) || !(s.upsample = s.Kernel(@"rtao_upsample", error)) ||
+      !(s.debug_trace = s.Kernel(@"rtao_debug_trace", error)) || !(s.debug_ao = s.Kernel(@"rtao_debug_ao", error)) ||
+      !(s.debug_positions = s.Kernel(@"rtao_debug_positions", error)))
     return false;
   s.no_normals = Texture(device, MTLPixelFormatRGBA8Unorm, 1, 1, @"Liberty RTAO no normals");
   s.no_motion = Texture(device, MTLPixelFormatRG16Float, 1, 1, @"Liberty RTAO no motion");
@@ -154,6 +164,7 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
   p.frame = uint32_t(s.frames);
   p.normal_mode = 0;  // from depth until the G-buffer normal encoding is confirmed
   p.reversed_depth = frame.reversed_depth;
+  p.jitter_ndc = simd_make_float2(frame.jitter_ndc[0], frame.jitter_ndc[1]);
   p.valid_history = s.history_valid && !frame.camera_cut && frame.motion;
   const uint32_t previous = s.current, current = s.current ^ 1u;
 
@@ -211,6 +222,73 @@ id<MTLTexture> AmbientOcclusion::Encode(id<MTLCommandBuffer> commands, const AoF
         [e setTexture:ao atIndex:2];
       });
   if (!ok) { error = "ray-traced AO compute encoder unavailable"; return nil; }
+
+  // Diagnostics: the debug view every frame; statistics on frames 0, 1 and every 300th.
+  const bool statistics = s.frames < 2 || s.frames % 300 == 0;
+  if (settings.view == AoView::kDebug || statistics) {
+    // uints [0, 16), floats [16, 32); min starts at all ones.
+    id<MTLBuffer> stats = [s.device newBufferWithLength:32 * 4 options:MTLResourceStorageModeShared];
+    if (!stats) { error = "ray-traced AO statistics allocation failed"; return nil; }
+    std::memset(stats.contents, 0, stats.length);
+    static_cast<uint32_t*>(stats.contents)[5] = UINT32_MAX;
+    id<MTLTexture> debug = s.debug;
+    id<MTLBuffer> positions = frame.captured_positions;
+    const uint32_t position_count = uint32_t(std::min<NSUInteger>(frame.captured_vertices, UINT32_MAX));
+    const bool counted =
+        pass(@"Liberty RTAO debug trace", s.debug_trace, tw, th, ^(id<MTLComputeCommandEncoder> e) {
+          if (structures) [e useHeap:structures];
+          [e useResource:scene usage:MTLResourceUsageRead];
+          [e setAccelerationStructure:scene atBufferIndex:1];
+          [e setBuffer:stats offset:0 atIndex:2];
+          [e setBuffer:stats offset:64 atIndex:3];
+          [e setTexture:depth atIndex:0];
+          [e setTexture:normals atIndex:1];
+          [e setTexture:debug atIndex:2];
+        }) &&
+        (!statistics ||
+         (pass(@"Liberty RTAO debug ao", s.debug_ao, s.width, s.height, ^(id<MTLComputeCommandEncoder> e) {
+            [e setBuffer:stats offset:0 atIndex:2];
+            [e setBuffer:stats offset:64 atIndex:3];
+            [e setTexture:ao atIndex:0];
+          }) &&
+          (!positions || !position_count ||
+           pass(@"Liberty RTAO debug positions", s.debug_positions, position_count, 1, ^(id<MTLComputeCommandEncoder> e) {
+             [e setBuffer:positions offset:0 atIndex:0];
+             [e setBytes:&position_count length:sizeof(position_count) atIndex:1];
+             [e setBuffer:stats offset:0 atIndex:2];
+             [e setBuffer:stats offset:64 atIndex:3];
+           }))));
+    if (!counted) { error = "ray-traced AO diagnostics encoder unavailable"; return nil; }
+    if (statistics) {
+      const uint64_t traced = s.frames;
+      const auto m = frame.clip_to_world;
+      const auto camera = frame.camera_position;
+      const auto jitter = frame.jitter_ndc;
+      const bool reversed = frame.reversed_depth;
+      const float radius = settings.radius;
+      [commands addCompletedHandler:^(id<MTLCommandBuffer>) {
+        const auto* u = static_cast<const uint32_t*>(stats.contents);
+        const auto* f = static_cast<const float*>(stats.contents) + 16;
+        float ao_min, ao_max;
+        std::memcpy(&ao_min, &u[5], 4);
+        std::memcpy(&ao_max, &u[6], 4);
+        const double traced_pixels = std::max(1u, u[0]), positions_ok = std::max(1u, u[7]);
+        REXLOG_INFO("gta4-metal-raytracing-ao-stats: frame={} traced={} sky={} bad-origin={} near-hits={} "
+            "near-hits-under-10cm={} far-hits={} mean-near-distance={:.3f} mean-far-distance={:.2f} "
+            "mean-view-distance={:.2f} radius={} ao-min={:.3f} ao-mean={:.3f} ao-max={:.3f} "
+            "origin-mean=({:.1f},{:.1f},{:.1f}) captured-finite={} captured-nan={} captured-mean=({:.1f},{:.1f},{:.1f}) "
+            "camera=({:.1f},{:.1f},{:.1f}) jitter=({:.5f},{:.5f}) reversed={} clip-to-world-columns=[{}]",
+            traced, u[0], u[1], u[2], u[3], u[10], u[4], f[9] / std::max(1u, u[3]), f[3] / std::max(1u, u[4]),
+            f[4] / traced_pixels, radius, ao_min, f[5] / std::max(1u, u[9]), ao_max,
+            f[0] / traced_pixels, f[1] / traced_pixels, f[2] / traced_pixels, u[7], u[8],
+            f[6] / positions_ok, f[7] / positions_ok, f[8] / positions_ok, camera[0], camera[1], camera[2],
+            jitter[0], jitter[1], reversed,
+            fmt::format("{:.4g},{:.4g},{:.4g},{:.4g}, {:.4g},{:.4g},{:.4g},{:.4g}, {:.4g},{:.4g},{:.4g},{:.4g}, "
+                        "{:.4g},{:.4g},{:.4g},{:.4g}", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9],
+                        m[10], m[11], m[12], m[13], m[14], m[15]));
+      }];
+    }
+  }
   std::memcpy(&s.previous_clip_to_world, frame.clip_to_world.data(), sizeof(s.previous_clip_to_world));
   s.current = current;
   s.history_valid = true;
@@ -224,8 +302,8 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   if (settings.view == AoView::kNone || !target || !ao || target.width != ao.width || target.height != ao.height ||
       target.sampleCount != 1)
     return true;
-  const bool show = settings.view == AoView::kShow;
-  id<MTLRenderPipelineState> pipeline = s.ApplyPipeline(target.pixelFormat, show, error);
+  const bool show = settings.view != AoView::kApply;
+  id<MTLRenderPipelineState> pipeline = s.ApplyPipeline(target.pixelFormat, settings.view, error);
   if (!pipeline) return false;
   auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
   pass.colorAttachments[0].texture = target;
@@ -235,7 +313,7 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
   if (!e) { error = "ray-traced AO apply pass unavailable"; return false; }
   e.label = show ? @"Liberty RTAO show" : @"Liberty RTAO apply";
   [e setRenderPipelineState:pipeline];
-  [e setFragmentTexture:ao atIndex:0];
+  [e setFragmentTexture:settings.view == AoView::kDebug && s.debug ? s.debug : ao atIndex:0];
   const float strength = settings.apply_strength;
   if (!show) [e setFragmentBytes:&strength length:sizeof(strength) atIndex:0];
   [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -245,7 +323,7 @@ bool AmbientOcclusion::Apply(id<MTLCommandBuffer> commands, id<MTLTexture> targe
 
 void AmbientOcclusion::Reset() {
   auto& s = *impl_;
-  s.raw = s.ao = nil;
+  s.raw = s.ao = s.debug = nil;
   s.history[0] = s.history[1] = s.filter[0] = s.filter[1] = nil;
   s.width = s.height = 0;
   s.history_valid = false;

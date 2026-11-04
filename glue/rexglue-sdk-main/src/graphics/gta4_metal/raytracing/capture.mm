@@ -63,7 +63,8 @@ struct Capture::Impl {
   uint64_t captured = 0, rejected_draws = 0;
 
   NSUInteger AllocatePositions(uint32_t vertices) {
-    const NSUInteger size = AlignUp(NSUInteger(vertices) * kCapturedVertexStride, 256);
+    // Packed (16-byte float4s): no gaps, so the whole used range is captured positions.
+    const NSUInteger size = NSUInteger(vertices) * kCapturedVertexStride;
     if (slot->positions_used + size > slot->positions.length) return NSNotFound;
     const NSUInteger offset = slot->positions_used;
     slot->positions_used += size;
@@ -128,6 +129,11 @@ void Capture::SetCamera(const std::array<float, 16>& clip_to_world_columns) {
   s.frame_active = true;
 }
 bool Capture::has_camera() const { return impl_->frame_active; }
+id<MTLBuffer> Capture::positions(NSUInteger& vertices) const {
+  const auto& s = *impl_;
+  vertices = s.slot ? s.slot->positions_used / kCapturedVertexStride : 0;
+  return s.slot ? s.slot->positions : nil;
+}
 
 bool Capture::Draw(id<MTLRenderCommandEncoder> render, const DrawGeometry& draw,
                    const std::function<void()>& select_pipeline, std::string& error) {

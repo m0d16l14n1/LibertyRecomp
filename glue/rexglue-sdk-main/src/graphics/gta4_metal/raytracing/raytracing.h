@@ -26,9 +26,12 @@ struct RtaoParams {
   simd_uint2 input_size, trace_size;
   float radius = 2.0f, strength = 0.85f, history_blend_minimum = 0.08f, depth_rejection = 0.05f;
   uint32_t frame = 0, normal_mode = 0, reversed_depth = 0, valid_history = 0;
+  simd_float2 jitter_ndc = {0, 0};  // this frame's projection jitter: depth pixels sit at ndc + jitter
+  simd_float2 padding = {0, 0};
 };
-static_assert(sizeof(RtaoParams) == 192 && offsetof(RtaoParams, input_size) == 144 &&
-              offsetof(RtaoParams, radius) == 160 && offsetof(RtaoParams, frame) == 176);
+static_assert(sizeof(RtaoParams) == 208 && offsetof(RtaoParams, input_size) == 144 &&
+              offsetof(RtaoParams, radius) == 160 && offsetof(RtaoParams, frame) == 176 &&
+              offsetof(RtaoParams, jitter_ndc) == 192);
 
 // Must match LibertyCaptureDraw in tools/metal/raytracing_capture_variants.py.
 struct CaptureDraw {

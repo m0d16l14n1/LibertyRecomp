@@ -935,14 +935,21 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       const auto clip_to_world=raytracing::ClipToWorldColumns(temporal.actual_projection,temporal.actual_inverse);
       EndRender();
       std::string rt_error;
-      if(id<MTLAccelerationStructure> scene=clip_to_world?raytracing_capture.EncodeScene(commands,rt_error):nil){
+      // The scene depth attachment is resolved and cleared before the lighting: read the
+      // temporal snapshot taken at that resolve (or take it now if there was none).
+      const bool depth_ready=temporal.CaptureDepth(commands,rt_error)&&temporal.depth_captured&&temporal.inputs.depth;
+      if(id<MTLAccelerationStructure> scene=clip_to_world&&depth_ready?raytracing_capture.EncodeScene(commands,rt_error):nil){
         raytracing::AoFrame f;
         f.scene=scene; f.structures=raytracing_capture.heap();
-        f.depth=temporal.depth_source->image; f.motion=temporal.inputs.motion;
+        f.depth=temporal.inputs.depth; f.motion=temporal.inputs.motion;
         f.clip_to_world=*clip_to_world;
         // actual_inverse is camera-to-world with row vectors: its last row is the camera position.
         f.camera_position={temporal.actual_inverse[12],temporal.actual_inverse[13],temporal.actual_inverse[14]};
         f.reversed_depth=temporal.config.depth_reversed; f.camera_cut=temporal.metadata.camera_cut;
+        // The depth was rendered jittered (as temporal_parameters.jitter_clip): reconstruction removes it.
+        if(temporal.metadata.jitter_applied)
+          f.jitter_ndc={2*temporal.metadata.jitter[0]/float(f.depth.width),-2*temporal.metadata.jitter[1]/float(f.depth.height)};
+        f.captured_positions=raytracing_capture.positions(f.captured_vertices);
         raytracing_ao_settings=raytracing::CurrentAoSettings();
         raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
       }

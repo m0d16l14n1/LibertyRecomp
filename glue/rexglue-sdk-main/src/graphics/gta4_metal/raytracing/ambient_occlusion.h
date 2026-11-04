@@ -15,8 +15,9 @@
 
 namespace rex::graphics::gta4_metal::raytracing {
 
-// gta4_metal_raytracing_ao_view = apply | show | none
-enum class AoView : uint8_t { kApply, kShow, kNone };
+// gta4_metal_raytracing_ao_view = apply | show | debug | none
+// debug: r = fract(world.x / 10), g = AO ray hit within the radius, b = long-ray hit distance.
+enum class AoView : uint8_t { kApply, kShow, kDebug, kNone };
 struct AoSettings {
   AoView view = AoView::kApply;
   float radius = 2.0f;          // world units (metres)
@@ -32,8 +33,12 @@ struct AoFrame {
   id<MTLTexture> motion = nil;               // RG16Float, input pixels towards the previous frame; may be nil
   std::array<float, 16> clip_to_world{};     // ClipToWorldColumns(), unjittered
   std::array<float, 3> camera_position{};    // world
+  std::array<float, 2> jitter_ndc{};         // projection jitter of this frame's depth, in ndc
   bool reversed_depth = false;
   bool camera_cut = false;
+  // Diagnostics only: the frame's captured positions, compared with the reconstruction.
+  id<MTLBuffer> captured_positions = nil;
+  NSUInteger captured_vertices = 0;
 };
 
 class AmbientOcclusion {
@@ -49,8 +54,11 @@ class AmbientOcclusion {
   // Outside any encoder. Returns the AO at the depth's size (R16Float, 1 = open), or nil.
   id<MTLTexture> Encode(id<MTLCommandBuffer> commands, const AoFrame& frame, const AoSettings& settings,
                         std::string& error);
+  // Every 300 traced frames (and the first two) Encode also runs a statistics pass and logs
+  // "gta4-metal-raytracing-ao-stats" when the GPU completes it.
   // Outside any encoder: its own render pass over `target` (loaded and stored).
   // kNone does nothing. `ao` must match the target's size; otherwise nothing is drawn.
+  // kDebug draws the debug texture instead of `ao`.
   bool Apply(id<MTLCommandBuffer> commands, id<MTLTexture> target, id<MTLTexture> ao, const AoSettings& settings,
              std::string& error);
   void Reset();  // drops history and textures (device loss, mode change)

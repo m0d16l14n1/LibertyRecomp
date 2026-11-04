@@ -29,6 +29,8 @@ struct RtaoParams {
     uint normalMode;             // 0: from depth; 1: G-buffer rgb = n * 0.5 + 0.5 (world space)
     uint reversedDepth;          // 1: device depth 1 is near
     uint validHistory;           // 0 after a camera cut or resize
+    float2 jitterNdc;            // the depth was rendered with ndc + jitterNdc: removed before reconstruction
+    float2 padding;
 };
 
 // ---- helpers -------------------------------------------------------------------------
@@ -43,7 +45,7 @@ static bool is_sky(float depth, constant RtaoParams& p) {
 }
 
 static float3 world_at(uint2 pixel, uint2 size, float depth, constant RtaoParams& p) {
-    const float4 world = p.clipToWorld * float4(ndc_of(pixel, size), depth, 1.0f);
+    const float4 world = p.clipToWorld * float4(ndc_of(pixel, size) - p.jitterNdc, depth, 1.0f);
     return world.xyz / world.w;
 }
 
@@ -69,12 +71,12 @@ static float3 cosine_direction(float3 n, float2 u) {
 }
 
 // The scene depth attachment itself (single sample), read as a depth texture.
-static float depth_at(depth2d<float, access::read> depth, uint2 pixel) {
-    return depth.read(min(pixel, uint2(depth.get_width() - 1, depth.get_height() - 1)));
+static float depth_at(texture2d<float, access::read> depth, uint2 pixel) {
+    return depth.read(min(pixel, uint2(depth.get_width() - 1, depth.get_height() - 1))).r;
 }
 
 // The surface normal at an input-resolution pixel, facing the camera.
-static float3 normal_at(depth2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
+static float3 normal_at(texture2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
                         uint2 pixel, float3 position, constant RtaoParams& p) {
     float3 n;
     if (p.normalMode == 1u) {
@@ -100,12 +102,18 @@ static float view_depth(float3 position, constant RtaoParams& p) {
     return length(position - p.cameraPosition.xyz);
 }
 
+// Rays start this far off the reconstructed surface: depth precision, and the captured
+// triangles are not bit-identical to the rasterized depth (grazing roads move most).
+static float origin_offset(float distance) {
+    return max(0.03f, distance * 1.5e-3f);
+}
+
 // ---- trace ---------------------------------------------------------------------------
 // out: r = visibility (1 open, 0 occluded), g = view distance (0 for sky)
 
 kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
                        instance_acceleration_structure scene [[buffer(1)]],
-                       depth2d<float, access::read> depth [[texture(0)]],
+                       texture2d<float, access::read> depth [[texture(0)]],
                        texture2d<float, access::read> gbufferNormal [[texture(1)]],
                        texture2d<float, access::write> raw [[texture(2)]],
                        uint2 id [[thread_position_in_grid]]) {
@@ -120,7 +128,7 @@ kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
     const float distance = view_depth(position, p);
 
     ray r;
-    r.origin = position + n * max(0.01f, distance * 2.0e-4f);  // grows with distance: depth precision
+    r.origin = position + n * origin_offset(distance);
     r.direction = cosine_direction(n, random2(id, p.frame));
     r.min_distance = 0.0f;
     r.max_distance = p.radius;
@@ -206,7 +214,7 @@ kernel void rtao_atrous(constant RtaoParams& p [[buffer(0)]],
 
 kernel void rtao_upsample(constant RtaoParams& p [[buffer(0)]],
                           texture2d<float, access::read> filtered [[texture(0)]],
-                          depth2d<float, access::read> depth [[texture(1)]],
+                          texture2d<float, access::read> depth [[texture(1)]],
                           texture2d<float, access::write> ao [[texture(2)]],
                           uint2 id [[thread_position_in_grid]]) {
     if (any(id >= p.inputSize)) return;
@@ -255,4 +263,120 @@ fragment float4 rtao_apply_show(RtaoApplyVertex in [[stage_in]],
                                 texture2d<float, access::read> ao [[texture(0)]]) {
     const uint2 pixel = min(uint2(in.position.xy), uint2(ao.get_width() - 1, ao.get_height() - 1));
     return float4(float3(ao.read(pixel).r), 1.0f);
+}
+
+
+// ---- diagnostics ---------------------------------------------------------------------
+// gta4_metal_raytracing_ao_view = debug, and a statistics pass every 300 traced frames.
+// Debug texture (trace size): r = fract(world.x / 10), g = 1 when the AO ray hits within the
+// radius, b = first hit of a long ray (1 km) along the same direction / (10 * radius).
+// Statistics: uints (simd-reduced atomics) then floats, see ambient_occlusion.mm.
+
+constant uint kStatTraced = 0, kStatSky = 1, kStatBadOrigin = 2, kStatNearHits = 3, kStatFarHits = 4,
+              kStatAoMin = 5, kStatAoMax = 6, kStatPositionsFinite = 7, kStatPositionsBad = 8, kStatAoPixels = 9,
+              kStatNearHitsUnderOffset = 10;
+constant uint kSumOriginX = 0, kSumOriginY = 1, kSumOriginZ = 2, kSumFarDistance = 3, kSumViewDistance = 4,
+              kSumAo = 5, kSumPositionX = 6, kSumPositionY = 7, kSumPositionZ = 8, kSumNearDistance = 9;
+
+static void add_count(device atomic_uint* counts, uint index, uint value) {
+    const uint total = simd_sum(value);
+    if (simd_is_first() && total) atomic_fetch_add_explicit(&counts[index], total, memory_order_relaxed);
+}
+static void add_sum(device atomic_float* sums, uint index, float value) {
+    const float total = simd_sum(value);
+    if (simd_is_first() && total != 0.0f) atomic_fetch_add_explicit(&sums[index], total, memory_order_relaxed);
+}
+
+kernel void rtao_debug_trace(constant RtaoParams& p [[buffer(0)]],
+                             instance_acceleration_structure scene [[buffer(1)]],
+                             device atomic_uint* counts [[buffer(2)]],
+                             device atomic_float* sums [[buffer(3)]],
+                             texture2d<float, access::read> depth [[texture(0)]],
+                             texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                             texture2d<float, access::write> debug [[texture(2)]],
+                             uint2 id [[thread_position_in_grid]]) {
+    // No early return before the simd reductions: out-of-range lanes add zero.
+    const bool inside = all(id < p.traceSize);
+    const uint2 pixel = min(id * 2u, p.inputSize - 1u);
+    const float d = depth_at(depth, pixel);
+    const bool sky = !inside || is_sky(d, p);
+    float3 position = float3(0), n = float3(0, 0, 1);
+    float distance = 0.0f;
+    bool good = false;
+    if (!sky) {
+        position = world_at(pixel, p.inputSize, d, p);
+        good = all(isfinite(position));
+        if (good) { n = normal_at(depth, gbufferNormal, pixel, position, p); distance = view_depth(position, p); }
+    }
+    bool near = false, far = false;
+    float nearDistance = 0.0f, farDistance = 0.0f;
+    if (good) {
+        ray r;
+        r.origin = position + n * origin_offset(distance);
+        r.direction = cosine_direction(n, random2(id, p.frame));
+        r.min_distance = 0.0f;
+        r.max_distance = 1000.0f;
+        intersector<instancing> query;
+        query.accept_any_intersection(false);  // the nearest hit: its distance is the point
+        query.assume_geometry_type(geometry_type::triangle);
+        query.force_opacity(forced_opacity::opaque);
+        const auto hit = query.intersect(r, scene);
+        if (hit.type != intersection_type::none) {
+            far = true;
+            farDistance = hit.distance;
+            near = hit.distance <= p.radius;
+            nearDistance = near ? hit.distance : 0.0f;
+        }
+    }
+    if (inside)
+        debug.write(float4(good ? fract(position.x / 10.0f) : 0.0f, near ? 1.0f : 0.0f,
+                           far ? saturate(farDistance / (10.0f * p.radius)) : 0.0f, 1.0f), id);
+    add_count(counts, kStatTraced, good ? 1u : 0u);
+    add_count(counts, kStatSky, inside && sky ? 1u : 0u);
+    add_count(counts, kStatBadOrigin, !sky && !good ? 1u : 0u);
+    add_count(counts, kStatNearHits, near ? 1u : 0u);
+    add_count(counts, kStatFarHits, far ? 1u : 0u);
+    add_count(counts, kStatNearHitsUnderOffset, near && nearDistance < 0.1f ? 1u : 0u);
+    add_sum(sums, kSumOriginX, good ? position.x : 0.0f);
+    add_sum(sums, kSumOriginY, good ? position.y : 0.0f);
+    add_sum(sums, kSumOriginZ, good ? position.z : 0.0f);
+    add_sum(sums, kSumViewDistance, distance);
+    add_sum(sums, kSumFarDistance, farDistance);
+    add_sum(sums, kSumNearDistance, nearDistance);
+}
+
+kernel void rtao_debug_ao(texture2d<float, access::read> ao [[texture(0)]],
+                          device atomic_uint* counts [[buffer(2)]],
+                          device atomic_float* sums [[buffer(3)]],
+                          uint2 id [[thread_position_in_grid]]) {
+    const bool inside = id.x < ao.get_width() && id.y < ao.get_height();
+    const float v = inside ? max(ao.read(id).r, 0.0f) : 0.0f;
+    const uint bits = as_type<uint>(v);  // non-negative floats order like their bits
+    const uint lo = simd_min(inside ? bits : 0xFFFFFFFFu), hi = simd_max(inside ? bits : 0u);
+    if (simd_is_first()) {
+        atomic_fetch_min_explicit(&counts[kStatAoMin], lo, memory_order_relaxed);
+        atomic_fetch_max_explicit(&counts[kStatAoMax], hi, memory_order_relaxed);
+    }
+    add_count(counts, kStatAoPixels, inside ? 1u : 0u);
+    add_sum(sums, kSumAo, v);
+}
+
+kernel void rtao_debug_positions(const device float4* positions [[buffer(0)]],
+                                 constant uint& count [[buffer(1)]],
+                                 device atomic_uint* counts [[buffer(2)]],
+                                 device atomic_float* sums [[buffer(3)]],
+                                 uint id [[thread_position_in_grid]]) {
+    const float4 v = id < count ? positions[id] : float4(0);
+    const bool finite = id < count && all(isfinite(v.xyz));
+    add_count(counts, kStatPositionsFinite, finite ? 1u : 0u);
+    add_count(counts, kStatPositionsBad, id < count && !finite ? 1u : 0u);
+    add_sum(sums, kSumPositionX, finite ? v.x : 0.0f);
+    add_sum(sums, kSumPositionY, finite ? v.y : 0.0f);
+    add_sum(sums, kSumPositionZ, finite ? v.z : 0.0f);
+}
+
+fragment float4 rtao_apply_debug(RtaoApplyVertex in [[stage_in]],
+                                 texture2d<float, access::read> debug [[texture(0)]]) {
+    const uint2 pixel = min(uint2(in.position.xy) / 2u, uint2(debug.get_width() - 1, debug.get_height() - 1));
+    return float4(debug.read(pixel).rgb, 1.0f);
 }
