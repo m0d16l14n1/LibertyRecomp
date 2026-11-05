@@ -26,6 +26,7 @@
 #include "presentation_effects.h"
 #include "presentation_image_cache.h"
 #include "output_transfer.h"
+#include "spatial_upscaler.h"
 #include <algorithm>
 #include <cmath>
 #include "guest_output_context.h"
@@ -40,6 +41,9 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_presented_image, true, "GPU/Metal",
     "Reuse the processed game image during repeated UI presentations");
 REXCVAR_DEFINE_BOOL(gta4_metal_fuse_hdr_output, true, "GTA IV/Metal",
                    "Combine compatible bilinear and HDR output without a full-window intermediate");
+REXCVAR_DEFINE_BOOL(gta4_metal_metalfx_spatial, false, "GPU/Metal",
+                   "With present_effect=bilinear, upscale the finished game image with the MetalFX spatial "
+                   "scaler to the output size first (the bilinear pass then only places it)");
 
 
 @interface LibertyMetalDisplayDelegate : NSObject <CAMetalDisplayLinkDelegate>
@@ -208,6 +212,7 @@ struct MetalPresenter::State {
   id<MTLTexture> hdr_source = nil;
   PresentationEffects effects;
   std::array<id<MTLTexture>, 2> intermediates{};
+  SpatialUpscaler spatial;
 };
 
 MetalPresenter::MetalPresenter(std::shared_ptr<MetalContext> context, HostGpuLossCallback callback)
@@ -669,6 +674,8 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
 #endif
     image_key.hdr_mode = hdr.hdr_mode; image_key.output_mode = hdr.output_mode;
     image_key.output_mode|=rex::cvar::Query<bool>("gta4_metal_fuse_hdr_output")?0x100u:0u;
+    const bool metalfx_spatial = rex::cvar::Query<bool>("gta4_metal_metalfx_spatial");
+    image_key.output_mode|=metalfx_spatial?0x200u:0u;
     image_key.hdr = {hdr.hdr_headroom, hdr.paper_white_nits, hdr.peak_nits,
                      hdr.shoulder_start, hdr.shoulder_power};
     const bool cache_enabled = rex::cvar::Query<bool>("gta4_metal_cache_presented_image");
@@ -730,6 +737,21 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
     };
     id<MTLRenderCommandEncoder> encoder = nil;
     if (cache_action != PresentationCachePolicy::Action::kReuse) {
+      // MetalFX spatial pre-pass: the first bilinear pass samples normalized coordinates over the
+      // whole source, so an upscaled copy at that pass's output size replaces it unchanged.
+      if (metalfx_spatial && source && flow.effect_count &&
+          (flow.effects[0] == GuestOutputPaintEffect::kBilinear ||
+           flow.effects[0] == GuestOutputPaintEffect::kBilinearDither)) {
+        const auto extent = flow.effect_output_sizes[0];
+        if (auto upscaled = state_->spatial.Encode(state_->context->device, commands, source,
+                                                   extent.first, extent.second, error)) {
+          source = upscaled;
+        } else if (!error.empty()) {
+          REXLOG_ERROR("gta4-metal: {}", error); error.clear();
+        }
+      } else if (!metalfx_spatial) {
+        state_->spatial.Reset();
+      }
       // Two reusable tracked textures suffice for the serial effect chain.
       // Neither texture's contents are touched by the CPU or discarded between dependent passes.
       for (size_t i=0; i+1<flow.effect_count; ++i) {

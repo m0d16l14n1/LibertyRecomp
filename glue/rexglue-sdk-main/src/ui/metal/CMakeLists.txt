@@ -17,13 +17,13 @@ add_custom_target(rexui_metal_library DEPENDS "${METAL_UI_LIBRARY}")
 add_dependencies(rexui rexui_metal_library)
 set(METAL_UI_SOURCES
     context.mm frame_ring.mm upload_arena.mm provider.mm presenter.mm immediate_drawer.mm
-    presentation_effects.mm output_transfer.mm presentation_image_cache.mm metal4_queue.mm)
+    presentation_effects.mm output_transfer.mm presentation_image_cache.mm metal4_queue.mm spatial_upscaler.mm)
 list(TRANSFORM METAL_UI_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 set_source_files_properties(${METAL_UI_SOURCES} TARGET_DIRECTORY rexui
     PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_sources(rexui PRIVATE ${METAL_UI_SOURCES} "${METAL_UI_LIBRARY}")
 target_include_directories(rexui PRIVATE "${METAL_UI_GENERATED}")
-target_link_libraries(rexui PUBLIC "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+target_link_libraries(rexui PUBLIC "-framework Metal" "-framework MetalFX" "-framework QuartzCore" "-framework Foundation")
 
 # Translate the active Vulkan reference passes offline, never during rendering.
 find_program(REX_METAL_SPIRV_CROSS NAMES spirv-cross REQUIRED)
