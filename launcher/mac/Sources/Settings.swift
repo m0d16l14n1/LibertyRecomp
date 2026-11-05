@@ -212,7 +212,8 @@ enum Catalogue {
     ]), s("off"),
         "Apple's checks for Metal misuse. API validation checks every call on the CPU and is cheap; shader "
         + "validation checks GPU memory accesses and reports to the terminal, and is slow. Both must be set "
-        + "before the device is created, so the game restarts itself once with the variables.")
+        + "before the device is created, so the game restarts itself once with the variables. Off leaves "
+        + "variables that are already in the environment alone.")
 
     // MARK: Game
 
