@@ -826,3 +826,5 @@ glue/rexglue-sdk-main/gta4-recomp/generated_pal_raw/
 
 # Register-local codegen variant: generated locally from the user's own executable, not tracked.
 glue/rexglue-sdk-main/gta4-recomp/generated_fast/
+/agents
+/skills
