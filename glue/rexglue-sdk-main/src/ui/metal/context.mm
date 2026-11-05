@@ -9,7 +9,8 @@
 #include <rex/logging.h>
 
 REXCVAR_DEFINE_STRING(gta4_metal_api, "metal3", "GPU/Metal",
-    "Command API for the Metal renderer: metal3, or metal4 (MTL4 queue, argument tables, residency sets; falls back to metal3 without Metal 4)");
+    "Command API for the Metal renderer: metal3, or metal4 (MTL4 queue, argument tables, residency sets; falls back to metal3 without Metal 4)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex::ui::metal {
 
