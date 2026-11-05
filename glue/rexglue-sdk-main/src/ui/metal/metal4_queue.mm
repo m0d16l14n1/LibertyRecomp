@@ -1013,6 +1013,10 @@ LX_LOG_UNRECOGNIZED
     }
   }
   std::lock_guard<std::mutex> lock(_q->_lock);
+  // The heap goes back to the pool for the next command buffer. Resolved entries must be
+  // invalidated before they are written again, or the next writes read back as zero
+  // (MTL4CounterHeap invalidateCounterRange:).
+  if (n) [_stampHeap invalidateCounterRange:NSMakeRange(0, n)];
   [_q->_stampHeaps addObject:_stampHeap];
   _stampHeap = nil;
 }
