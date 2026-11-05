@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <string>
 #include <cstring>
 #include <rex/cvar.h>
 #include <rex/hook.h>
@@ -29,6 +31,9 @@ REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter, false, "GTA IV/Performance",
 REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter_verify, false, "GTA IV/Diagnostics",
     "Run the native limiter and the original on the same data and compare everything it writes bit for "
     "bit; the game hears the original");
+REXCVAR_DEFINE_STRING(gta4_native_audio_verify_dump, "", "GTA IV/Diagnostics",
+    "A folder: the first mismatching call of each checked effect writes its inputs there "
+    "(<effect>-<call>.afx) for gta4-audio-effects-test --replay");
 REXCVAR_DEFINE_BOOL(gta4_native_audio_filter_verify, false, "GTA IV/Diagnostics",
     "Run the original filter on the real data and the native one on a copy, and compare them bit "
     "for bit (buffer, state, coefficients, frequency cache, reset flags); the game hears the original");
@@ -48,7 +53,7 @@ bool Contiguous(uint32_t address, uint32_t size) {
   return end <= 0x100000000ull && !(address < 0xE0000000u && end > 0xE0000000ull);
 }
 
-struct VerifyCounters { uint64_t calls = 0, mismatched_calls = 0, logged = 0; };
+struct VerifyCounters { uint64_t calls = 0, mismatched_calls = 0, logged = 0, raced_calls = 0; };
 VerifyCounters verify_counters;  // the mixer thread only
 const char* FieldName(uint32_t offset) {
   if (offset < 4) return "header";
@@ -95,6 +100,12 @@ REX_HOOK_RAW(sub_829321A0) {
   ctx.r3.u64 = result;
   auto& v = verify_counters;
   ++v.calls;
+  // The target frequencies changed while the two ran (the sound thread): the native filter made
+  // its coefficients for other inputs than the original. A race, counted apart.
+  if (std::memcmp(object_copy.data() + 76, REX_RAW_ADDR(self) + 76, 8)) {
+    ++v.raced_calls;
+    return;
+  }
   bool mismatch = false;
   const auto report = [&](const char* what, uint32_t offset, uint32_t original, uint32_t native) {
     mismatch = true;
@@ -117,23 +128,58 @@ REX_HOOK_RAW(sub_829321A0) {
       report("sample", i, Be32(real + 4 * i), Be32(samples_copy.data() + 4 * i));
   v.mismatched_calls += mismatch;
   if (v.calls % 1000 == 0)
-    REXLOG_INFO("gta4-audio-filter-verify: calls={} mismatched-calls={}", v.calls, v.mismatched_calls);
+    REXLOG_INFO("gta4-audio-filter-verify: calls={} mismatched-calls={} raced-calls={}", v.calls, v.mismatched_calls,
+                v.raced_calls);
 }
 
 
 namespace {
 // Verify for the effects that write many guest regions: snapshot every region the effect writes,
 // run the port, keep its result, restore the snapshot, run the original (the game hears it), and
-// compare the two results word by word.
+// compare the two results word by word. `inputs` are the parameters the effect only reads (gains,
+// coefficients, lengths); the game's sound thread rewrites them at any time, so when they differ
+// after the two runs the ports saw other inputs than the original: a race, counted apart.
 struct Region { uint32_t address, size; };
+
+// What a replay needs besides the written regions and the inputs: the effect (1 filter, 2 EQ,
+// 3 reverb, 4 limiter), r3, r4, and read-only memory (voice buffer header, pointer lists, image
+// constants).
+struct Capture { uint32_t effect, self, buffer; std::vector<Region> context; };
+
+// The .afx file: "AFX1", effect, self, buffer, chunk count, then chunks (address, size, bytes),
+// all little-endian; later chunks overwrite earlier ones: the context as it is now, the inputs
+// and the written regions as they were before the call.
+void DumpCapture(const char* tag, uint64_t call, uint8_t* base, const Capture& capture,
+                 const std::vector<Region>& inputs, const std::vector<uint8_t>& input_before,
+                 const std::vector<Region>& regions, const std::vector<uint8_t>& before) {
+  const std::string dir = REXCVAR_GET(gta4_native_audio_verify_dump);
+  if (dir.empty()) return;
+  const std::string path = dir + "/" + tag + "-" + std::to_string(call) + ".afx";
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) { REXLOG_WARN("{}: cannot write {}", tag, path); return; }
+  const auto word = [&](uint32_t w) { std::fwrite(&w, 4, 1, f); };
+  std::fwrite("AFX1", 4, 1, f);
+  word(capture.effect); word(capture.self); word(capture.buffer);
+  word(uint32_t(capture.context.size() + inputs.size() + regions.size()));
+  for (const auto& r : capture.context) { word(r.address); word(r.size); std::fwrite(REX_RAW_ADDR(r.address), r.size, 1, f); }
+  size_t at = 0;
+  for (const auto& r : inputs) { word(r.address); word(r.size); std::fwrite(input_before.data() + at, r.size, 1, f); at += r.size; }
+  at = 0;
+  for (const auto& r : regions) { word(r.address); word(r.size); std::fwrite(before.data() + at, r.size, 1, f); at += r.size; }
+  std::fclose(f);
+  REXLOG_WARN("{}: inputs of mismatching call {} written to {}", tag, call, path);
+}
 
 template <class Native, class Original>
 void VerifyEffect(const char* tag, VerifyCounters& v, uint8_t* base, const std::vector<Region>& regions,
-                  Native&& native, Original&& original) {
-  size_t total = 0;
+                  const std::vector<Region>& inputs, const Capture& capture, Native&& native, Original&& original) {
+  size_t total = 0, input_total = 0;
   for (const auto& r : regions) total += r.size;
-  std::vector<uint8_t> before(total), ported(total);
+  for (const auto& r : inputs) input_total += r.size;
+  std::vector<uint8_t> before(total), ported(total), input_before(input_total);
   size_t at = 0;
+  for (const auto& r : inputs) { std::memcpy(input_before.data() + at, REX_RAW_ADDR(r.address), r.size); at += r.size; }
+  at = 0;
   for (const auto& r : regions) { std::memcpy(before.data() + at, REX_RAW_ADDR(r.address), r.size); at += r.size; }
   native();
   at = 0;
@@ -142,6 +188,14 @@ void VerifyEffect(const char* tag, VerifyCounters& v, uint8_t* base, const std::
   for (const auto& r : regions) { std::memcpy(REX_RAW_ADDR(r.address), before.data() + at, r.size); at += r.size; }
   original();
   ++v.calls;
+  at = 0;
+  for (const auto& r : inputs) {
+    if (std::memcmp(input_before.data() + at, REX_RAW_ADDR(r.address), r.size)) {
+      ++v.raced_calls;
+      return;
+    }
+    at += r.size;
+  }
   bool mismatch = false;
   at = 0;
   for (size_t i = 0; i < regions.size(); ++i) {
@@ -156,8 +210,10 @@ void VerifyEffect(const char* tag, VerifyCounters& v, uint8_t* base, const std::
     }
     at += regions[i].size;
   }
+  if (mismatch && !v.mismatched_calls) DumpCapture(tag, v.calls, base, capture, inputs, input_before, regions, before);
   v.mismatched_calls += mismatch;
-  if (v.calls % 1000 == 0) REXLOG_INFO("{}: calls={} mismatched-calls={}", tag, v.calls, v.mismatched_calls);
+  if (v.calls % 1000 == 0)
+    REXLOG_INFO("{}: calls={} mismatched-calls={} raced-calls={}", tag, v.calls, v.mismatched_calls, v.raced_calls);
 }
 
 bool AllContiguous(const std::vector<Region>& regions) {
@@ -202,7 +258,8 @@ REX_HOOK_RAW(sub_82936CE0) {
     ctx.r3.u64 = 0;
     return;
   }
-  VerifyEffect("gta4-audio-biquad-verify", biquad_counters, base, regions, native,
+  const Capture capture{2, self, buffer, {{buffer, 24}, {0x82000A30, 16}}};
+  VerifyEffect("gta4-audio-biquad-verify", biquad_counters, base, regions, {{self, 76}}, capture, native,
                [&] { __imp__sub_82936CE0(ctx, base); });
 }
 
@@ -246,7 +303,19 @@ REX_HOOK_RAW(sub_82935BD0) {
     __imp__sub_82935BD0(ctx, base);
     return;
   }
-  VerifyEffect("gta4-audio-reverb-verify", reverb_counters, base, regions, native,
+  const std::vector<Region> inputs = {{self, 80}, {REX_LOAD_U32(self + 36), 32}, {REX_LOAD_U32(self + 28), 16}};
+  if (!AllContiguous(inputs)) {
+    __imp__sub_82935BD0(ctx, base);
+    return;
+  }
+  Capture capture{3, self, buffer, {{buffer, 24}, {0x82000D70, 16}, {0x820A1430, 0x70}}};
+  for (uint32_t offset : {8u, 12u, 16u, 44u, 48u})
+    if (enabled) capture.context.push_back({REX_LOAD_U32(self + offset), 4 * enabled});
+  for (uint32_t e = 0; e < enabled; ++e) {  // each channel's comb and allpass buffer pointers
+    capture.context.push_back({REX_LOAD_U32(REX_LOAD_U32(self + 8) + 4 * e), 32});
+    capture.context.push_back({REX_LOAD_U32(REX_LOAD_U32(self + 44) + 4 * e), 16});
+  }
+  VerifyEffect("gta4-audio-reverb-verify", reverb_counters, base, regions, inputs, capture, native,
                [&] { __imp__sub_82935BD0(ctx, base); });
 }
 
@@ -279,7 +348,10 @@ REX_HOOK_RAW(sub_82934F00) {
   }
   const auto native = [&] { gta4::audio::RunLimiter(ctx, base, self, channels, samples); };
   if (verify) {
-    VerifyEffect("gta4-audio-limiter-verify", limiter_counters, base, regions, native,
+    // +588..+659: the curve and envelope parameters, the gains, the mode and the mask.
+    const Capture capture{4, self, buffer, {{buffer, 24}, {self, 588}, {0x8200BA90, 16}, {0x82000D40, 16},
+                                            {0x820A13E0, 16}, {gta4::audio::kLimiterTimerCount, 8}}};
+    VerifyEffect("gta4-audio-limiter-verify", limiter_counters, base, regions, {{self + 588, 72}}, capture, native,
                  [&] { __imp__sub_82934F00(ctx, base); });
     return;
   }

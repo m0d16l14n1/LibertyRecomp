@@ -276,6 +276,71 @@ bool LimiterCase(const Effect& e, int index) {
 }
 }  // namespace
 
+// --replay <file.afx>: a call the in-game check (gta4_native_audio_verify_dump) caught. Loads its
+// inputs, runs the original twice (is it deterministic on them?) and the port, and compares every
+// chunk the file holds.
+int Replay(const Effect* effects, const char* path) {
+  FILE* f = std::fopen(path, "rb");
+  if (!f) { std::fprintf(stderr, "replay: cannot open %s\n", path); return 1; }
+  const auto word = [&] { uint32_t w = 0; if (std::fread(&w, 4, 1, f) != 1) w = 0; return w; };
+  char magic[4] = {};
+  if (std::fread(magic, 4, 1, f) != 1 || std::memcmp(magic, "AFX1", 4)) { std::fprintf(stderr, "replay: not an .afx\n"); return 1; }
+  const uint32_t effect = word(), self = word(), buffer = word(), count = word();
+  if (effect < 1 || effect > 4) { std::fprintf(stderr, "replay: effect %u?\n", effect); return 1; }
+  struct Chunk { uint32_t address, size; std::vector<uint8_t> bytes; };
+  std::vector<Chunk> chunks(count);
+  for (auto& c : chunks) {
+    c.address = word(); c.size = word(); c.bytes.resize(c.size);
+    if (c.size && std::fread(c.bytes.data(), c.size, 1, f) != 1) { std::fprintf(stderr, "replay: short file\n"); return 1; }
+  }
+  std::fclose(f);
+  const Effect& e = effects[effect - 1];
+  std::printf("replay %s: %s self %08X buffer %08X, %u chunks\n", path, e.name, self, buffer, count);
+  const auto load = [&] { for (const auto& c : chunks) std::memcpy(REX_RAW_ADDR(c.address), c.bytes.data(), c.size); };
+  const auto save = [&] {
+    std::vector<std::vector<uint8_t>> out;
+    for (const auto& c : chunks) out.emplace_back(REX_RAW_ADDR(c.address), REX_RAW_ADDR(c.address) + c.size);
+    return out;
+  };
+  const auto run = [&](auto&& body) {
+    load();
+    PPCContext ctx{};
+    ctx.fpscr.csr = ctx.fpscr.getcsr();
+    ctx.fpscr.disableFlushModeUnconditional();
+    ctx.r1.u64 = kStack; ctx.r3.u64 = self; ctx.r4.u64 = buffer; ctx.lr = 0x82000000;
+    body(ctx);
+    ctx.fpscr.disableFlushModeUnconditional();
+    return save();
+  };
+  const auto a = run([&](PPCContext& ctx) { e.original(ctx, base); });
+  const auto b = run([&](PPCContext& ctx) { e.original(ctx, base); });
+  const auto n = run([&](PPCContext& ctx) { e.native(ctx, self, buffer); });
+  const auto compare = [&](const char* what, const auto& x, const auto& y) {
+    uint64_t diffs = 0;
+    for (size_t i = 0; i < chunks.size(); ++i)
+      for (uint32_t o = 0; o + 4 <= chunks[i].size; o += 4) {
+        const uint32_t p = audio::LoadBe32(x[i].data() + o), q = audio::LoadBe32(y[i].data() + o);
+        if (audio::SameResultWord(p, q)) continue;
+        if (diffs++ < 8)
+          std::printf("  %s: chunk %zu address %08X: %08X / %08X\n", what, i, chunks[i].address + o, p, q);
+      }
+    std::printf("%s: %llu differing words\n", what, (unsigned long long)diffs);
+    return diffs;
+  };
+  if (const char* show = std::getenv("AFX_SHOW")) {  // the result at one address, e.g. AFX_SHOW=DB290B00
+    const uint32_t at = uint32_t(std::strtoul(show, nullptr, 16));
+    for (size_t i = 0; i < chunks.size(); ++i)
+      if (at >= chunks[i].address && at + 4 <= chunks[i].address + chunks[i].size)
+        std::printf("  %08X: before %08X original %08X native %08X\n", at,
+                    audio::LoadBe32(chunks[i].bytes.data() + (at - chunks[i].address)),
+                    audio::LoadBe32(a[i].data() + (at - chunks[i].address)),
+                    audio::LoadBe32(n[i].data() + (at - chunks[i].address)));
+  }
+  const uint64_t repeat = compare("original vs original", a, b);
+  const uint64_t port = compare("original vs native", a, n);
+  return repeat || port ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
   void* memory = mmap(nullptr, 0x100000000ull + 0x2000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
   if (memory == MAP_FAILED) { std::fprintf(stderr, "audio effects: no guest memory\n"); return 1; }
@@ -298,6 +363,7 @@ int main(int argc, char** argv) {
          audio::RunLimiterTimed(ctx, base, self, REX_LOAD_U8(buffer + 13), REX_LOAD_U32(buffer + 20));
        }},
   };
+  if (argc > 2 && std::string(argv[1]) == "--replay") return Replay(effects, argv[2]);
   bool (*cases[])(const Effect&, int) = {FilterCase, BiquadCase, ReverbCase, LimiterCase};
   const int counts[] = {3000, 2000, 150, 1500};
   for (int e = 0; e < 4; ++e) {
