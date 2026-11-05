@@ -1,6 +1,7 @@
 #import "metal4_queue.h"
 
 #include <rex/cvar.h>
+#include <rex/diagnostics/policy.h>
 #include <rex/logging.h>
 
 REXCVAR_DEFINE_STRING(gta4_metal4_render_barrier, "full", "GPU/Metal",
@@ -26,10 +27,11 @@ REXCVAR_DEFINE_BOOL(gta4_metal4_lean_tracking, false, "GPU/Metal",
     "persistent set already holds (it keeps them far longer than any command buffer is in flight), and "
     "indexed draws take the index buffer's address from the bind cache");
 
-REXCVAR_DEFINE_UINT32(gta4_metal4_residency_idle, 1000, "GPU/Metal",
+REXCVAR_DEFINE_UINT32(gta4_metal4_residency_idle, 120, "GPU/Metal",
     "Metal 4 persistent residency: command buffers an allocation may go unused before it leaves the "
     "queue set and is released (at least 64; checked every 16 below 1000). Lower frees streamed-out "
-    "textures sooner (less resident memory) at the cost of re-adding ones that come back");
+    "textures sooner (less resident memory) at the cost of re-adding ones that come back; the set is "
+    "also capped in bytes by the device's working set");
 
 REXCVAR_DEFINE_BOOL(gta4_metal4_pass_timing, false, "GPU/Diagnostics",
     "Metal 4: a GPU timestamp before each encoder; logs gta4-metal4-passes (GPU ms per frame for each "
@@ -78,9 +80,13 @@ enum class RenderBarrier { kFull, kFragment, kTracked };
 // Persistent residency: an allocation leaves the queue set after this many command buffers unused
 // (gta4_metal4_residency_idle). The floor keeps it far past any command buffer still in flight.
 constexpr uint64_t kPersistentIdleCommandBuffers = 1000, kPersistentIdleFloor = 64;
+// Persistent residency's byte cap: a settings change can orphan a whole render-target set, so the
+// idle window alone is not enough. The cap is a fraction of the device's working set.
+constexpr uint64_t kPersistentBudgetCap = 3584ull * 1024 * 1024;
 struct Persisted {
   __strong id<MTLAllocation> allocation;  // keeps the address from being reused while it is in the set
   uint64_t last = 0;
+  uint64_t bytes = 0;  // allocation.allocatedSize, for the residency budget
 };
 // Per-command-buffer front of _seen for the bind hot path: a resource already tracked in
 // this command buffer and its GPU address or resource ID. Direct-mapped, no eviction cost.
@@ -170,6 +176,9 @@ class PointerSet {
   id<MTLResidencySet> _persistent;
   std::unordered_map<const void*, Persisted> _persisted;
   std::vector<id<MTLAllocation>> _persistPending;  // new allocations, added in one call per commit
+  uint64_t _persistBytes;   // sum of the set's allocations' allocatedSize
+  uint64_t _persistBudget;  // evict the oldest above this (device working set / 8)
+  bool _persistBudgetWarned;
   uint64_t _commandBufferIndex;
   uint64_t _persistIdle;  // gta4_metal4_residency_idle, set with persistent residency
   bool _persistDirty;
@@ -1190,6 +1199,8 @@ LX_LOG_UNRECOGNIZED
   it->second.last = _commandBufferIndex;
   if (!inserted) return;
   it->second.allocation = allocation;
+  it->second.bytes = allocation.allocatedSize;
+  _persistBytes += it->second.bytes;
   _persistPending.push_back(allocation);
   _persistDirty = true;
   ++_resident;
@@ -1209,6 +1220,7 @@ LX_LOG_UNRECOGNIZED
     const uint64_t oldest = _commandBufferIndex - _persistIdle;
     for (auto it = _persisted.begin(); it != _persisted.end();) {
       if (it->second.last < oldest) {
+        _persistBytes -= it->second.bytes;
         [_persistent removeAllocation:it->second.allocation];
         it = _persisted.erase(it);
         _persistDirty = true;
@@ -1216,6 +1228,30 @@ LX_LOG_UNRECOGNIZED
       } else {
         ++it;
       }
+    }
+  }
+  // A settings change can drop a whole set of large render targets at once (anti-aliasing,
+  // upscaler, resolution), and the idle window alone would keep them alive for seconds. Cap what
+  // the set may hold in bytes and evict the oldest (never one used this frame) until it fits.
+  if (evict && _persistBudget && _persistBytes > _persistBudget) {
+    if (!_persistBudgetWarned) {
+      _persistBudgetWarned = true;
+      REXLOG_WARN("gta4-metal4: persistent residency reached its {:.0f} MB budget; evicting the oldest allocations",
+                  double(_persistBudget) / 1048576.0);
+    }
+    std::vector<std::pair<uint64_t, const void*>> by_age;
+    by_age.reserve(_persisted.size());
+    for (const auto& entry : _persisted) by_age.emplace_back(entry.second.last, entry.first);
+    std::sort(by_age.begin(), by_age.end());
+    for (const auto& [last, key] : by_age) {
+      if (_persistBytes <= _persistBudget) break;
+      auto it = _persisted.find(key);
+      if (it == _persisted.end()) continue;
+      _persistBytes -= it->second.bytes;
+      [_persistent removeAllocation:it->second.allocation];
+      _persisted.erase(it);
+      _persistDirty = true;
+      ++_evicted;
     }
   }
   if (!_persistDirty) return;
@@ -1243,6 +1279,12 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
     const std::string barrier = REXCVAR_GET(gta4_metal4_render_barrier);
     q->_renderBarrier = barrier == "fragment" ? RenderBarrier::kFragment
                       : barrier == "tracked" ? RenderBarrier::kTracked : RenderBarrier::kFull;
+    // Fragment-only barriers let vertex work overlap earlier passes and are a measurement mode:
+    // a vertex-stage read of an earlier attachment races. Keep them for diagnostics runs only.
+    if (q->_renderBarrier == RenderBarrier::kFragment && !rex::diagnostics::IsEnabled()) {
+      REXLOG_WARN("gta4-metal4: fragment render barriers are a measurement mode; using tracked");
+      q->_renderBarrier = RenderBarrier::kTracked;
+    }
     q->_renderBefore = q->_renderBarrier == RenderBarrier::kFragment ? MTLStageFragment : kRenderStages;
     MTL4CommandQueueDescriptor* descriptor = [MTL4CommandQueueDescriptor new];
     descriptor.label = @"Liberty Metal 4";
@@ -1274,6 +1316,7 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       [q->_persistent requestResidency];
       q->_persistentResidency = YES;
       q->_persistIdle = std::max<uint64_t>(REXCVAR_GET(gta4_metal4_residency_idle), kPersistentIdleFloor);
+      q->_persistBudget = std::min<uint64_t>(kPersistentBudgetCap, device.recommendedMaxWorkingSetSize / 8);
       q->_leanTracking = REXCVAR_GET(gta4_metal4_lean_tracking);
     }
     if (REXCVAR_GET(gta4_metal4_pass_timing)) {
@@ -1282,10 +1325,10 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       q->_stampHeaps = [NSMutableArray new];
       q->_passTiming = YES;
     }
-    REXLOG_INFO("gta4-metal4: residency={} render-barrier={} lean-tracking={} pass-timing={} "
+    REXLOG_INFO("gta4-metal4: residency={} budget={:.0f}MB render-barrier={} lean-tracking={} pass-timing={} "
                 "texture-slots={} sampler-slots={} buffer-slots=31",
-                q->_persistentResidency ? "persistent" : "frame", barrier.c_str(),
-                q->_leanTracking ? "on" : "off", q->_passTiming ? "on" : "off",
+                q->_persistentResidency ? "persistent" : "frame", double(q->_persistBudget) / 1048576.0,
+                barrier.c_str(), q->_leanTracking ? "on" : "off", q->_passTiming ? "on" : "off",
                 unsigned(q->_tableTextures), unsigned(q->_tableSamplers));
     return q;
   }
@@ -1336,6 +1379,7 @@ Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue) {
   s.vertex_barriers = q->_vertexBarriers; s.evicted = q->_evicted; s.residency_commits = q->_residencyCommits;
   s.copy_barriers = q->_copyBarriers; s.copy_independent = q->_copyIndependent;
   s.resident_batches = q->_residentBatches;
+  s.resident_bytes = q->_persistBytes; s.resident_budget = q->_persistBudget;
   return s;
 }
 

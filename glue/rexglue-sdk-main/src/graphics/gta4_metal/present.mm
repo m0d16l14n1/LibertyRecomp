@@ -357,11 +357,12 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       last = draw_cpu_time; last_frame = present.submitted_frame;
     }
     if (const auto m4 = ui::metal::Metal4StatisticsOf(context->queue); m4.command_buffers)
-      REXLOG_INFO("gta4-metal4 frame={} command-buffers={} parts={} encoders={} barriers={} transient-bytes={} resident-adds={} resident-batches={} metal3-hops={} "
+      REXLOG_INFO("gta4-metal4 frame={} command-buffers={} parts={} encoders={} barriers={} transient-bytes={} resident-adds={} resident-batches={} resident-bytes={} resident-budget={} metal3-hops={} "
           "binds={} bind-hits={} fragment-barriers={} vertex-barriers={} copy-barriers={} copy-independent={} evicted={} residency-commits={}",
           present.submitted_frame, m4.command_buffers, m4.parts, m4.encoders, m4.barriers, m4.transient_bytes,
-          m4.resident, m4.resident_batches, m4.metal3_hops, m4.binds, m4.bind_hits, m4.fragment_barriers,
-          m4.vertex_barriers, m4.copy_barriers, m4.copy_independent, m4.evicted, m4.residency_commits);
+          m4.resident, m4.resident_batches, m4.resident_bytes, m4.resident_budget, m4.metal3_hops, m4.binds,
+          m4.bind_hits, m4.fragment_barriers, m4.vertex_barriers, m4.copy_barriers, m4.copy_independent, m4.evicted,
+          m4.residency_commits);
     if (const auto fg = temporal_scene.interpolation_counts(); fg.native || fg.hop)
       REXLOG_INFO("gta4-metal-framegen frame={} native-mtl4fx={} metal3-hop={}", present.submitted_frame, fg.native, fg.hop);
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={} delta={} delta-uploads={} "

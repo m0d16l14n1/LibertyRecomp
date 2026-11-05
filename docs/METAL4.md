@@ -26,15 +26,17 @@ command buffers, `MTL4ArgumentTable`s (vertex, fragment, compute) fed GPU addres
 IDs, a per-command-buffer transient buffer instead of `set*Bytes`, a per-command-buffer
 `MTLResidencySet` holding every bound or declared resource (retained until commit feedback) or,
 with `gta4_metal4_residency = persistent`, one queue-level set that calls `requestResidency` once
-(persistent state, so later commits wire what they add); new allocations join either set in
-one `addAllocations:count:` call per command buffer rather than one call each, blits on
+(persistent state, so later commits wire what they add); an allocation leaves after
+`gta4_metal4_residency_idle` command buffers unused (120 by default) or when the set exceeds its
+byte cap (the device working set / 8, at most 3.5 GB), whichever comes first. New allocations join
+either set in one `addAllocations:count:` call per command buffer rather than one call each, blits on
 `MTL4ComputeCommandEncoder`, a queue barrier at each encoder start plus encoder barriers only
 between copies that overlap and between serial dispatches, commit feedback for completion handlers,
 and queue waits/signals for events and drawables (the layer's residency set joins the queue).
 `gta4-metal4` reports the counters behind those choices: `barriers=`, `copy-barriers=`,
 `copy-independent=`, `fragment-barriers=`, `vertex-barriers=`, `resident-adds=`,
-`resident-batches=`, `evicted=` and `residency-commits=`. `gta4_metal4_pass_timing` adds GPU
-milliseconds per encoder label.
+`resident-batches=`, `resident-bytes=`, `resident-budget=`, `evicted=` and `residency-commits=`.
+`gta4_metal4_pass_timing` adds GPU milliseconds per encoder label.
 MetalFX runs natively: the temporal scaler, the frame interpolator and (with
 `gta4_metal_raytracing_denoiser = metalfx`) the denoised scaler are their `MTL4FX` objects, made from
 the queue's `MTL4Compiler` and encoded into the open `MTL4CommandBuffer` by `EncodeMetal4`. An empty
