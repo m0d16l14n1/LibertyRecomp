@@ -49,6 +49,10 @@ REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_sharpen, 1.0, "GPU",
                       "Frame generation: unsharp amount for the generated image, clamped to each pixel's "
                       "neighbourhood (0 off). The interpolator softens near detail, so alternating real and "
                       "generated images shimmers on textured near objects (peds, wheels, the player's car)");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_source_clamp, true, "GPU",
+                    "Frame generation: limit each generated pixel to the colours of the real images it is "
+                    "interpolated from (3x3 around its motion source in each). Removes the blocks, smears "
+                    "and jagged edges the interpolator leaves around disocclusions at a low base rate");
 REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_repair_px, 0.0, "GPU",
                       "Frame generation: where nearby pixels at another depth move this many output "
                       "pixels differently, blend the generated pixel toward a half-step warp of the "
@@ -648,6 +652,7 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   in.color = final_scene;
   in.repair_motion_px = float(REXCVAR_GET(gta4_metalfx_frame_generation_repair_px));
   in.sharpen = float(REXCVAR_GET(gta4_metalfx_frame_generation_sharpen));
+  in.source_clamp = REXCVAR_GET(gta4_metalfx_frame_generation_source_clamp);
   in.camera_matrices = REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices) &&
                        camera_matrices_sequence_ == metadata.sequence;
   // present.mm composes the HUD over the scene into the real image (Compose writes every texel).

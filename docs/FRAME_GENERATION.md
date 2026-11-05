@@ -191,6 +191,26 @@ Uncommitted batch, to build and bench together:
     - off: 0 of 18 dumps bad, average car-box p99 12.3;
     - at 16: 1 of 20 bad, average 16.4.
     It stays off.
+13. **Wheel, ped and edge flicker under frame generation: interpolator colours from neither real
+    image.** With frame generation on (not off, and not tied to GPU load), the generated images
+    carried blocks of road under the car next to the wheels, jagged lamp-post bases, smeared hydrants
+    and ped edges. Shown between clean real images they flicker. Our motion field there is right
+    (smooth, under 1% untracked), and ped bones and wheel transforms update every frame (finding of
+    301b286e), so these come from the interpolator at disocclusions and thin depth edges.
+    - `gta4_metalfx_frame_generation_source_clamp` (default true), in the sharpen kernel: each
+      generated pixel is clamped to the colour range of the 3x3 neighbourhoods it comes from, the
+      previous scene half a motion step ahead and the current scene half a step back. It also bounds
+      the sharpening: at 1.0 the generated images had drifted to 1.03-1.18 of the real images' detail.
+    - Score (`mcscore.py`, 20 dumps of the city drive, HUD corners excluded): "foreign" pixels, more
+      than 24 levels outside both sources' range there:
+
+      | run | foreign | worst dump | mc error | detail gen/real |
+      |---|---|---|---|---|
+      | clamp off | 0.41% | 1.18% | 1.73 | 1.03 |
+      | clamp on | 0.20% | 0.68% | 1.43 | 0.98 |
+
+      Visually the jagged lamp post, the hydrant smear and the road blocks under the car are gone.
+      Faint outlines remain where a region was hidden in one of the two real images.
 
 ## Measurements so far
 

@@ -1046,7 +1046,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       [encoder endEncoding];
     }
     // Before the UI goes on: only the interpolated scene is softened.
-    if (in.sharpen > 0 && s.sharpen && !decision.reset) {
+    if ((in.sharpen > 0 || in.source_clamp) && s.sharpen && !decision.reset) {
       if (!slot.sharpen_source) {
         std::string allocation_error;
         slot.sharpen_source = Allocate(s.device, MTLPixelFormatRGBA16Float, s.config.output_width,
@@ -1077,14 +1077,16 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
           return false;
         }
         encoder.label = @"Liberty frame-generation sharpening";
-        const struct { float amount, padding, motion_scale[2]; } k{
-            std::min(in.sharpen, 2.0f), 0,
+        const struct { float amount, source_clamp, motion_scale[2]; } k{
+            std::clamp(in.sharpen, 0.0f, 2.0f), in.source_clamp ? 1.0f : 0.0f,
             {float(s.config.output_width) / s.config.input_width,
              float(s.config.output_height) / s.config.input_height}};
         [encoder setComputePipelineState:s.sharpen];
         [encoder setTexture:slot.sharpen_source atIndex:0];
         [encoder setTexture:slot.generated atIndex:1];
         [encoder setTexture:in.motion atIndex:2];
+        [encoder setTexture:s.slots[s.previous].scene atIndex:3];
+        [encoder setTexture:slot.scene atIndex:4];
         [encoder setBytes:&k length:sizeof(k) atIndex:0];
         const NSUInteger w = s.sharpen.threadExecutionWidth,
                          h = std::max<NSUInteger>(

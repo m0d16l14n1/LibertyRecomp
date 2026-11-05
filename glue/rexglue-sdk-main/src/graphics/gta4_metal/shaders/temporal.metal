@@ -325,9 +325,18 @@ kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write>
 // cross, clamped to that neighbourhood's range so it cannot ring or halo.
 // The softening grows with motion (a still pixel is the real image), so the amount ramps in
 // with the pixel's motion: none at 1 output pixel, full from 9.
-struct TemporalSharpenConstants { float amount; float padding; float2 motion_scale; };
+//
+// Source clamp (gta4_metalfx_frame_generation_source_clamp): at a low base rate the interpolator
+// fails around disocclusions and thin depth edges (blocks of road under a car, jagged lamp-post
+// bases, smeared hydrants and ped edges) with colours found in neither real image. Each generated
+// pixel is limited to the colour range of the 3x3 neighbourhoods it comes from: the previous scene
+// half a motion step ahead and the current scene half a step back (motion points from the current
+// pixel to its previous position). Correct interpolation is inside that range and is untouched.
+// It also bounds the sharpening above to colours the real images have.
+struct TemporalSharpenConstants { float amount; float source_clamp; float2 motion_scale; };
 kernel void liberty_temporal_framegen_sharpen(texture2d<float,access::read> source [[texture(0)]],
  texture2d<float,access::write> output [[texture(1)]],texture2d<float> motion [[texture(2)]],
+ texture2d<float> previous_scene [[texture(3)]],texture2d<float> current_scene [[texture(4)]],
  constant TemporalSharpenConstants& k [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
  const uint2 size=uint2(source.get_width(),source.get_height());
  if(any(id>=size))return;
@@ -342,5 +351,18 @@ kernel void liberty_temporal_framegen_sharpen(texture2d<float,access::read> sour
  const float2 m=motion.sample(nearest,(float2(id)+0.5f)/float2(size)).xy*k.motion_scale;
  const float amount=all(isfinite(m))?k.amount*saturate((length(m)-1.0f)/8.0f):0.0f;
  const float3 sharpened=c.rgb+amount*(c.rgb-0.25f*(n+s+w+e));
- output.write(float4(clamp(sharpened,low,high),c.a),id);
+ float3 result=clamp(sharpened,low,high);
+ if(k.source_clamp>0.5f&&all(isfinite(m))){
+  constexpr sampler linear(coord::pixel,address::clamp_to_edge,filter::linear);
+  const float2 q=float2(id)+0.5f,from_previous=q+0.5f*m,from_current=q-0.5f*m;
+  float3 range_low=float3(INFINITY),range_high=float3(-INFINITY);
+  for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
+   const float2 o=float2(x,y);
+   const float3 p=temporal_finite(previous_scene.sample(linear,from_previous+o)).rgb;
+   const float3 r=temporal_finite(current_scene.sample(linear,from_current+o)).rgb;
+   range_low=min(range_low,min(p,r));range_high=max(range_high,max(p,r));
+  }
+  result=clamp(result,range_low,range_high);
+ }
+ output.write(float4(result,c.a),id);
 }

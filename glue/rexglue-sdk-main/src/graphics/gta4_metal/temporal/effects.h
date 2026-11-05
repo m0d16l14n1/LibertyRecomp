@@ -34,6 +34,9 @@ struct Inputs {
   float repair_motion_px = 0;
   // Frame generation: unsharp amount for the generated image (gta4_metalfx_frame_generation_sharpen; 0 off).
   float sharpen = 0;
+  // Frame generation: limit generated pixels to the colours of the real images they come from
+  // (gta4_metalfx_frame_generation_source_clamp).
+  bool source_clamp = false;
 };
 // Keep the lease through the LAST consumer submission. Holding it prevents
 // output-slot recycling; KeepUntilCompleted transfers this duty to a command.
