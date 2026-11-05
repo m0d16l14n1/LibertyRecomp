@@ -56,6 +56,14 @@ enum Catalogue {
         + "compiles behind the loading screen. Vulkan runs the same renderer through MoltenVK; it is there to "
         + "compare with if something looks wrong on Metal, and is not tested on this fork.")
 
+    static let commandAPI = Setting("gta4_metal_api", "Command API", .choice([
+        c("Metal 3 (default)", s("metal3")), c("Metal 4", s("metal4")),
+    ]), s("metal3"),
+        "The command model the Metal renderer encodes into. Metal 4 uses argument tables, residency sets and "
+        + "explicit barriers instead of Metal 3's per-object binding and hazard tracking; on a Metal 4 Mac it "
+        + "renders the same city route. Needs macOS 26 or later and falls back to Metal 3 otherwise. Metal 3 "
+        + "stays the default while the CPU-bound comparison is finished.")
+
     static let resolution = Setting("resolution", "Output resolution", .choice([
         c("Automatic", s("")), c("720p", s("720p")), c("1080p", s("1080p")), c("1440p", s("1440p")), c("4K", s("4k")),
     ]), s(""),

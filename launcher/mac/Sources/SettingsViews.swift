@@ -20,6 +20,8 @@ struct GraphicsView: View {
             Card(title: "Renderer") {
                 SettingRow(setting: Catalogue.renderer)
                 Divider()
+                SettingRow(setting: Catalogue.commandAPI, disabled: !metal)
+                Divider()
                 SettingRow(setting: Catalogue.resolution)
                 Divider()
                 upscalingRow
