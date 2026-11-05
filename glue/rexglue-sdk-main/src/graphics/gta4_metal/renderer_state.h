@@ -271,6 +271,17 @@ struct Renderer::State {
   bool defer_resolves = true;
   uint64_t frame_resolve_deferrals = 0, frame_resolve_executions = 0, frame_resolve_drops = 0;
   bool ExecuteResolve(const PendingResolve&, std::string&);
+  // Within one settle loop: the copy encoder shared by consecutive direct resolves (one queue
+  // barrier and encoder for the run instead of one each; copies stay ordered inside it).
+  id<MTLBlitCommandEncoder> resolve_batch=nil;
+  bool resolve_batching=false;
+  bool batch_resolve_copies=true;  // gta4_metal_batch_resolve_copies
+  void EndResolveBatch(){ if(resolve_batch){[resolve_batch endEncoding]; resolve_batch=nil;} }
+  struct ResolveBatchScope {
+    State& s; bool outer;
+    explicit ResolveBatchScope(State& state):s(state),outer(state.resolve_batching){ s.resolve_batching=s.batch_resolve_copies; }
+    ~ResolveBatchScope(){ if(!outer){ s.EndResolveBatch(); s.resolve_batching=false; } }
+  };
   // writing=true: anything that reads or writes the image must land first. writing=false (a read):
   // only pending writes to the image must land.
   bool SettlePendingResolves(id<MTLTexture> image, bool writing, std::string&,

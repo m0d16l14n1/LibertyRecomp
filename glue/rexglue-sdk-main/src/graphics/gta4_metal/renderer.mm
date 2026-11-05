@@ -29,6 +29,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_memo_targets, true, "GPU", "Reuse the last render
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
+REXCVAR_DEFINE_BOOL(gta4_metal_batch_resolve_copies, true, "GPU", "Consecutive direct resolve copies in one settle share a copy encoder (one encoder and, on Metal 4, one queue barrier for the run)");
 REXCVAR_DEFINE_BOOL(gta4_metal_reuse_snapshot_uploads, true, "GPU", "Temporal motion: bind the previous frame's vertex and shared constants from that frame's own upload (its arena outlives it by one frame) instead of copying them again");
 REXCVAR_DEFINE_BOOL(gta4_metal_previous_bank_range, false, "GPU", "Temporal motion: upload only the registers the vertex shader reads of the previous frame's vertex bank (as gta4_metal_range_constants does), not the whole 4 KB snapshot");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_canary, false, "GPU/Diagnostics", "With gta4_metal_range_constants, upload whole banks with NaN in every register outside the read range, uncached");
@@ -276,6 +277,7 @@ bool Renderer::State::Begin(std::string& error) {
   range_constants_canary = rex::cvar::Query<bool>("gta4_metal_range_constants_canary");
   previous_bank_range = rex::cvar::Query<bool>("gta4_metal_previous_bank_range");
   reuse_snapshot_uploads = REXCVAR_GET(gta4_metal_reuse_snapshot_uploads);
+  batch_resolve_copies = REXCVAR_GET(gta4_metal_batch_resolve_copies);
   guest_constants.Reset();
   cache_encoder_state = rex::cvar::Query<bool>("gta4_metal_cache_encoder_state");
   prepare_textures = rex::cvar::Query<bool>("gta4_metal_prepare_textures");

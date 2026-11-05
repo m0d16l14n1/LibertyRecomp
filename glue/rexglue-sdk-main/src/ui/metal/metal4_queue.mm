@@ -407,6 +407,59 @@ LX_LOG_UNRECOGNIZED
 - (NSMethodSignature*)methodSignatureForSelector:(SEL)selector {
   return [(NSObject*)_e methodSignatureForSelector:selector];
 }
+// The copies the renderer issues, without NSInvocation forwarding (about a microsecond or two
+// each); anything else still goes through forwardInvocation below.
+- (void)beginCopy {
+  if (!_first) {
+    [_e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    ++_owner->_q->_barriers;
+  }
+  _first = NO;
+}
+- (void)copyFromTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)destination {
+  [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
+  [self beginCopy];
+  [_e copyFromTexture:source toTexture:destination];
+}
+- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
+           sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)destination
+       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dorigin {
+  [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
+  [self beginCopy];
+  [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:size toTexture:destination
+     destinationSlice:ds destinationLevel:dl destinationOrigin:dorigin];
+}
+- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
+              toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl
+             sliceCount:(NSUInteger)slices levelCount:(NSUInteger)levels {
+  [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
+  [self beginCopy];
+  [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl toTexture:destination destinationSlice:ds
+     destinationLevel:dl sliceCount:slices levelCount:levels];
+}
+- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)so sourceBytesPerRow:(NSUInteger)row
+    sourceBytesPerImage:(NSUInteger)image sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)destination
+       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dorigin {
+  [_owner track:source kind:Kind::kBuffer]; [_owner track:destination kind:Kind::kTexture];
+  [self beginCopy];
+  [_e copyFromBuffer:source sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:image sourceSize:size
+           toTexture:destination destinationSlice:ds destinationLevel:dl destinationOrigin:dorigin];
+}
+- (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
+           sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)size toBuffer:(id<MTLBuffer>)destination
+      destinationOffset:(NSUInteger)offset destinationBytesPerRow:(NSUInteger)row
+    destinationBytesPerImage:(NSUInteger)image {
+  [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kBuffer];
+  [self beginCopy];
+  [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:size toBuffer:destination
+    destinationOffset:offset destinationBytesPerRow:row destinationBytesPerImage:image];
+}
+- (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)so toBuffer:(id<MTLBuffer>)destination
+     destinationOffset:(NSUInteger)doffset size:(NSUInteger)size {
+  [_owner track:source kind:Kind::kBuffer]; [_owner track:destination kind:Kind::kBuffer];
+  [self beginCopy];
+  [_e copyFromBuffer:source sourceOffset:so toBuffer:destination destinationOffset:doffset size:size];
+}
 - (void)forwardInvocation:(NSInvocation*)invocation {
   const char* name = sel_getName(invocation.selector);
   const bool copy = !std::strncmp(name, "copy", 4) || !std::strncmp(name, "fill", 4) || !std::strncmp(name, "generate", 8);

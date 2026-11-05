@@ -280,6 +280,7 @@ bool Renderer::State::ExecuteResolve(const PendingResolve& r, std::string& error
   // Blits retain their first partial-write initialization. Conversions merge it
   // into their load action and avoid a separate store/reload of the attachment.
   if (!r.full && !r.existing && !r.initialize_in_pass) {
+    EndResolveBatch();
     auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
     if (r.depth) {
       pass.depthAttachment.texture = r.target; pass.depthAttachment.level = r.level; pass.depthAttachment.slice = r.slice;
@@ -300,16 +301,21 @@ bool Renderer::State::ExecuteResolve(const PendingResolve& r, std::string& error
     [encoder endEncoding];
   }
   if (r.direct) {
-    auto blit = [commands blitCommandEncoder];
-    if (!blit) { error = "Resolve copy encoder creation failed"; return false; }
-    blit.label = @"Liberty exact resolve copy";
+    id<MTLBlitCommandEncoder> blit = resolve_batch;
+    if (!blit) {
+      blit = [commands blitCommandEncoder];
+      if (!blit) { error = "Resolve copy encoder creation failed"; return false; }
+      blit.label = @"Liberty exact resolve copy";
+      if (resolve_batching) resolve_batch = blit;
+    }
     [blit copyFromTexture:r.source_image sourceSlice:0 sourceLevel:0
         sourceOrigin:MTLOriginMake(r.src_rect.x, r.src_rect.y, 0)
         sourceSize:MTLSizeMake(r.src_rect.width, r.src_rect.height, 1) toTexture:r.target
         destinationSlice:r.volume ? 0 : r.slice destinationLevel:r.level
         destinationOrigin:MTLOriginMake(r.dst_rect.x, r.dst_rect.y, r.volume ? r.slice : 0)];
-    [blit endEncoding];
+    if (!resolve_batch) [blit endEncoding];
   } else {
+    EndResolveBatch();
     const bool multisampled = r.source_image.sampleCount > 1;
     const char* name = r.depth ? (multisampled ? "liberty_copy_depth_stencil_msaa" : "liberty_copy_depth_stencil") :
         multisampled ? "liberty_resolve_convert_msaa_ps" : "liberty_resolve_convert_ps";
@@ -392,6 +398,7 @@ bool Renderer::State::SettlePendingResolves(id<MTLTexture> image, bool writing, 
   std::vector<PendingResolve> remaining;
   remaining.reserve(pending_resolves.size());
   bool ok = true;
+  ResolveBatchScope batch(*this);
   for (size_t n = 0; n < pending_resolves.size(); ++n) {
     if (!selected[n]) { remaining.push_back(std::move(pending_resolves[n])); continue; }
     if (ok && !ExecuteResolve(pending_resolves[n], error)) ok = false;
@@ -426,6 +433,7 @@ bool Renderer::State::SettleStalePendingResolves(std::string& error, std::source
   settle_point = caller;
   std::vector<PendingResolve> remaining;
   bool ok = true;
+  ResolveBatchScope batch(*this);
   for (auto& r : pending_resolves) {
     if (r.recorded_submission >= submitted) { remaining.push_back(std::move(r)); continue; }
     if (ok && !ExecuteResolve(r, error)) ok = false;
@@ -439,6 +447,7 @@ bool Renderer::State::SettleAllPendingResolves(std::string& error, std::source_l
   settle_point = caller;
   auto records = std::move(pending_resolves);
   pending_resolves.clear();
+  ResolveBatchScope batch(*this);
   for (const auto& r : records) if (!ExecuteResolve(r, error)) return false;
   return true;
 }

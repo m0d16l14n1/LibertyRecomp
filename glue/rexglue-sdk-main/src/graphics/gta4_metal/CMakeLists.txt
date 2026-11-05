@@ -126,6 +126,11 @@ if(REXGLUE_BUILD_TESTS)
     set_source_files_properties("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_frame_ring_gpu_test.mm"
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(rex-metal-frame-ring-test PRIVATE rex-gta4-metal-renderer)
+    add_executable(rex-metal4-proxy-copy-test EXCLUDE_FROM_ALL
+        "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal4_proxy_copy_gpu_test.mm")
+    set_source_files_properties("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal4_proxy_copy_gpu_test.mm"
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(rex-metal4-proxy-copy-test PRIVATE rex-gta4-metal-renderer)
     add_executable(rex-metal-temporal-live-test EXCLUDE_FROM_ALL
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_temporal_live_gpu_test.mm"
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_temporal_coverage_gpu_test.mm")
