@@ -7,10 +7,12 @@ REXCVAR_DEFINE_STRING(gta4_metal4_render_barrier, "full", "GPU/Metal",
     "Metal 4 queue barrier before each render pass: full (wait for all earlier work before vertex and "
     "fragment stages), fragment (measurement only: vertex work may overlap earlier passes) or tracked "
     "(fragment after render-only work; full after compute, copies or a Metal 3 hop; a vertex barrier "
-    "inside the pass when it samples an earlier pass's attachment in the vertex stage)");
+    "inside the pass when it samples an earlier pass's attachment in the vertex stage)")
+    .allowed({"full", "fragment", "tracked"});
 REXCVAR_DEFINE_STRING(gta4_metal4_residency, "frame", "GPU/Metal",
     "Metal 4 residency: frame (each command buffer rebuilds its own residency set) or persistent "
-    "(one queue-level set; resources join once and leave after about 1000 command buffers unused)");
+    "(one queue-level set; resources join once and leave after about 1000 command buffers unused)")
+    .allowed({"frame", "persistent"});
 
 REXCVAR_DEFINE_UINT32(gta4_metal4_table_textures, 0, "GPU/Metal",
     "Metal 4 argument-table texture slots: 0 = the largest the device accepts (128 on Apple GPUs), else "
