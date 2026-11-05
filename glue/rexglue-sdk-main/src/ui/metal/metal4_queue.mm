@@ -561,9 +561,19 @@ LX_LOG_UNRECOGNIZED
 - (void)setLabel:(NSString*)label { _e.label = label; }
 - (MTLDispatchType)dispatchType { return _serial ? MTLDispatchTypeSerial : MTLDispatchTypeConcurrent; }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)s { [_e setComputePipelineState:s]; }
-- (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { BindBuffer(_owner, _t, b, o, i); }
+- (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31) { _buffers[i] = b; _offsets[i] = o; }
+  BindBuffer(_owner, _t, b, o, i);
+}
 - (void)setBuffers:(id<MTLBuffer> const[])b offsets:(const NSUInteger[])o withRange:(NSRange)r {
-  for (NSUInteger i = 0; i < r.length; ++i) BindBuffer(_owner, _t, b[i], o[i], r.location + i);
+  for (NSUInteger i = 0; i < r.length; ++i) {
+    const NSUInteger index = r.location + i;
+    if (index < 31) { _buffers[index] = b[i]; _offsets[index] = o[i]; }
+    BindBuffer(_owner, _t, b[i], o[i], index);
+  }
+}
+- (void)setBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31 && _buffers[i]) { _offsets[i] = o; BindBuffer(_owner, _t, _buffers[i], o, i); }
 }
 - (void)setBytes:(const void*)p length:(NSUInteger)n atIndex:(NSUInteger)i {
   [_t setAddress:[_owner bytes:p length:n] atIndex:i];
