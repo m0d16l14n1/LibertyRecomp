@@ -48,6 +48,9 @@
 #endif
 
 REXCVAR_DECLARE(bool, background_window);
+REXCVAR_DEFINE_BOOL(window_covered_pacing, true, "Display",
+    "Pace frames at 2 fps while the window is fully covered by other windows (off: keep rendering at "
+    "full rate, for benchmarks that run behind other windows; minimizing still paces)");
 
 namespace rex::ui {
 
@@ -640,6 +643,10 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       break;
     case SDL_EVENT_WINDOW_OCCLUDED:
       // Paced at 2 fps on purpose while covered; logged so it doesn't read as a hang.
+      if (!REXCVAR_GET(window_covered_pacing)) {
+        REXLOG_INFO("window covered: rendering continues at full rate (window_covered_pacing off)");
+        break;
+      }
       REXLOG_INFO("window covered: frames paced at 2 fps until it is visible again");
       if (presenter()) presenter()->SetWindowHiddenFromUIThread(true);
       break;

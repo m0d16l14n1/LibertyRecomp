@@ -43,7 +43,7 @@ void EncodeMetal3(id<MTLCommandBuffer> commands, void (^body)(id<MTLCommandBuffe
 // as the object's fence); the next proxy encoder's queue barrier orders what follows.
 // No encoder may be open on `commands`. Returns false on a Metal 3 buffer.
 bool EncodeMetal4(id<MTLCommandBuffer> commands, id<MTLFence> fence, NSArray<id<MTLResource>>* resources,
-                  void (^body)(id<MTL4CommandBuffer>));
+                  void (^body)(id<MTL4CommandBuffer>), NSString* label = nil);  // label: gta4_metal4_pass_timing
 // One MTL4Compiler per Metal 4 queue (nil on Metal 3), for MTL4FX objects.
 id<MTL4Compiler> Metal4Compiler(id<MTLCommandQueue> queue);
 
