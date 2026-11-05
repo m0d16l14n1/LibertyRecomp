@@ -349,6 +349,7 @@ struct AdvancedView: View {
                 Choice(label: "Information (default)", value: .string("info")), Choice(label: "Debug (large)", value: .string("debug")),
             ]), .string("info"), "How much the game writes to its log. Warnings and errors always go to the errors log.")])
             SettingsCard(title: "Audio", settings: Catalogue.audio)
+            SettingsCard(title: "Diagnostics", settings: [Catalogue.metalValidation])
             Card(title: "Metal 4 (testing)", footer: "These take effect on the next start, and only with "
                  + "Graphics > Renderer > Command API set to Metal 4. The defaults are the conservative path.") {
                 SettingRow(setting: Catalogue.metal4Residency, disabled: !metal4)

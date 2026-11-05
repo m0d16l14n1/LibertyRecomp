@@ -107,6 +107,13 @@ REXCVAR_DEFINE_STRING(gta4_performance_hud, "system", "GTA IV/Graphics/Display",
                       "cost the render thread time on every render pass")
     .allowed({"system", "off", "on", "true", "false"})  // true/false: the setting's older toggle
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(gta4_metal_validation, "off", "GTA IV/Diagnostics",
+                      "Metal validation, which must be in the environment before the device is created: "
+                      "off, api (MTL_DEBUG_LAYER checks every CPU-side Metal call) or full (API plus "
+                      "shader validation, reported to stderr). The game restarts itself with the "
+                      "variables; shader validation costs GPU time")
+    .allowed({"off", "api", "full"})
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gta4_diagnostics_skip_user_music, false, "GTA IV/Diagnostics",
                     "Skip the host user-music player during isolated diagnostics")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -772,16 +779,39 @@ void GTA4App::OnPreSetup(rex::RuntimeConfig& config) {
   // runs before any window exists, and the variable stops the restart from repeating. "off"
   // matters when the HUD is on for every app (launchctl setenv MTL_HUD_ENABLED 1): its hooks
   // wrap each render encoder (libMetalMetricsInterpose), BACKLOG 74.
+  bool restart_for_metal_env = false;
   const std::string hud = REXCVAR_GET(gta4_performance_hud);
   const char* hud_wanted = hud == "on" || hud == "true" ? "1" : hud == "off" ? "0" : nullptr;
   const char* hud_now = getenv("MTL_HUD_ENABLED");
   if (hud_wanted && (!hud_now || std::strcmp(hud_now, hud_wanted) != 0)) {
     setenv("MTL_HUD_ENABLED", hud_wanted, 1);
     REXLOG_INFO("Metal performance HUD {}; restarting with MTL_HUD_ENABLED={}", hud, hud_wanted);
-    execv(*_NSGetArgv()[0] ? _NSGetArgv()[0][0] : "", *_NSGetArgv());
-    REXLOG_WARN("Could not restart for the Metal performance HUD: {}", std::strerror(errno));
+    restart_for_metal_env = true;
   } else if (hud_now && std::strcmp(hud_now, "0") != 0) {
     REXLOG_INFO("Metal performance HUD on (MTL_HUD_ENABLED={} from the environment)", hud_now);
+  }
+  // Metal validation reads its variables when the device is created, also before main() for a
+  // framework. "api" checks the CPU side of every Metal call; "full" adds shader validation and
+  // sends its report to stderr (otherwise it only reaches the system log). "off" leaves whatever
+  // the environment already has, so an external MTL_DEBUG_LAYER=1 run is not overridden.
+  const std::string validation = REXCVAR_GET(gta4_metal_validation);
+  if (validation == "api" || validation == "full") {
+    const auto need = [&](const char* name) {
+      const char* now = getenv(name);
+      if (now && std::strcmp(now, "1") == 0) return;
+      setenv(name, "1", 1);
+      restart_for_metal_env = true;
+    };
+    need("MTL_DEBUG_LAYER");
+    if (validation == "full") {
+      need("MTL_SHADER_VALIDATION");
+      need("MTL_SHADER_VALIDATION_REPORT_TO_STDERR");
+    }
+    REXLOG_INFO("Metal validation {}: setting the variables before the device is created", validation);
+  }
+  if (restart_for_metal_env) {
+    execv(*_NSGetArgv()[0] ? _NSGetArgv()[0][0] : "", *_NSGetArgv());
+    REXLOG_WARN("Could not restart for the Metal environment: {}", std::strerror(errno));
   }
   rex::input::mnk::SetNativeControllerCompatibilityBindings(
       gta4::input::KeyboardControllerBindings());

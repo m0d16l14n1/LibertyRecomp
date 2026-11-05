@@ -207,6 +207,12 @@ enum Catalogue {
         "Apple's overlay with the frame rate, GPU time and a frame-time graph, in the top corner. "
         + "When it is on for every app, its hooks cost the game CPU time on every render pass; Off turns it "
         + "off for this game only.")
+    static let metalValidation = Setting("gta4_metal_validation", "Metal validation", .choice([
+        c("Off (default)", s("off")), c("API validation", s("api")), c("API + shader validation", s("full")),
+    ]), s("off"),
+        "Apple's checks for Metal misuse. API validation checks every call on the CPU and is cheap; shader "
+        + "validation checks GPU memory accesses and reports to the terminal, and is slow. Both must be set "
+        + "before the device is created, so the game restarts itself once with the variables.")
 
     // MARK: Game
 

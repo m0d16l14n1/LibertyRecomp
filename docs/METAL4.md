@@ -135,3 +135,8 @@ open -a "Liberty Recompiled" --env MTL_DEBUG_LAYER=1 \
 Shader-validation errors go to the system log unless `..._REPORT_TO_STDERR` is set. Load/store
 action validation (`MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS` / `_STORE_ACTIONS`) is worth turning on
 for the resolve chain; see `man MetalValidation`.
+
+The launcher's Advanced > Diagnostics > **Metal validation** row does the same for the app: the game
+re-execs itself once with the variables before the device is created (the path the Metal HUD already
+uses), so validation needs no command line. `off` leaves variables that are already in the
+environment alone.
