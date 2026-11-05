@@ -18,13 +18,15 @@ namespace rex::ui::metal {
 //    set*Bytes copies into a per-command-buffer transient buffer;
 //  - every bound or declared resource joins the command buffer's residency set (or, with
 //    gta4_metal4_residency = persistent, one queue-level set) and is retained until the GPU
-//    completes it (MTL4 command buffers retain nothing);
+//    completes it (MTL4 command buffers retain nothing); the set gets them in one
+//    addAllocations call per part;
 //  - blits run on an MTL4ComputeCommandEncoder;
 //  - hazards: a queue barrier (all stages, device visibility) at the start of every
-//    encoder and an encoder barrier between copies and between dispatches. That is at
+//    encoder, an encoder barrier between serial dispatches, and one between copies only
+//    when a copy touches a resource another copy in the encoder read or wrote. That is at
 //    least as strict as Metal 3 tracking of the same passes;
 //  - completion handlers run from MTL4 commit feedback; encodeWait/SignalEvent and
-//    presentDrawable become queue waits/signals around the commit.
+//    presentDrawable (all three forms) become queue waits/signals around the commit.
 // Returns nil (with `error`) when the device has no Metal 4 support.
 id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error);
 bool IsMetal4(id<MTLCommandQueue> queue);
