@@ -211,6 +211,30 @@ Uncommitted batch, to build and bench together:
 
       Visually the jagged lamp post, the hydrant smear and the road blocks under the car are gone.
       Faint outlines remain where a region was hidden in one of the two real images.
+14. **Where the GPU time goes (2026-11-05, `gta4_metal4_pass_timing`).** The Metal 4 proxy can write a
+    GPU timestamp before each encoder and log `gta4-metal4-passes`: GPU ms per command buffer for each
+    encoder label (kind and target size when unlabelled). The MetalFX encodes are labelled upscaler,
+    frame interpolator and denoiser. Check: the first-to-last stamp span matched the command buffers'
+    own GPU time (8.0 vs 8.0 ms). `passes.py` in the session scratchpad averages the drive segment.
+    Measured on the city drive with the UTM VM holding the GPU (so every number is inflated), per real
+    frame:
+
+    | pass | no FG | FG |
+    |---|---|---|
+    | game draws (37 encoders) | 8.4 ms | 12.7 ms |
+    | MetalFX upscaler | 3.4 ms | 15.4 ms upscaler + interpolator |
+    | resolve copies + colour resolves (about 28 encoders) | 2.2 ms | 3.2 ms |
+    | FG sharpen + source clamp | - | 2.4 ms |
+    | everything else | 2.2 ms | 2.9 ms |
+
+    - The interpolator itself is about 12 ms here, the largest single item, and fixed by the output size.
+    - The sharpen pass no longer copies the generated image first: the interpolator writes the sharpen
+      input directly (saves a 29 MB read + write per real frame at 2560x1440). Dumps with it: foreign
+      pixels 0.001% with the clamp, 0.46% without (2 dumps each).
+    - Each resolve and render pass begins with a full queue barrier (`gta4_metal4_render_barrier=full`),
+      about 65 pipeline drains per frame. `tracked` exists; bench it on an idle GPU.
+    - A covered window is paced at 2 fps; `--window_covered_pacing=false` keeps it rendering, but macOS
+      still throttles a covered window's presentation, so timing benches need the window visible.
 
 ## Measurements so far
 

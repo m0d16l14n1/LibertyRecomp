@@ -576,7 +576,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
         if (in.reactive) [used addObject:in.reactive];
         if (exposure_texture) [used addObject:exposure_texture];
         if (!rex::ui::metal::EncodeMetal4(commands, s.denoiser_fence, used,
-                                          ^(id<MTL4CommandBuffer> cb) { [denoiser encodeToCommandBuffer:cb]; })) {
+                                          ^(id<MTL4CommandBuffer> cb) { [denoiser encodeToCommandBuffer:cb]; }, @"MetalFX denoiser")) {
           error = "MetalFX denoised scaler encode failed";
           return false;
         }
@@ -616,7 +616,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
         if (scaler.exposureTexture) [used addObject:scaler.exposureTexture];
         id<MTL4FXTemporalScaler> scaler4 = s.scaler4;
         rex::ui::metal::EncodeMetal4(commands, s.scaler_fence, used,
-                                     ^(id<MTL4CommandBuffer> cb) { [scaler4 encodeToCommandBuffer:cb]; });
+                                     ^(id<MTL4CommandBuffer> cb) { [scaler4 encodeToCommandBuffer:cb]; }, @"MetalFX upscaler");
       } else {
         [s.scaler encodeToCommandBuffer:commands];
       }
@@ -679,8 +679,8 @@ struct FrameInterpolation::State {
   std::string notice;  // TakeNotice()
   struct Slot {
     id<MTLTexture> scene = nil, real = nil, generated = nil;
-    // gta4_metalfx_frame_generation_sharpen: the interpolator's output, copied for the sharpen
-    // pass to read (it writes `generated`). Made at the first sharpened frame.
+    // gta4_metalfx_frame_generation_sharpen / _source_clamp: the interpolator writes here and the
+    // sharpen pass reads it into `generated` (no copy). Made at the first sharpened frame.
     id<MTLTexture> sharpen_source = nil;
     __weak id<MTLCommandBuffer> owner = nil;
     std::weak_ptr<void> lease;
@@ -956,11 +956,27 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
           threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
       [encoder endEncoding];
     }
+    // The sharpen pass (below) reads the interpolator's output from sharpen_source and writes
+    // generated, so the interpolator writes sharpen_source directly when the pass runs.
+    bool sharpen = (in.sharpen > 0 || in.source_clamp) && s.sharpen && !decision.reset;
+    if (sharpen && !slot.sharpen_source) {
+      std::string allocation_error;
+      slot.sharpen_source = Allocate(s.device, MTLPixelFormatRGBA16Float, s.config.output_width,
+                                     s.config.output_height,
+                                     MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | fx.outputTextureUsage,
+                                     @"Liberty generated image before sharpening", s.limit, s.owned,
+                                     allocation_error);
+      if (!slot.sharpen_source && s.sharpen_failures++ == 0)
+        s.notice = "frame-generation sharpening off: " + allocation_error;
+    }
+    sharpen = sharpen && slot.sharpen_source &&
+              (slot.sharpen_source.usage & fx.outputTextureUsage) == fx.outputTextureUsage;
+    id<MTLTexture> interpolated = sharpen ? slot.sharpen_source : slot.generated;
     fx.colorTexture = slot.scene;
     fx.prevColorTexture = decision.reset ? slot.scene : s.slots[s.previous].scene;
     fx.depthTexture = in.depth;
     fx.motionTexture = in.motion;
-    fx.outputTexture = slot.generated;
+    fx.outputTexture = interpolated;
     // Keep a premultiplied layer outside interpolation entirely: it is blended
     // after the midpoint has been generated, and never enters flow estimation.
     fx.uiTexture = overlay ? nil : ui;
@@ -999,7 +1015,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       if (fx.uiTexture) [used addObject:fx.uiTexture];
       id<MTL4FXFrameInterpolator> fx4 = s.interpolator4;
       if (!rex::ui::metal::EncodeMetal4(commands, s.fence4, used,
-                                        ^(id<MTL4CommandBuffer> cb) { [fx4 encodeToCommandBuffer:cb]; })) {
+                                        ^(id<MTL4CommandBuffer> cb) { [fx4 encodeToCommandBuffer:cb]; }, @"MetalFX frame interpolator")) {
         s.history.Reset();
         error = "MTL4FX frame interpolation encode failed";
         return false;
@@ -1033,7 +1049,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
           in.repair_motion_px, frame.near_plane, frame.far_plane,
           uint32_t(s.config.depth_reversed), 0.10f, 0};
       [encoder setComputePipelineState:s.repair];
-      [encoder setTexture:slot.generated atIndex:0];
+      [encoder setTexture:interpolated atIndex:0];
       [encoder setTexture:slot.scene atIndex:1];
       [encoder setTexture:in.motion atIndex:2];
       [encoder setTexture:in.depth atIndex:3];
@@ -1046,55 +1062,31 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       [encoder endEncoding];
     }
     // Before the UI goes on: only the interpolated scene is softened.
-    if ((in.sharpen > 0 || in.source_clamp) && s.sharpen && !decision.reset) {
-      if (!slot.sharpen_source) {
-        std::string allocation_error;
-        slot.sharpen_source = Allocate(s.device, MTLPixelFormatRGBA16Float, s.config.output_width,
-                                       s.config.output_height, MTLTextureUsageShaderRead,
-                                       @"Liberty generated image before sharpening", s.limit, s.owned,
-                                       allocation_error);
-        if (!slot.sharpen_source && s.sharpen_failures++ == 0)
-          s.notice = "frame-generation sharpening off: " + allocation_error;
+    if (sharpen) {
+      auto encoder = ComputeEncoder(commands, "framegen/sharpen");
+      if (!encoder) {
+        s.history.Reset();
+        error = "frame-generation sharpen encoder failed";
+        return false;
       }
-      if (slot.sharpen_source) {
-        auto copy = BlitEncoder(commands, "framegen/sharpen-copy");
-        if (!copy) {
-          s.history.Reset();
-          error = "frame-generation sharpen copy encoder failed";
-          return false;
-        }
-        copy.label = @"Liberty generated image for sharpening";
-        const bool copied = Copy(copy, slot.generated, slot.sharpen_source);
-        [copy endEncoding];
-        if (!copied) {
-          error = "frame-generation sharpen copy mismatch";
-          return false;
-        }
-        auto encoder = ComputeEncoder(commands, "framegen/sharpen");
-        if (!encoder) {
-          s.history.Reset();
-          error = "frame-generation sharpen encoder failed";
-          return false;
-        }
-        encoder.label = @"Liberty frame-generation sharpening";
-        const struct { float amount, source_clamp, motion_scale[2]; } k{
-            std::clamp(in.sharpen, 0.0f, 2.0f), in.source_clamp ? 1.0f : 0.0f,
-            {float(s.config.output_width) / s.config.input_width,
-             float(s.config.output_height) / s.config.input_height}};
-        [encoder setComputePipelineState:s.sharpen];
-        [encoder setTexture:slot.sharpen_source atIndex:0];
-        [encoder setTexture:slot.generated atIndex:1];
-        [encoder setTexture:in.motion atIndex:2];
-        [encoder setTexture:s.slots[s.previous].scene atIndex:3];
-        [encoder setTexture:slot.scene atIndex:4];
-        [encoder setBytes:&k length:sizeof(k) atIndex:0];
-        const NSUInteger w = s.sharpen.threadExecutionWidth,
-                         h = std::max<NSUInteger>(
-                             1, std::min<NSUInteger>(8, s.sharpen.maxTotalThreadsPerThreadgroup / w));
-        [encoder dispatchThreads:MTLSizeMake(s.config.output_width, s.config.output_height, 1)
-            threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
-        [encoder endEncoding];
-      }
+      encoder.label = @"Liberty frame-generation sharpening";
+      const struct { float amount, source_clamp, motion_scale[2]; } k{
+          std::clamp(in.sharpen, 0.0f, 2.0f), in.source_clamp ? 1.0f : 0.0f,
+          {float(s.config.output_width) / s.config.input_width,
+           float(s.config.output_height) / s.config.input_height}};
+      [encoder setComputePipelineState:s.sharpen];
+      [encoder setTexture:slot.sharpen_source atIndex:0];
+      [encoder setTexture:slot.generated atIndex:1];
+      [encoder setTexture:in.motion atIndex:2];
+      [encoder setTexture:s.slots[s.previous].scene atIndex:3];
+      [encoder setTexture:slot.scene atIndex:4];
+      [encoder setBytes:&k length:sizeof(k) atIndex:0];
+      const NSUInteger w = s.sharpen.threadExecutionWidth,
+                       h = std::max<NSUInteger>(
+                           1, std::min<NSUInteger>(8, s.sharpen.maxTotalThreadsPerThreadgroup / w));
+      [encoder dispatchThreads:MTLSizeMake(s.config.output_width, s.config.output_height, 1)
+          threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+      [encoder endEncoding];
     }
     if (overlay && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/ui-after");
