@@ -98,13 +98,101 @@ bool EncodeOps(id<MTLAccelerationStructureCommandEncoder> encoder, std::span<con
   }
   return true;
 }
+
+// Metal 4: the same builds with MTL4 descriptors, which name buffers by GPU address.
+MTL4BufferRange Range(id<MTLBuffer> buffer, NSUInteger offset) {
+  return MTL4BufferRangeMake(buffer.gpuAddress + offset, buffer.length > offset ? buffer.length - offset : 0);
+}
+
+MTL4PrimitiveAccelerationStructureDescriptor* PrimitiveDescriptor4(const TriangleGeometry& geometry, bool refittable,
+                                                                   bool fast_build) {
+  auto* triangles = [MTL4AccelerationStructureTriangleGeometryDescriptor new];
+  triangles.vertexBuffer = Range(geometry.vertices, geometry.vertex_offset);
+  triangles.vertexStride = kCapturedVertexStride;
+  triangles.vertexFormat = MTLAttributeFormatFloat3;
+  triangles.indexBuffer = Range(geometry.indices, geometry.index_offset);
+  triangles.indexType = MTLIndexTypeUInt32;
+  triangles.triangleCount = geometry.triangle_count;
+  triangles.opaque = YES;
+  auto* descriptor = [MTL4PrimitiveAccelerationStructureDescriptor new];
+  descriptor.geometryDescriptors = @[ triangles ];
+  MTLAccelerationStructureUsage usage = MTLAccelerationStructureUsageNone;
+  if (refittable) usage |= MTLAccelerationStructureUsageRefit;
+  if (fast_build) usage |= MTLAccelerationStructureUsagePreferFastBuild;
+  descriptor.usage = usage;
+  return descriptor;
+}
+
+bool EncodeOps4(id<MTL4ComputeCommandEncoder> encoder, std::span<const AccelerationStructureOp> ops,
+                std::string& error) {
+  for (const auto& op : ops) {
+    if (!op.destination || !op.scratch) { error = "acceleration-structure op without destination or scratch"; return false; }
+    const auto scratch = Range(op.scratch, op.scratch_offset);
+    switch (op.kind) {
+      case AccelerationStructureOp::Kind::kBuildPrimitive:
+        [encoder buildAccelerationStructure:op.destination
+                                 descriptor:PrimitiveDescriptor4(op.geometry, op.refittable, op.fast_build)
+                              scratchBuffer:scratch];
+        break;
+      case AccelerationStructureOp::Kind::kRefitPrimitive: {
+        // Same topology and usage as the build (op.descriptor is the Metal 3 form of it).
+        id<MTLAccelerationStructure> source = op.source ? op.source : op.destination;
+        [encoder refitAccelerationStructure:source
+                                 descriptor:PrimitiveDescriptor4(op.geometry, true, op.fast_build)
+                                destination:op.destination == source ? nil : op.destination
+                              scratchBuffer:scratch];
+        break;
+      }
+      case AccelerationStructureOp::Kind::kBuildInstances: {
+        if (!op.instances || !op.instance_count) { error = "instance build without instances"; return false; }
+        auto* descriptor = [MTL4InstanceAccelerationStructureDescriptor new];
+        descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+        descriptor.instanceDescriptorBuffer = Range(op.instances, op.instance_offset);
+        descriptor.instanceDescriptorStride = sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+        descriptor.instanceCount = op.instance_count;
+        descriptor.usage = MTLAccelerationStructureUsagePreferFastBuild;
+        [encoder buildAccelerationStructure:op.destination descriptor:descriptor scratchBuffer:scratch];
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+// Every buffer and structure the ops touch, for the Metal 4 residency set.
+NSArray<id<MTLResource>>* OpResources(std::span<const AccelerationStructureOp> ops) {
+  NSMutableArray<id<MTLResource>>* used = [NSMutableArray arrayWithCapacity:ops.size() * 3 + 1];
+  for (const auto& op : ops) {
+    if (op.destination) [used addObject:op.destination];
+    if (op.source && op.source != op.destination) [used addObject:op.source];
+    if (op.scratch) [used addObject:op.scratch];  // repeats are fine: the proxy's set deduplicates
+    if (op.geometry.vertices) [used addObject:op.geometry.vertices];
+    if (op.geometry.indices && op.geometry.indices != op.geometry.vertices) [used addObject:op.geometry.indices];
+    if (op.instances) [used addObject:op.instances];
+  }
+  return used;
+}
 }  // namespace
 
 bool EncodeAccelerationStructureWork(id<MTLCommandBuffer> commands, std::span<const AccelerationStructureOp> ops,
                                      std::string& error, id<MTLHeap> resident_heap) {
   if (ops.empty()) return true;
-  // EncodeMetal3 runs the block before it returns (on `commands`, or on a hop), so the
-  // block may use `ops` and write `error` through a pointer.
+  if (rex::ui::metal::IsMetal4(commands)) {
+    // Natively on the proxy's MTL4 command buffer: no side-queue hop and its two event waits.
+    __block bool ok = false;
+    std::string* failure = &error;
+    const auto* first = ops.data();
+    const size_t count = ops.size();
+    if (!rex::ui::metal::EncodeMetal4Compute(commands, OpResources(ops), resident_heap,
+            ^(id<MTL4ComputeCommandEncoder> encoder) { ok = EncodeOps4(encoder, std::span(first, count), *failure); },
+            @"Liberty ray tracing structures")) {
+      error = "Metal 4 acceleration-structure encoder unavailable";
+      return false;
+    }
+    return ok;
+  }
+  // A Metal 3 `commands`: EncodeMetal3 runs the block on it before it returns, so the block
+  // may use `ops` and write `error` through a pointer.
   __block bool ok = false;
   std::string* failure = &error;
   const auto* first = ops.data();

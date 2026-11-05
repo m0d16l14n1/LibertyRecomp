@@ -44,6 +44,12 @@ void EncodeMetal3(id<MTLCommandBuffer> commands, void (^body)(id<MTLCommandBuffe
 // No encoder may be open on `commands`. Returns false on a Metal 3 buffer.
 bool EncodeMetal4(id<MTLCommandBuffer> commands, id<MTLFence> fence, NSArray<id<MTLResource>>* resources,
                   void (^body)(id<MTL4CommandBuffer>), NSString* label = nil);  // label: gta4_metal4_pass_timing
+// Opens a compute encoder on the open MTL4 command buffer of a proxy `commands` for MTL4-only
+// commands (acceleration-structure builds), after a queue barrier on all earlier work; `body`
+// encodes into it and the proxy ends it. `resources` and `heap` join the residency set. No
+// encoder may be open on `commands`. Returns false on a Metal 3 buffer or without an encoder.
+bool EncodeMetal4Compute(id<MTLCommandBuffer> commands, NSArray<id<MTLResource>>* resources, id<MTLHeap> heap,
+                         void (^body)(id<MTL4ComputeCommandEncoder>), NSString* label = nil);
 // One MTL4Compiler per Metal 4 queue (nil on Metal 3), for MTL4FX objects.
 id<MTL4Compiler> Metal4Compiler(id<MTLCommandQueue> queue);
 

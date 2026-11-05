@@ -233,6 +233,8 @@ class PointerSet {
 - (void)trackHeap:(id<MTLHeap>)heap;
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length;
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
+- (BOOL)nativeCompute:(NSArray<id<MTLResource>>*)resources heap:(id<MTLHeap>)heap
+                 body:(void (^)(id<MTL4ComputeCommandEncoder>))body label:(NSString*)label;
 - (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body
          label:(NSString*)label;
 @end
@@ -968,6 +970,25 @@ LX_LOG_UNRECOGNIZED
   if (_stampHeap) [self stamp:label.length ? label : @"native (MetalFX)"];
   body(_cb);
 }
+// A compute encoder of the open MTL4 command buffer for MTL4-only commands (acceleration-structure
+// builds): the same queue barrier as a proxy compute encoder, plus the acceleration-structure stage,
+// so it waits for all earlier work; later proxy encoders wait for it the same way.
+- (BOOL)nativeCompute:(NSArray<id<MTLResource>>*)resources heap:(id<MTLHeap>)heap
+                 body:(void (^)(id<MTL4ComputeCommandEncoder>))body label:(NSString*)label {
+  const NSInteger stamp = _stampHeap ? [self stamp:@"compute (native)"] : -1;
+  id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
+  if (!e) return NO;
+  for (id<MTLResource> r in resources) [self track:r];
+  if (heap) [self trackHeap:heap];
+  _nonRenderSinceRender = YES;
+  Barrier(_q, e, kComputeStages | MTLStageAccelerationStructure);
+  if (label) e.label = label;
+  ++_q->_encoders; ++_partEncoders;
+  body(e);
+  LabelStamp(self, stamp, e.label);
+  [e endEncoding];
+  return YES;
+}
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body {
   id<MTLEvent> event = [_q->_device newEvent];
   _nonRenderSinceRender = YES;
@@ -1149,6 +1170,12 @@ bool IsMetal4(id<MTLCommandBuffer> commands) { return [(NSObject*)commands isKin
 void EncodeMetal3(id<MTLCommandBuffer> commands, void (^body)(id<MTLCommandBuffer>)) {
   if (IsMetal4(commands)) [(LXCommandBuffer*)commands hop:body];
   else body(commands);
+}
+
+bool EncodeMetal4Compute(id<MTLCommandBuffer> commands, NSArray<id<MTLResource>>* resources, id<MTLHeap> heap,
+                         void (^body)(id<MTL4ComputeCommandEncoder>), NSString* label) {
+  if (!IsMetal4(commands)) return false;
+  return [(LXCommandBuffer*)commands nativeCompute:resources heap:heap body:body label:label];
 }
 
 bool EncodeMetal4(id<MTLCommandBuffer> commands, id<MTLFence> fence, NSArray<id<MTLResource>>* resources,
