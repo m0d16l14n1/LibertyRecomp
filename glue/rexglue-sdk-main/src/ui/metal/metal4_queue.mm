@@ -160,6 +160,7 @@ class PointerSet {
   RenderBarrier _renderBarrier;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
   std::atomic<uint64_t> _binds, _bindHits, _fragmentBarriers, _vertexBarriers, _evicted, _residencyCommits;
+  std::atomic<uint64_t> _copyBarriers, _copyIndependent;
   // gta4_metal4_residency = persistent
   BOOL _persistentResidency;
   BOOL _leanTracking;  // gta4_metal4_lean_tracking, only with persistent residency
@@ -380,13 +381,16 @@ static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NS
 
 // ---------------------------------------------------------------------------------------------
 // Blits run on an MTL4 compute encoder, whose copy selectors match the Metal 3 blit ones.
-// Copies in one encoder are ordered by an encoder barrier, as a Metal 3 blit encoder orders
-// copies that touch the same resources.
+// Copies in one encoder need an encoder barrier only when one touches a resource another read or
+// wrote: Metal 4 executes the copies of one encoder independently otherwise, and a Metal 3 blit
+// encoder orders only the copies that touch the same resources. A copy after a barrier does not
+// conflict with what the barrier already ordered, so the tracked sets are cleared there.
 @interface LXCopy : NSObject <MTLBlitCommandEncoder> {
  @public
   LXCommandBuffer* _owner;
   id<MTL4ComputeCommandEncoder> _e;
-  BOOL _first;
+  BOOL _first;  // no copy in this encoder yet
+  std::vector<const void*> _copyReads, _copyWrites;  // storage keys since the last barrier
   NSInteger _stamp;
 }
 @end
@@ -411,23 +415,51 @@ LX_LOG_UNRECOGNIZED
 }
 // The copies the renderer issues, without NSInvocation forwarding (about a microsecond or two
 // each); anything else still goes through forwardInvocation below.
+// A copy that reads a resource another copy wrote, or writes one another copy read or wrote,
+// needs an encoder barrier. Copies of unrelated resources do not. Storage keys unwrap a texture
+// view to its parent and a linear texture to its buffer, so a view and its base conflict.
+static inline const void* CopyStorageKey(id<MTLTexture> texture) {
+  if (id<MTLTexture> parent = texture.parentTexture) return (__bridge const void*)parent;
+  if (id<MTLBuffer> buffer = texture.buffer) return (__bridge const void*)buffer;
+  return (__bridge const void*)texture;
+}
+static inline const void* CopyStorageKey(id<MTLBuffer> buffer) { return (__bridge const void*)buffer; }
+static inline bool CopyTouches(const std::vector<const void*>& keys, const void* key) {
+  return key && std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+- (void)beginCopyFrom:(const void*)source to:(const void*)destination {
+  const bool conflict = CopyTouches(_copyWrites, source) || CopyTouches(_copyReads, destination) ||
+                        CopyTouches(_copyWrites, destination);
+  if (conflict) {
+    [_e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+    ++_owner->_q->_barriers; ++_owner->_q->_copyBarriers;
+    _copyReads.clear(); _copyWrites.clear();
+  } else {
+    ++_owner->_q->_copyIndependent;
+  }
+  _first = NO;
+  if (source) _copyReads.push_back(source);
+  if (destination) _copyWrites.push_back(destination);
+}
 - (void)beginCopy {
   if (!_first) {
     [_e barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     ++_owner->_q->_barriers;
   }
   _first = NO;
+  // An unclassified copy may touch anything: keep the strict order for whatever follows.
+  _copyReads.clear(); _copyWrites.clear();
 }
 - (void)copyFromTexture:(id<MTLTexture>)source toTexture:(id<MTLTexture>)destination {
   [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromTexture:source toTexture:destination];
 }
 - (void)copyFromTexture:(id<MTLTexture>)source sourceSlice:(NSUInteger)ss sourceLevel:(NSUInteger)sl
            sourceOrigin:(MTLOrigin)so sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)destination
        destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dorigin {
   [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:size toTexture:destination
      destinationSlice:ds destinationLevel:dl destinationOrigin:dorigin];
 }
@@ -435,7 +467,7 @@ LX_LOG_UNRECOGNIZED
               toTexture:(id<MTLTexture>)destination destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl
              sliceCount:(NSUInteger)slices levelCount:(NSUInteger)levels {
   [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kTexture];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl toTexture:destination destinationSlice:ds
      destinationLevel:dl sliceCount:slices levelCount:levels];
 }
@@ -443,7 +475,7 @@ LX_LOG_UNRECOGNIZED
     sourceBytesPerImage:(NSUInteger)image sourceSize:(MTLSize)size toTexture:(id<MTLTexture>)destination
        destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dorigin {
   [_owner track:source kind:Kind::kBuffer]; [_owner track:destination kind:Kind::kTexture];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromBuffer:source sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:image sourceSize:size
            toTexture:destination destinationSlice:ds destinationLevel:dl destinationOrigin:dorigin];
 }
@@ -452,14 +484,14 @@ LX_LOG_UNRECOGNIZED
       destinationOffset:(NSUInteger)offset destinationBytesPerRow:(NSUInteger)row
     destinationBytesPerImage:(NSUInteger)image {
   [_owner track:source kind:Kind::kTexture]; [_owner track:destination kind:Kind::kBuffer];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromTexture:source sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:size toBuffer:destination
     destinationOffset:offset destinationBytesPerRow:row destinationBytesPerImage:image];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)source sourceOffset:(NSUInteger)so toBuffer:(id<MTLBuffer>)destination
      destinationOffset:(NSUInteger)doffset size:(NSUInteger)size {
   [_owner track:source kind:Kind::kBuffer]; [_owner track:destination kind:Kind::kBuffer];
-  [self beginCopy];
+  [self beginCopyFrom:CopyStorageKey(source) to:CopyStorageKey(destination)];
   [_e copyFromBuffer:source sourceOffset:so toBuffer:destination destinationOffset:doffset size:size];
 }
 - (void)forwardInvocation:(NSInvocation*)invocation {
@@ -1206,6 +1238,7 @@ Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue) {
   s.barriers = q->_barriers; s.transient_bytes = q->_transient; s.resident = q->_resident; s.metal3_hops = q->_hops;
   s.binds = q->_binds; s.bind_hits = q->_bindHits; s.fragment_barriers = q->_fragmentBarriers;
   s.vertex_barriers = q->_vertexBarriers; s.evicted = q->_evicted; s.residency_commits = q->_residencyCommits;
+  s.copy_barriers = q->_copyBarriers; s.copy_independent = q->_copyIndependent;
   return s;
 }
 
