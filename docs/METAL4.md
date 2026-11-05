@@ -101,7 +101,10 @@ Done:
 Next:
 
 4. **A/B against metal3** on the career city route and a CPU-bound run, then decide whether
-   `gta4_metal_api` defaults to metal4. Until then it stays metal3.
+   `gta4_metal_api` defaults to metal4. Until then it stays metal3. The launcher exposes the switch
+   (Graphics > Renderer > Command API) and the variants (Advanced > Metal 4 (testing): residency,
+   render-pass barrier, lean tracking, GPU pass timing), so a run needs no command line;
+   `gta4-metal4:` at startup names the configuration it chose.
 5. **Residency set on the Metal 3 queue** (`[queue addResidencySet:]`, macOS 15+): only worth doing if
    metal3 remains the default. The texture cache, buffer cache and upload arena would join one
    `MTLResidencySet`, committed once per frame; `useResources` then stays only where it carries a
