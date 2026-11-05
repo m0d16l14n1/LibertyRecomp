@@ -25,7 +25,8 @@ before while the work runs on Metal 4: `MTL4CommandQueue`, pooled `MTL4CommandAl
 command buffers, `MTL4ArgumentTable`s (vertex, fragment, compute) fed GPU addresses and resource
 IDs, a per-command-buffer transient buffer instead of `set*Bytes`, a per-command-buffer
 `MTLResidencySet` holding every bound or declared resource (retained until commit feedback) or,
-with `gta4_metal4_residency = persistent`, one queue-level set; new allocations join either set in
+with `gta4_metal4_residency = persistent`, one queue-level set that calls `requestResidency` once
+(persistent state, so later commits wire what they add); new allocations join either set in
 one `addAllocations:count:` call per command buffer rather than one call each, blits on
 `MTL4ComputeCommandEncoder`, a queue barrier at each encoder start plus encoder barriers only
 between copies that overlap and between serial dispatches, commit feedback for completion handlers,
@@ -46,7 +47,9 @@ opens a compute encoder in the open Metal 4 command buffer and builds, refits an
 `gta4-metal4` line is 0 on macOS 26+ even with ray tracing on; only the absent-`MTL4FX` fallback
 hops. `gta4-metal-framegen frame= native-mtl4fx= metal3-hop=` counts frame-generation encodes by
 path. The present thread's display queue (frame generation) is a plain Metal 3 queue that only
-presents, so it adds no hops.
+presents, so it adds no hops. `presentDrawable:`, `presentDrawable:atTime:` and
+`presentDrawable:afterMinimumDuration:` all map to `signalDrawable:` plus the matching `MTLDrawable`
+present call, as the presentation skill describes.
 Without Metal 4 (macOS < 26 or the GPU family) the game logs it and stays on metal3.
 First drive (2026-11-04): the city route renders identically to metal3, no unrecognised selectors.
 `rex-metal4-proxy-copy-test` covers the copy selectors and the barrier policy; the
@@ -112,3 +115,23 @@ Each step is measured on `tools/perf/route_bench.sh pad career-street tools/perf
 (GPU-bound with frame generation) and on a CPU-bound run (frame generation off, or an episode
 downtown), interleaved with rests on the fanless Air. Keep the window in front: a covered window is
 paced at 2 fps and invalidates the run (BACKLOG 60).
+
+## Validating
+
+GPU tests are plain binaries, so shell variables reach them:
+
+```bash
+MTL_DEBUG_LAYER=1 ./glue/rexglue-sdk-main/out/mac-arm64/rex-metal4-proxy-copy-test
+```
+
+For the game, launch the bundle through LaunchServices so the variables are set before `MTLDevice`
+creation (the app also re-execs itself for the Metal HUD, which is a separate path):
+
+```bash
+open -a "Liberty Recompiled" --env MTL_DEBUG_LAYER=1 \
+  --env MTL_SHADER_VALIDATION=1 --env MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1
+```
+
+Shader-validation errors go to the system log unless `..._REPORT_TO_STDERR` is set. Load/store
+action validation (`MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS` / `_STORE_ACTIONS`) is worth turning on
+for the resolve chain; see `man MetalValidation`.

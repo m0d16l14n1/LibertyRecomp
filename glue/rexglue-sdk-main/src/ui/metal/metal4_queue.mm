@@ -217,6 +217,8 @@ class PointerSet {
   NSMutableArray<id<MTLEvent>>* _signalEvents;
   std::vector<uint64_t> _signalValues;
   NSMutableArray<id<MTLDrawable>>* _drawables;
+  std::vector<CFTimeInterval> _drawableTimes;
+  std::vector<uint8_t> _drawableModes;  // 0 present, 1 atTime, 2 afterMinimumDuration
   std::atomic<int> _status;
   uint64_t _partEncoders;  // encoders in the open part (encodeWaitForEvent splits after them)
   NSError* _error;
@@ -267,6 +269,12 @@ static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
   id<MTL4ArgumentTable> _vt, _ft;
   BOOL _vertexBarrier;  // tracked barriers: this pass already waits before its vertex stage
   NSInteger _stamp;
+  // For -setVertex/FragmentBufferOffset:atIndex:, which changes the offset of the last buffer
+  // bound at that index. The argument table stores addresses, so the buffer is kept here.
+  id<MTLBuffer> _vertexBuffers[31];
+  NSUInteger _vertexOffsets[31];
+  id<MTLBuffer> _fragmentBuffers[31];
+  NSUInteger _fragmentOffsets[31];
 }
 @end
 
@@ -319,15 +327,34 @@ static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NS
   [t setSamplerState:rid atIndex:index];
 }
 
-- (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { BindBuffer(_owner, _vt, b, o, i); }
-- (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i { BindBuffer(_owner, _ft, b, o, i); }
+- (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31) { _vertexBuffers[i] = b; _vertexOffsets[i] = o; }
+  BindBuffer(_owner, _vt, b, o, i);
+}
+- (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31) { _fragmentBuffers[i] = b; _fragmentOffsets[i] = o; }
+  BindBuffer(_owner, _ft, b, o, i);
+}
 - (void)setVertexBuffers:(id<MTLBuffer> const[])b offsets:(const NSUInteger[])o withRange:(NSRange)r {
-  for (NSUInteger i = 0; i < r.length; ++i) BindBuffer(_owner, _vt, b[i], o[i], r.location + i);
+  for (NSUInteger i = 0; i < r.length; ++i) {
+    const NSUInteger index = r.location + i;
+    if (index < 31) { _vertexBuffers[index] = b[i]; _vertexOffsets[index] = o[i]; }
+    BindBuffer(_owner, _vt, b[i], o[i], index);
+  }
 }
 - (void)setFragmentBuffers:(id<MTLBuffer> const[])b offsets:(const NSUInteger[])o withRange:(NSRange)r {
-  for (NSUInteger i = 0; i < r.length; ++i) BindBuffer(_owner, _ft, b[i], o[i], r.location + i);
+  for (NSUInteger i = 0; i < r.length; ++i) {
+    const NSUInteger index = r.location + i;
+    if (index < 31) { _fragmentBuffers[index] = b[i]; _fragmentOffsets[index] = o[i]; }
+    BindBuffer(_owner, _ft, b[i], o[i], index);
+  }
 }
-- (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i { (void)o; (void)i; abort(); }
+- (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31 && _vertexBuffers[i]) { _vertexOffsets[i] = o; BindBuffer(_owner, _vt, _vertexBuffers[i], o, i); }
+}
+- (void)setFragmentBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {
+  if (i < 31 && _fragmentBuffers[i]) { _fragmentOffsets[i] = o; BindBuffer(_owner, _ft, _fragmentBuffers[i], o, i); }
+}
 - (void)setVertexBytes:(const void*)p length:(NSUInteger)n atIndex:(NSUInteger)i {
   [_vt setAddress:[_owner bytes:p length:n] atIndex:i];
 }
@@ -520,6 +547,9 @@ static inline bool CopyTouches(const std::vector<const void*>& keys, const void*
   id<MTL4ArgumentTable> _t;
   BOOL _serial, _dispatched;
   NSInteger _stamp;
+  // For -setBufferOffset:atIndex:; the table holds addresses, not buffers.
+  id<MTLBuffer> _buffers[31];
+  NSUInteger _offsets[31];
 }
 @end
 
@@ -862,7 +892,18 @@ LX_LOG_UNRECOGNIZED
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value {
   [_signalEvents addObject:event]; _signalValues.push_back(value);
 }
-- (void)presentDrawable:(id<MTLDrawable>)drawable { [_drawables addObject:drawable]; }
+- (void)presentDrawable:(id<MTLDrawable>)drawable {
+  if (!drawable) return;
+  [_drawables addObject:drawable]; _drawableTimes.push_back(0); _drawableModes.push_back(0);
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable atTime:(CFTimeInterval)time {
+  if (!drawable) return;
+  [_drawables addObject:drawable]; _drawableTimes.push_back(time); _drawableModes.push_back(1);
+}
+- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
+  if (!drawable) return;
+  [_drawables addObject:drawable]; _drawableTimes.push_back(duration); _drawableModes.push_back(2);
+}
 - (void)enqueue {}
 
 // Ends the open MTL4 command buffer and commits it; the last part carries the feedback.
@@ -913,8 +954,17 @@ LX_LOG_UNRECOGNIZED
   dispatch_group_enter(_done);
   [q4 commit:buffers count:1 options:options];
   for (NSUInteger i = 0; i < _signalEvents.count; ++i) [q4 signalEvent:_signalEvents[i] value:_signalValues[i]];
-  for (id<MTLDrawable> d in _drawables) { [q4 signalDrawable:d]; [d present]; }
-  [_drawables removeAllObjects]; [_signalEvents removeAllObjects]; _signalValues.clear();
+  for (NSUInteger i = 0; i < _drawables.count; ++i) {
+    id<MTLDrawable> d = _drawables[i];
+    [q4 signalDrawable:d];
+    switch (_drawableModes[i]) {
+      case 1: [d presentAtTime:_drawableTimes[i]]; break;
+      case 2: [d presentAfterMinimumDuration:_drawableTimes[i]]; break;
+      default: [d present]; break;
+    }
+  }
+  [_drawables removeAllObjects]; _drawableTimes.clear(); _drawableModes.clear();
+  [_signalEvents removeAllObjects]; _signalValues.clear();
   _status = MTLCommandBufferStatusScheduled;
   for (MTLCommandBufferHandler h in _scheduled) h(self);
   [_scheduled removeAllObjects];
@@ -1196,6 +1246,9 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       q->_persistent = [device newResidencySetWithDescriptor:d error:nil];
       if (!q->_persistent) { error = "Metal 4 persistent residency set creation failed."; return nil; }
       [q->_queue4 addResidencySet:q->_persistent];
+      // Persistent state: wires what is committed now and what later commits add, so cached
+      // resources stay resident between command buffers (managing-metal4-resources).
+      [q->_persistent requestResidency];
       q->_persistentResidency = YES;
       q->_persistIdle = std::max<uint64_t>(REXCVAR_GET(gta4_metal4_residency_idle), kPersistentIdleFloor);
       q->_leanTracking = REXCVAR_GET(gta4_metal4_lean_tracking);
