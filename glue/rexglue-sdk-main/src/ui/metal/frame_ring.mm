@@ -29,7 +29,26 @@ FrameRing::Slot* FrameRing::TryBegin(std::string& error) {
       if (status != MTLCommandBufferStatusCompleted) continue;
       slot.submission = nil;
     }
-    slot.uploads.Reset();
+    // One arena more than slots: the arena this frame takes was written two frames back or
+    // earlier, and both of its users finished before this slot freed up (one queue, in order).
+    // The wait is a backstop for that order.
+    const size_t arenas = active_slot_count_ + 1;
+    const size_t arena = size_t(begun_ % arenas);
+    for (id<MTLCommandBuffer> user : {arenas_[arena].own, arenas_[arena].next}) {
+      if (!user) continue;
+      const auto status = user.status;
+      if (status == MTLCommandBufferStatusCompleted || status == MTLCommandBufferStatusError) continue;
+      if (status == MTLCommandBufferStatusNotEnqueued) continue;  // never committed: not on the GPU
+      [user waitUntilCompleted];
+    }
+    arenas_[arena].own = arenas_[arena].next = nil;
+    arenas_[arena].uploads.Reset();
+    slot.uploads = &arenas_[arena].uploads;
+    slot.arena = arena;
+    slot.serial = ++begun_;
+    slot.previous_committed = last_committed_ && last_arena_ != SIZE_MAX;
+    last_arena_ = arena;
+    last_committed_ = false;
     slot.encoding = true;
     next_ = (selected + 1) % active_slot_count_;
     return &slot;
@@ -56,6 +75,11 @@ bool FrameRing::Commit(Slot& slot, id<MTLCommandBuffer> command_buffer) {
       !command_buffer.retainedReferences) return false;
   slot.submission = command_buffer;
   slot.encoding = false;
+  arenas_[slot.arena].own = command_buffer;
+  // The frame begun before this one may be read by this one (its previous-frame uploads).
+  const size_t arenas = active_slot_count_ + 1;
+  arenas_[(slot.arena + arenas - 1) % arenas].next = command_buffer;
+  if (slot.arena == last_arena_) last_committed_ = true;
   [command_buffer commit];
   return true;
 }
@@ -73,12 +97,17 @@ bool FrameRing::WaitIdle(std::string& error) {
       error = MetalError(slot.submission.error, "Metal submission failed.");
     slot.submission = nil;
   }
+  for (auto& arena : arenas_) {
+    for (id<MTLCommandBuffer> user : {arena.own, arena.next})
+      if (user && user.status != MTLCommandBufferStatusNotEnqueued) [user waitUntilCompleted];
+    arena.own = arena.next = nil;
+  }
   return error.empty();
 }
 
 size_t FrameRing::reserved_bytes() const {
   size_t bytes = 0;
-  for (const auto& slot : slots_) bytes += slot.uploads.reserved_bytes();
+  for (const auto& arena : arenas_) bytes += arena.uploads.reserved_bytes();
   return bytes;
 }
 

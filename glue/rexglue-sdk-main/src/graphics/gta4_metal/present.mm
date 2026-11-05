@@ -365,11 +365,11 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     if (const auto fg = temporal_scene.interpolation_counts(); fg.native || fg.hop)
       REXLOG_INFO("gta4-metal-framegen frame={} native-mtl4fx={} metal3-hop={}", present.submitted_frame, fg.native, fg.hop);
     REXLOG_INFO("gta4-metal-constant-tracking frame={} skips={} audited={} mismatches={} fallback={} delta={} delta-uploads={} "
-        "delta-unchanged={} delta-groups={} last-hits={} hash-hits={} history-uploads={} history-reuses={}",
+        "delta-unchanged={} delta-groups={} last-hits={} hash-hits={} history-uploads={} history-reuses={} history-in-place={}",
         present.submitted_frame, guest_constant_skips, guest_constant_audits,
         guest_constant_mismatches, guest_constant_tracking_failed, delta_guest_constants, constant_delta_uploads,
         constant_delta_unchanged, constant_delta_groups, constant_last_hits, constant_hash_hits,
-        snapshot_upload_misses, snapshot_upload_hits);
+        snapshot_upload_misses, snapshot_upload_hits, snapshot_upload_reuses);
     {
       const auto buffers = resources.buffer_cache_statistics();
       REXLOG_INFO("gta4-metal-buffer-validation frame={} per-use={} validations={} skips={} mismatches={} memo-hits={} "

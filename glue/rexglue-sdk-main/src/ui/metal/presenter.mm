@@ -836,7 +836,7 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
       }
     }
     if (execute_ui_drawers) {
-      MetalUIDrawContext context(*this,width,height,encoder,frame->uploads);
+      MetalUIDrawContext context(*this,width,height,encoder,*frame->uploads);
       context.target_format = drawable.texture.pixelFormat;
       context.linear_output = state_->hdr;
       ExecuteUIDrawersFromUIThread(context);

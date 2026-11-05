@@ -384,7 +384,12 @@ struct Renderer::State {
     ui::metal::UploadSlice vertex,shared;
   };
   std::unordered_map<const gta4_native::temporal::GeometrySnapshot*,SnapshotUpload> snapshot_uploads;
-  uint64_t snapshot_upload_hits=0,snapshot_upload_misses=0;
+  uint64_t snapshot_upload_hits=0,snapshot_upload_misses=0,snapshot_upload_reuses=0;
+  // gta4_metal_reuse_snapshot_uploads: previous-frame constants bound from the previous frame's upload.
+  bool reuse_snapshot_uploads=true;
+  SnapshotUpload reused_snapshot_upload;
+  void TagSnapshotUploads(const gta4_native::temporal::GeometrySnapshot& snapshot, const ui::metal::UploadSlice& vertex,
+      const ui::metal::UploadSlice& shared_upload, std::span<const uint8_t> shared_bytes);
   const SnapshotUpload* UploadSnapshot(const std::shared_ptr<const gta4_native::temporal::GeometrySnapshot>&,std::string&);
   bool Draw(const gta4_native::CommandHeader&,std::span<const std::byte>,std::string&);
   bool Clear(const gta4_native::ClearCommand&,std::string&);

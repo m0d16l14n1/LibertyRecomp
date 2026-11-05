@@ -124,24 +124,35 @@ int main() {
     {
       FrameRing ring(65536,2); std::string error;
       auto* first=ring.TryBegin(error); Check(first!=nullptr,"First slot unavailable");
-      auto a=first->uploads.Allocate(device,256,16); Check(bool(a),"First frame upload failed");
+      auto a=first->uploads->Allocate(device,256,16); Check(bool(a),"First frame upload failed");
       std::memset(a.data,0x31,256);
       auto first_commands=[ArenaTestCommands new];
       Check(ring.Commit(*first,(id<MTLCommandBuffer>)first_commands),"First commit rejected");
       auto* second=ring.TryBegin(error); Check(second && second!=first,"In-flight slot reused");
-      auto b=second->uploads.Allocate(device,256,16); Check(b && a.buffer!=b.buffer,"In-flight buffer aliased");
+      Check(second->previous_committed && second->serial==first->serial+1,"Second frame's previous not committed");
+      auto b=second->uploads->Allocate(device,256,16); Check(b && a.buffer!=b.buffer,"In-flight buffer aliased");
       std::memset(b.data,0x72,256);
       auto second_commands=[ArenaTestCommands new];
       Check(ring.Commit(*second,(id<MTLCommandBuffer>)second_commands),"Second commit rejected");
       Check(!ring.TryBegin(error) && error.empty(),"Pending frames were overwritten");
       for(size_t i=0;i<256;++i) Check(static_cast<unsigned char*>(a.data)[i]==0x31,"Pending upload bytes changed");
+      // The first frame is done but the second (which may bind its uploads) is not: the free
+      // slot takes the spare arena, and the first frame's bytes stay.
       first_commands.status=MTLCommandBufferStatusCompleted;
-      auto* reused=ring.TryBegin(error); Check(reused==first,"Completed slot not reused");
-      auto c=reused->uploads.Allocate(device,256,16);
-      Check(c && c.buffer==a.buffer && c.offset==0,"Completed arena was not reset");
+      auto* third=ring.TryBegin(error); Check(third==first,"Completed slot not reused");
+      auto c=third->uploads->Allocate(device,256,16);
+      Check(c && c.buffer!=a.buffer && c.buffer!=b.buffer,"Arena still read by the next frame was reset");
       std::memset(c.data,0xB4,256);
+      for(size_t i=0;i<256;++i) Check(static_cast<unsigned char*>(a.data)[i]==0x31,"Upload read by the next frame changed");
       for(size_t i=0;i<256;++i) Check(static_cast<unsigned char*>(b.data)[i]==0x72,"Other pending frame was mutated");
-      ring.Cancel(*reused); second_commands.status=MTLCommandBufferStatusCompleted;
+      auto third_commands=[ArenaTestCommands new];
+      Check(ring.Commit(*third,(id<MTLCommandBuffer>)third_commands),"Third commit rejected");
+      // With the second frame done too, the first frame's arena comes back, reset.
+      second_commands.status=MTLCommandBufferStatusCompleted;
+      auto* fourth=ring.TryBegin(error); Check(fourth==second,"Second slot not reused");
+      auto d=fourth->uploads->Allocate(device,256,16);
+      Check(d && d.buffer==a.buffer && d.offset==0,"Completed arena was not reset");
+      ring.Cancel(*fourth); third_commands.status=MTLCommandBufferStatusCompleted;
     }
     for(ArenaTestBuffer* buffer in fake.buffers) {
       Check(buffer->length_queries==0,"Slice allocation queried Metal length");

@@ -584,7 +584,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     if (!expanded_size || expanded_size > 4u * 1024u * 1024u || (rectangle && count % 3)) {
       error = "Invalid rectangle-list payload extent"; return false;
     }
-    auto upload = frame->uploads.Allocate(context->device, size_t(expanded_size), 16);
+    auto upload = frame->uploads->Allocate(context->device, size_t(expanded_size), 16);
     if (!upload) { error = "UP vertex upload budget exceeded"; return false; }
     if (rectangle) {
       // Do not read write-combined GPU uploads to synthesize the fourth corner.
@@ -830,6 +830,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
   ui::metal::UploadSlice previous_vertex,previous_shared;
   uint64_t previous_vertex_address=0;
+  const gta4_native::temporal::GeometrySnapshot* recorded_snapshot=nullptr;  // tagged with this frame's uploads below
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   raytracing::DrawGeometry capture_geometry;  // identity 0: this draw is not captured
   if(targets.temporal_motion){
@@ -873,6 +874,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       capture_geometry.placement=raytracing::PlacementOf(constant_reads,captured_vertex);
     }
     auto history=temporal.geometry.Record(key,captured_snapshot,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
+    recorded_snapshot=history.current;
     // A vertex shader reading a texture recomputes the previous position with this frame's
     // texture: exact while that texture is unchanged (vehicle damage changes rarely).
     const bool vertex_texture_history=!pipeline->vertex.used_texture_mask||temporal_vertex_texture_history;
@@ -954,6 +956,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   auto shared_constants=Upload(Bytes(shared),false,error);
   auto heap_upload=Upload(Bytes(heaps),false,error);
   if(!vertex_constants || !pixel_constants || !shared_constants || !heap_upload) return false;
+  if(recorded_snapshot)TagSnapshotUploads(*recorded_snapshot,
+      range_constants_enabled&&range_constants_vertex?ui::metal::UploadSlice{}:vertex_constants,shared_constants,Bytes(shared));
   std::array<float,6> viewport{};
   bool draw_encoded=false;
   auto encode_draw=[&]() -> bool {

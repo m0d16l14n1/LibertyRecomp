@@ -100,6 +100,16 @@ struct GeometrySnapshot {
   // over this key's unbroken chain of key matches, how many frames and how many hash changes.
   uint64_t late_hash = 0;
   uint32_t late_frames = 0, late_changes = 0;
+  // The backend's GPU copy of `vertex` and `shared` made in the frame that recorded this
+  // snapshot, so the next frame can bind it as the previous constants instead of uploading it
+  // again (Metal: frame-ring serial, buffer, offset, GPU address). Cleared when recorded again.
+  struct BackendUpload {
+    uint64_t serial = 0;  // 0: none
+    const void* buffer = nullptr;
+    uint64_t offset = 0, gpu_address = 0;
+    void* data = nullptr;
+  };
+  mutable BackendUpload backend_vertex{}, backend_shared{};
   std::shared_ptr<GeometryBudget> budget;
   ~GeometrySnapshot() {
     if (budget) budget->used.fetch_sub(vertex.size() + shared.size(), std::memory_order_relaxed);
@@ -107,6 +117,9 @@ struct GeometrySnapshot {
 };
 struct GeometryLookup {
   std::shared_ptr<const GeometrySnapshot> previous;
+  // This frame's entry for the draw (its new snapshot, or the identical earlier draw's), valid
+  // until the next frame; null when the draw was not recorded or is ambiguous.
+  const GeometrySnapshot* current = nullptr;
   bool captured = false, ambiguous = false;
   bool matched_by_transform = false;  // found by the nearest-transform fallback, not the key
   // Late-constant diagnostic, for key (or sibling) matches only: the read registers past c63
@@ -242,9 +255,9 @@ class GeometryHistory {
         continue;
       }
       existing->second.ambiguous |= !same;
-      if (existing->second.ambiguous) return {{}, true, true};
+      if (existing->second.ambiguous) return {{}, nullptr, true, true};
       // An identical repeat (another pass of the same draw) keeps the first draw's match.
-      return {existing->second.matched, true, existing->second.unclear};
+      return {existing->second.matched, existing->second.snapshot.get(), true, existing->second.unclear};
     }
     if (current_.size() >= maximum_entries_) return {};
     const size_t bytes = vertex.size() + shared.size(),
@@ -267,6 +280,7 @@ class GeometryHistory {
     snapshot->jitter_clip = jitter;
     snapshot->late_hash = 0;
     snapshot->late_frames = snapshot->late_changes = 0;
+    snapshot->backend_vertex = snapshot->backend_shared = {};
     budget_->used.fetch_add(bytes, std::memory_order_relaxed);
     snapshot->budget = budget_;
     auto& entry = current_.emplace(key, Entry{snapshot, false, nullptr}).first->second;
@@ -281,7 +295,7 @@ class GeometryHistory {
           group->second.push_back({first->first, first->second.snapshot});
       group->second.push_back({key, snapshot});
     }
-    GeometryLookup lookup{nullptr, true, false};
+    GeometryLookup lookup{nullptr, snapshot.get(), true, false};
     // Every return below records what this draw matched for its repeats in this frame.
     struct Remember {
       Entry& entry; GeometryLookup& lookup;

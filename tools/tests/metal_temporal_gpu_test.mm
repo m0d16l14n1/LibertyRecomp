@@ -211,9 +211,21 @@ void GeometryIdentityTests() {
   changed.geometry_generation = 9;
   Check(!normal.Record(changed, vertices, shared, {}).previous,
         "replaced geometry reused old vertex motion");
+  {  // scoped: the lookups' previous leases must be gone for the budget check below
+  // The same key again with the same constants: an identical repeat, the same entry.
+  const auto repeat = normal.Record(a, vertices, shared, {});
+  Check(first.current && repeat.current == first.current && !repeat.ambiguous,
+        "identical repeat is not the first draw's entry");
+  // A fresh entry carries no backend upload tag (a pooled snapshot's old tag is cleared).
+  Check(first.current->backend_vertex.serial == 0 && first.current->backend_shared.serial == 0,
+        "new snapshot kept a backend upload tag");
+  // The same key with other constants is a sibling (one car's wheels share the body's key),
+  // a separate entry, not a conflict.
   vertices[1] = 1;
-  Check(normal.Record(a, vertices, shared, {}).ambiguous,
-        "same-frame identity conflict was hidden");
+  const auto sibling = normal.Record(a, vertices, shared, {});
+  Check(sibling.captured && !sibling.ambiguous && sibling.current && sibling.current != first.current,
+        "same-key draw with other constants is not a sibling entry");
+  }
   Check(normal.Begin(1, 1, 3, false), "geometry third frame");
   Check(!normal.Record(a, vertices, shared, {}).previous,
         "ambiguous prior instance used motion");

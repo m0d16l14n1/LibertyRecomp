@@ -29,6 +29,7 @@ REXCVAR_DEFINE_BOOL(gta4_metal_memo_targets, true, "GPU", "Reuse the last render
 REXCVAR_DEFINE_BOOL(gta4_metal_audit_guest_constants, false, "GPU/Diagnostics", "Compare every skipped constant bank against live guest memory");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants, false, "GPU", "Upload only the constant registers each shader reads (pixel bank and temporal previous bank; the vertex bank only with the setting below)");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_vertex, false, "GPU", "With gta4_metal_range_constants, also range-limit the vertex bank (measured worse: VS ranges change from draw to draw, so last-bank reuse fails)");
+REXCVAR_DEFINE_BOOL(gta4_metal_reuse_snapshot_uploads, true, "GPU", "Temporal motion: bind the previous frame's vertex and shared constants from that frame's own upload (its arena outlives it by one frame) instead of copying them again");
 REXCVAR_DEFINE_BOOL(gta4_metal_previous_bank_range, false, "GPU", "Temporal motion: upload only the registers the vertex shader reads of the previous frame's vertex bank (as gta4_metal_range_constants does), not the whole 4 KB snapshot");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_canary, false, "GPU/Diagnostics", "With gta4_metal_range_constants, upload whole banks with NaN in every register outside the read range, uncached");
 REXCVAR_DEFINE_BOOL(gta4_metal_range_constants_shadow, false, "GPU/Diagnostics", "Count what uploading only each shader's read constant range would send and reuse; changes no upload");
@@ -274,6 +275,7 @@ bool Renderer::State::Begin(std::string& error) {
   range_constants_vertex = rex::cvar::Query<bool>("gta4_metal_range_constants_vertex");
   range_constants_canary = rex::cvar::Query<bool>("gta4_metal_range_constants_canary");
   previous_bank_range = rex::cvar::Query<bool>("gta4_metal_previous_bank_range");
+  reuse_snapshot_uploads = REXCVAR_GET(gta4_metal_reuse_snapshot_uploads);
   guest_constants.Reset();
   cache_encoder_state = rex::cvar::Query<bool>("gta4_metal_cache_encoder_state");
   prepare_textures = rex::cvar::Query<bool>("gta4_metal_prepare_textures");
@@ -403,7 +405,7 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
           changed |= GuestConstantTracking::GroupBit(g);
       }
       if (!changed) { ++constant_delta_unchanged; guest_constants.Copied(guest_bank); return bank->upload; }
-      auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+      auto upload = frame->uploads->Allocate(context->device, bytes.size(), 16);
       if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
       std::memcpy(upload.data, bank->upload.data, bytes.size());
       if (bank->source_view != bank->source.data()) std::memcpy(bank->source.data(), bank->source_view, bytes.size());
@@ -437,7 +439,7 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
   if (const auto* cached = constants.Find(hash, bytes, swap)) {
     ++constant_hash_hits; return remember(*cached,constants.source_of_last_hit());
   }
-  auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+  auto upload = frame->uploads->Allocate(context->device, bytes.size(), 16);
   if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
   if (swap) gta4_native::core::CopyGuestWordsToHost(static_cast<uint8_t*>(upload.data), bytes.data(), bytes.size());
   else std::memcpy(upload.data, bytes.data(), bytes.size());
@@ -449,13 +451,52 @@ ui::metal::UploadSlice Renderer::State::Upload(std::span<const uint8_t> bytes, b
   return remember(upload,immutable_source);
 }
 
+// The frame that records a snapshot uploads the same bytes as its current constants. Its frame
+// ring arena stays valid until the next frame completes, so that frame binds them in place.
+void Renderer::State::TagSnapshotUploads(const gta4_native::temporal::GeometrySnapshot& snapshot,
+    const ui::metal::UploadSlice& vertex, const ui::metal::UploadSlice& shared_upload,
+    std::span<const uint8_t> shared_bytes) {
+  if (!frame || !reuse_snapshot_uploads) return;
+  const auto tag = [&](gta4_native::temporal::GeometrySnapshot::BackendUpload& out, const ui::metal::UploadSlice& in) {
+    out = in ? gta4_native::temporal::GeometrySnapshot::BackendUpload{frame->serial, (__bridge const void*)in.buffer,
+                                                                       in.offset, in.gpu_address, in.data}
+             : gta4_native::temporal::GeometrySnapshot::BackendUpload{};
+  };
+  if (snapshot.backend_vertex.serial == frame->serial) return;  // an identical repeat: tagged by its first draw
+  tag(snapshot.backend_vertex, snapshot.vertex.size() == 0x1000 ? vertex : ui::metal::UploadSlice{});
+  const bool same_shared = snapshot.shared.size() == shared_bytes.size() &&
+      !std::memcmp(snapshot.shared.data(), shared_bytes.data(), shared_bytes.size());
+  tag(snapshot.backend_shared, same_shared ? shared_upload : ui::metal::UploadSlice{});
+}
+
 const Renderer::State::SnapshotUpload* Renderer::State::UploadSnapshot(
     const std::shared_ptr<const gta4_native::temporal::GeometrySnapshot>& snapshot, std::string& error) {
   if (!snapshot || snapshot->vertex.empty() || snapshot->shared.empty() || !Begin(error)) return nullptr;
+  if (reuse_snapshot_uploads && frame->previous_committed && snapshot->backend_vertex.serial &&
+      snapshot->backend_vertex.serial + 1 == frame->serial) {
+    const auto slice = [](const gta4_native::temporal::GeometrySnapshot::BackendUpload& in) {
+      ui::metal::UploadSlice out;
+      out.buffer = (__bridge id<MTLBuffer>)in.buffer; out.offset = size_t(in.offset);
+      out.data = in.data; out.gpu_address = in.gpu_address;
+      return out;
+    };
+    reused_snapshot_upload.keep = nullptr;
+    reused_snapshot_upload.vertex = slice(snapshot->backend_vertex);
+    if (snapshot->backend_shared.serial == snapshot->backend_vertex.serial) {
+      reused_snapshot_upload.shared = slice(snapshot->backend_shared);
+    } else {
+      reused_snapshot_upload.shared = frame->uploads->Allocate(context->device, snapshot->shared.size(), 16);
+      if (!reused_snapshot_upload.shared) { error = "Metal frame upload budget exceeded"; return nullptr; }
+      std::memcpy(reused_snapshot_upload.shared.data, snapshot->shared.data(), snapshot->shared.size());
+      constant_upload_bytes += snapshot->shared.size();
+    }
+    ++snapshot_upload_reuses;
+    return &reused_snapshot_upload;
+  }
   auto [it, inserted] = snapshot_uploads.try_emplace(snapshot.get());
   if (!inserted) { ++snapshot_upload_hits; return &it->second; }
   const auto copy = [&](const std::vector<uint8_t>& bytes) {
-    auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+    auto upload = frame->uploads->Allocate(context->device, bytes.size(), 16);
     if (upload) { std::memcpy(upload.data, bytes.data(), bytes.size()); constant_upload_bytes += bytes.size(); }
     return upload;
   };
@@ -485,7 +526,7 @@ Renderer::State::BankUpload Renderer::State::UploadRange(size_t index, std::span
   if (range_constants_canary) {
     // Audit: whole bank, real values in [lo, hi] only. A read the mask missed sees NaN on screen.
     // Uncached and never stored as a last bank, so tracking state is left as it is.
-    auto upload = frame->uploads.Allocate(context->device, bytes.size(), 16);
+    auto upload = frame->uploads->Allocate(context->device, bytes.size(), 16);
     if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
     std::fill_n(static_cast<uint32_t*>(upload.data), bytes.size() / sizeof(uint32_t), kConstantCanary);
     copy(static_cast<uint8_t*>(upload.data) + offset);
@@ -524,7 +565,7 @@ Renderer::State::BankUpload Renderer::State::UploadRange(size_t index, std::span
   // Same key as Upload(): an entry with equal size and bytes holds these registers, whatever its origin.
   const uint64_t hash = XXH3_64bits_withSeed(view.data(), size, swap ? 1 : 0);
   if (const auto* cached = constants.Find(hash, view, swap)) { ++constant_hash_hits; return remember(*cached); }
-  auto upload = frame->uploads.Allocate(context->device, size, 16);
+  auto upload = frame->uploads->Allocate(context->device, size, 16);
   if (!upload) { error = "Metal frame upload budget exceeded"; return {}; }
   copy(upload.data);
   count(size);

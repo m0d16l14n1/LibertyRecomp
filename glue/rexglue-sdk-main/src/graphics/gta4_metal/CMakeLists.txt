@@ -31,7 +31,7 @@ add_library(rex-gta4-metal-temporal STATIC temporal/effects.mm temporal/library.
 set_source_files_properties(temporal/effects.mm temporal/library.mm temporal/motion_coverage.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 set_target_properties(rex-gta4-metal-temporal PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
 target_include_directories(rex-gta4-metal-temporal PUBLIC "${REXGLUE_ROOT}/src" PRIVATE "${METAL_RENDERER_GENERATED}")
-target_link_libraries(rex-gta4-metal-temporal PUBLIC "-framework Metal" "-framework MetalFX" "-framework Foundation")
+target_link_libraries(rex-gta4-metal-temporal PUBLIC rexruntime "-framework Metal" "-framework MetalFX" "-framework Foundation")  # rexruntime: EncodeMetal3/4, Metal4Compiler
 
 set(METAL_RENDERER_SOURCES renderer.mm pipelines.mm pipeline_store.mm gpu_pass_timer.mm draw.mm attachment_passes.mm modern_sky_probe.mm
     resolve.mm depth_passes.mm readback.mm present.mm post_processing.mm depth_of_field.mm sun_shafts.mm shaders.mm
@@ -121,6 +121,11 @@ if(REXGLUE_BUILD_TESTS)
     set_source_files_properties("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_temporal_queue_gpu_test.mm"
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(rex-metal-temporal-queue-test PRIVATE rex-gta4-metal-renderer)
+    add_executable(rex-metal-frame-ring-test EXCLUDE_FROM_ALL
+        "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_frame_ring_gpu_test.mm")
+    set_source_files_properties("${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_frame_ring_gpu_test.mm"
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(rex-metal-frame-ring-test PRIVATE rex-gta4-metal-renderer)
     add_executable(rex-metal-temporal-live-test EXCLUDE_FROM_ALL
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_temporal_live_gpu_test.mm"
         "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/metal_temporal_coverage_gpu_test.mm")
