@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <rex/cvar.h>
@@ -9,6 +10,12 @@
 REXCVAR_DEFINE_BOOL(gta4_native_audio_filter, false, "GTA IV/Performance",
     "Run the audio mixer's 4th-order filter effect (sub_829321A0, the hottest leaf of the mixer "
     "thread) natively, with the generated code's rounding");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad, false, "GTA IV/Performance",
+    "Run the audio mixer's per-channel EQ effect (sub_82936CE0) natively, with the generated "
+    "code's rounding");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad_verify, false, "GTA IV/Diagnostics",
+    "Run the original per-channel EQ on the real data and the native one on copies, and compare the "
+    "samples and channel state bit for bit; the game hears the original");
 REXCVAR_DEFINE_BOOL(gta4_native_audio_filter_verify, false, "GTA IV/Diagnostics",
     "Run the original filter on the real data and the native one on a copy, and compare them bit "
     "for bit (buffer, state, coefficients, frequency cache, reset flags); the game hears the original");
@@ -143,4 +150,77 @@ REX_HOOK_RAW(sub_829321A0) {
   v.mismatched_calls += mismatch;
   if (v.calls % 1000 == 0)
     REXLOG_INFO("gta4-audio-filter-verify: calls={} mismatched-calls={}", v.calls, v.mismatched_calls);
+}
+
+namespace {
+VerifyCounters biquad_counters;  // the mixer thread only
+}  // namespace
+
+REX_HOOK_RAW(sub_82936CE0) {
+  const bool verify = REXCVAR_GET(gta4_native_audio_biquad_verify);
+  const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_biquad)) || !buffer || !Contiguous(self, 76) ||
+      !Contiguous(buffer, 24)) {
+    __imp__sub_82936CE0(ctx, base);
+    return;
+  }
+  const uint8_t* object = REX_RAW_ADDR(self);
+  const uint32_t channels = REX_LOAD_U8(buffer + 13), sample_base = REX_LOAD_U32(buffer + 20);
+  const uint32_t mask = object[74] & ((1u << std::min<uint32_t>(channels, 8)) - 1);
+  const uint32_t enabled = uint32_t(__builtin_popcount(mask));
+  uint32_t arrays[4];
+  bool ok = Contiguous(sample_base, std::max<uint32_t>(channels, 1) * kSampleBytes);
+  for (int i = 0; i < 4; ++i) {
+    arrays[i] = gta4::audio::LoadBe32(object + 32 + 4 * i);
+    ok = ok && Contiguous(arrays[i], std::max<uint32_t>(enabled, 1) * 4);
+  }
+  if (!ok) {
+    __imp__sub_82936CE0(ctx, base);
+    return;
+  }
+  const uint32_t zero_bits = REX_LOAD_U32(0x82000A34);  // the constant the original loads into f2
+  float zero;
+  std::memcpy(&zero, &zero_bits, 4);
+  ctx.fpscr.disableFlushMode();
+  if (!verify) {
+    gta4::audio::RunBiquadEffect(object, channels, zero,
+        [&](int i, uint32_t k) { return REX_RAW_ADDR(arrays[i] + 4 * k); },
+        [&](uint32_t channel) { return REX_RAW_ADDR(sample_base + channel * kSampleBytes); });
+    ctx.r3.u64 = 0;
+    return;
+  }
+  // Verify: copies of what the effect writes (the enabled channels' samples and state).
+  std::array<uint8_t, 8 * kSampleBytes> samples_copy;
+  std::array<uint8_t, 4 * 8 * 4> state_copy;
+  const uint32_t sample_bytes = std::min<uint32_t>(channels, 8) * kSampleBytes;
+  std::memcpy(samples_copy.data(), REX_RAW_ADDR(sample_base), sample_bytes);
+  for (int i = 0; i < 4; ++i) std::memcpy(state_copy.data() + i * 32, REX_RAW_ADDR(arrays[i]), enabled * 4);
+  __imp__sub_82936CE0(ctx, base);
+  const uint64_t result = ctx.r3.u64;
+  ctx.fpscr.disableFlushMode();
+  gta4::audio::RunBiquadEffect(object, channels, zero,
+      [&](int i, uint32_t k) { return state_copy.data() + i * 32 + 4 * k; },
+      [&](uint32_t channel) { return samples_copy.data() + channel * kSampleBytes; });
+  ctx.r3.u64 = result;
+  auto& v = biquad_counters;
+  ++v.calls;
+  bool mismatch = false;
+  const auto report = [&](const char* what, uint32_t index, uint32_t original, uint32_t native) {
+    mismatch = true;
+    if (v.logged++ < 5)
+      REXLOG_WARN("gta4-audio-biquad-verify: mismatch call={} {} index={} original={:08X} native={:08X}",
+                  v.calls, what, index, original, native);
+  };
+  const uint8_t* real = REX_RAW_ADDR(sample_base);
+  for (uint32_t i = 0; i < sample_bytes / 4; ++i)
+    if (Be32(real + 4 * i) != Be32(samples_copy.data() + 4 * i))
+      report("sample", i, Be32(real + 4 * i), Be32(samples_copy.data() + 4 * i));
+  for (int a = 0; a < 4; ++a)
+    for (uint32_t k = 0; k < enabled; ++k) {
+      const uint32_t original = REX_LOAD_U32(arrays[a] + 4 * k), native = Be32(state_copy.data() + a * 32 + 4 * k);
+      if (original != native) report("state", uint32_t(a) * 8 + k, original, native);
+    }
+  v.mismatched_calls += mismatch;
+  if (v.calls % 1000 == 0)
+    REXLOG_INFO("gta4-audio-biquad-verify: calls={} mismatched-calls={}", v.calls, v.mismatched_calls);
 }

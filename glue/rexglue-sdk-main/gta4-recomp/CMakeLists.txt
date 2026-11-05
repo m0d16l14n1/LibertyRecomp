@@ -248,6 +248,20 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         set_property(TARGET LibertyRecomp APPEND PROPERTY LINK_DEPENDS "${LIBERTY_METAL_PASS_LIBRARY}")
     endif()
 
+    # Native ports of guest functions against the generated originals, on fake guest memory.
+    set(GTA4_AUDIO_ORIGINALS "${CMAKE_CURRENT_BINARY_DIR}/gta4_audio_originals.cpp")
+    add_custom_command(OUTPUT "${GTA4_AUDIO_ORIGINALS}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_guest_functions.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${GTA4_GENERATED_DIR}" "${GTA4_AUDIO_ORIGINALS}"
+            sub_82936CE0 sub_8218FB98 __savefpr_24 __restfpr_24
+        DEPENDS tools/extract_guest_functions.py ${GENERATED_SOURCES}
+        COMMENT "Extracting guest functions for the audio port test")
+    add_executable(gta4-audio-biquad-test EXCLUDE_FROM_ALL
+        "${LIBERTY_RECOMP_WORKSPACE_ROOT}/tools/tests/gta4_audio_biquad_test.cpp" "${GTA4_AUDIO_ORIGINALS}")
+    target_include_directories(gta4-audio-biquad-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/${GTA4_GENERATED_DIR})
+    target_link_libraries(gta4-audio-biquad-test PRIVATE rex::runtime)
+
     rexglue_configure_target(LibertyRecomp GPU_PLUGINS xenos gta4-native gta4-metal)
 
     # rexglue_configure_target stages the Vulkan loader and its companion

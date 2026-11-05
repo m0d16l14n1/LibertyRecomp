@@ -61,4 +61,60 @@ inline float FlushDenormal(float v, float zero) {
   return (bits & 0x7F800000u) ? v : zero;
 }
 
+inline uint32_t LoadBe32(const uint8_t* p) {
+  return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
+}
+inline void StoreBe32(uint8_t* p, uint32_t v) {
+  p[0] = uint8_t(v >> 24); p[1] = uint8_t(v >> 16); p[2] = uint8_t(v >> 8); p[3] = uint8_t(v);
+}
+inline float LoadBeFloat(const uint8_t* p) { const uint32_t b = LoadBe32(p); float f; __builtin_memcpy(&f, &b, 4); return f; }
+inline void StoreBeFloat(uint8_t* p, float f) { uint32_t b; __builtin_memcpy(&b, &f, 4); StoreBe32(p, b); }
+
+// sub_82936CE0 (audio mixer thread): per-channel EQ effect. One channel's 256 floats in place:
+// a biquad section (the same section as FilterStep's first), or two in series when `cascade`,
+// then the gain. The coefficients are shared by the channels; each channel has its own state.
+inline void Biquad256(uint8_t* samples, const float (&c)[5], float (&s)[4], bool cascade, float gain) {
+  for (uint32_t i = 0; i < 256; ++i) {
+    uint8_t* p = samples + i * 4;
+    const float x = LoadBeFloat(p);
+    float out;
+    if (cascade) {
+      out = FilterStep(x, c, s);
+    } else {
+      const float y = FilterFma(x, c[0], s[0]);
+      const float s0 = FilterAdd(FilterFms(x, c[1], FilterMul(y, c[3])), s[1]);
+      const float s1 = FilterFms(x, c[2], FilterMul(y, c[4]));
+      s[0] = s0; s[1] = s1;
+      out = y;
+    }
+    StoreBeFloat(p, FilterMul(out, gain));
+  }
+}
+
+// The whole of sub_82936CE0 on host views. Object (r3): +12..+28 coefficients b0 b1 b2 a1 a2,
+// +32/+36/+40/+44 guest pointers to the s0..s3 arrays (one float per enabled channel, in channel
+// order), +60 gain, +68 bypass, +74 channel-enable mask, +75 two sections. The voice buffer
+// (r4, through sub_8218FB98) gives the channel count at +13 and the samples at +20, 1024 bytes a
+// channel. `state(i, k)` maps state array i's entry k to host memory; `samples(channel)` the same
+// for a channel's block. Returns the number of channels run.
+template <class State, class Samples>
+uint32_t RunBiquadEffect(const uint8_t* object, uint32_t channels, float zero, State&& state, Samples&& samples) {
+  if (object[68] || !channels) return 0;
+  float c[5];
+  for (int i = 0; i < 5; ++i) c[i] = LoadBeFloat(object + 12 + 4 * i);
+  const uint32_t mask = object[74];
+  const bool cascade = object[75] != 0;
+  const float gain = LoadBeFloat(object + 60);
+  uint32_t k = 0;
+  for (uint32_t channel = 0; channel < channels && channel < 8; ++channel) {
+    if (!(mask & (1u << channel))) continue;
+    float s[4];
+    for (int i = 0; i < 4; ++i) s[i] = LoadBeFloat(state(i, k));
+    Biquad256(samples(channel), c, s, cascade, gain);
+    for (int i = 0; i < 4; ++i) StoreBeFloat(state(i, k), FlushDenormal(s[i], zero));
+    ++k;
+  }
+  return k;
+}
+
 }  // namespace gta4::audio
