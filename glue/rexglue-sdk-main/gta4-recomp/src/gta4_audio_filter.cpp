@@ -10,33 +10,17 @@
 #include "gta4_audio_effects.h"
 #include <vector>
 
-REXCVAR_DEFINE_BOOL(gta4_native_audio_filter, false, "GTA IV/Performance",
-    "Run the audio mixer's 4th-order filter effect (sub_829321A0, the hottest leaf of the mixer "
-    "thread) natively, with the generated code's rounding");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad, false, "GTA IV/Performance",
-    "Run the audio mixer's per-channel EQ effect (sub_82936CE0) natively, with the generated "
-    "code's rounding");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad_verify, false, "GTA IV/Diagnostics",
-    "Run the original per-channel EQ on the real data and the native one on copies, and compare the "
-    "samples and channel state bit for bit; the game hears the original");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_reverb, false, "GTA IV/Performance",
-    "Run the audio mixer's reverb effect (sub_82935BD0: 8 combs, 4 allpasses) natively, with the "
-    "generated code's vector operations");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_reverb_verify, false, "GTA IV/Diagnostics",
-    "Run the native reverb and the original on the same data and compare everything it writes bit for "
-    "bit; the game hears the original");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter, false, "GTA IV/Performance",
-    "Run the audio mixer's limiter effect (sub_82934F00, both modes) natively, with the generated "
-    "code's rounding");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter_verify, false, "GTA IV/Diagnostics",
-    "Run the native limiter and the original on the same data and compare everything it writes bit for "
-    "bit; the game hears the original");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_mixer, true, "GTA IV/Performance",
+    "Run the audio mixer thread's effects natively: the 4th-order filter (sub_829321A0), the "
+    "per-channel EQ (sub_82936CE0), the reverb (sub_82935BD0) and the limiter (sub_82934F00). "
+    "Bit-exact ports of the generated code (gta4-audio-effects-test); off runs the generated code");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_mixer_verify, false, "GTA IV/Diagnostics",
+    "Run both the native mixer effects and the generated ones on the same data and log any "
+    "difference (gta4-audio-*-verify: calls, mismatched-calls, raced-calls); the game hears the "
+    "generated ones. Costs more CPU than either");
 REXCVAR_DEFINE_STRING(gta4_native_audio_verify_dump, "", "GTA IV/Diagnostics",
     "A folder: the first mismatching call of each checked effect writes its inputs there "
     "(<effect>-<call>.afx) for gta4-audio-effects-test --replay");
-REXCVAR_DEFINE_BOOL(gta4_native_audio_filter_verify, false, "GTA IV/Diagnostics",
-    "Run the original filter on the real data and the native one on a copy, and compare them bit "
-    "for bit (buffer, state, coefficients, frequency cache, reset flags); the game hears the original");
 
 namespace {
 // Object layout (r3): +4 slot A (5 coefficients, 4 state), +40 slot B, +76 slot B frequency,
@@ -69,9 +53,9 @@ const char* FieldName(uint32_t offset) {
 }  // namespace
 
 REX_HOOK_RAW(sub_829321A0) {
-  const bool verify = REXCVAR_GET(gta4_native_audio_filter_verify);
+  const bool verify = REXCVAR_GET(gta4_native_audio_mixer_verify);
   const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
-  if ((!verify && !REXCVAR_GET(gta4_native_audio_filter)) || !buffer || !Contiguous(self, kObjectBytes)) {
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_mixer)) || !buffer || !Contiguous(self, kObjectBytes)) {
     __imp__sub_829321A0(ctx, base);
     return;
   }
@@ -225,9 +209,9 @@ VerifyCounters biquad_counters, reverb_counters, limiter_counters;  // the mixer
 }  // namespace
 
 REX_HOOK_RAW(sub_82936CE0) {
-  const bool verify = REXCVAR_GET(gta4_native_audio_biquad_verify);
+  const bool verify = REXCVAR_GET(gta4_native_audio_mixer_verify);
   const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
-  if ((!verify && !REXCVAR_GET(gta4_native_audio_biquad)) || !buffer || !Contiguous(self, 76) ||
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_mixer)) || !buffer || !Contiguous(self, 76) ||
       !Contiguous(buffer, 24)) {
     __imp__sub_82936CE0(ctx, base);
     return;
@@ -264,9 +248,9 @@ REX_HOOK_RAW(sub_82936CE0) {
 }
 
 REX_HOOK_RAW(sub_82935BD0) {
-  const bool verify = REXCVAR_GET(gta4_native_audio_reverb_verify);
+  const bool verify = REXCVAR_GET(gta4_native_audio_mixer_verify);
   const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
-  if ((!verify && !REXCVAR_GET(gta4_native_audio_reverb)) || !buffer || !Contiguous(self, 80) ||
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_mixer)) || !buffer || !Contiguous(self, 80) ||
       !Contiguous(buffer, 24) || !gta4::audio::ReverbLengthsValid(base)) {
     __imp__sub_82935BD0(ctx, base);
     return;
@@ -320,9 +304,9 @@ REX_HOOK_RAW(sub_82935BD0) {
 }
 
 REX_HOOK_RAW(sub_82934F00) {
-  const bool verify = REXCVAR_GET(gta4_native_audio_limiter_verify);
+  const bool verify = REXCVAR_GET(gta4_native_audio_mixer_verify);
   const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
-  if ((!verify && !REXCVAR_GET(gta4_native_audio_limiter)) || !buffer || !Contiguous(self, 660) ||
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_mixer)) || !buffer || !Contiguous(self, 660) ||
       !Contiguous(buffer, 24)) {
     __imp__sub_82934F00(ctx, base);
     return;

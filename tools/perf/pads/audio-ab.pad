@@ -1,0 +1,49 @@
+# Paired A/B of the native audio mixer under identical conditions: the same cutscene twice and
+# alternating driving stretches, switching gta4_native_audio_mixer live with `set`. Each segment is
+# between marks so the audio trace can be compared pair by pair. About 9 minutes.
+await 5m
+nowanted
+invincible
+
+# Same cutscene twice: native on, then off.
+set gta4_native_audio_mixer true
+get gta4_native_audio_mixer
+mark cut_on
+cutscene rom2_a 240
+mark cut_on_end
+wait 2s
+set gta4_native_audio_mixer false
+get gta4_native_audio_mixer
+mark cut_off
+cutscene rom2_a 240
+mark cut_off_end
+wait 2s
+
+# Driving, alternating every 30 s: on, off, on, off.
+road 1040 150 20
+clock 13 0
+car sultan
+wait 6s
+drive 18 0
+wait 3s
+set gta4_native_audio_mixer true
+get gta4_native_audio_mixer
+mark drive_on1
+wait 30s
+mark drive_on1_end
+set gta4_native_audio_mixer false
+get gta4_native_audio_mixer
+mark drive_off1
+wait 30s
+mark drive_off1_end
+set gta4_native_audio_mixer true
+get gta4_native_audio_mixer
+mark drive_on2
+wait 30s
+mark drive_on2_end
+set gta4_native_audio_mixer false
+get gta4_native_audio_mixer
+mark drive_off2
+wait 30s
+mark drive_off2_end
+quit

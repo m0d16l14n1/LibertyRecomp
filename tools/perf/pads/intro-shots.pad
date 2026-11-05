@@ -1,0 +1,126 @@
+# New game: the intro cutscene as the game plays it (shots every 2 s), for comparing with a
+# cutscene started through the dev pad. Needs a profile with no story save.
+await 5m
+mark intro
+shot {out}/shots/intro-01.png 0.5
+wait 2s
+shot {out}/shots/intro-02.png 0.5
+wait 2s
+shot {out}/shots/intro-03.png 0.5
+wait 2s
+shot {out}/shots/intro-04.png 0.5
+wait 2s
+shot {out}/shots/intro-05.png 0.5
+wait 2s
+shot {out}/shots/intro-06.png 0.5
+wait 2s
+shot {out}/shots/intro-07.png 0.5
+wait 2s
+shot {out}/shots/intro-08.png 0.5
+wait 2s
+shot {out}/shots/intro-09.png 0.5
+wait 2s
+shot {out}/shots/intro-10.png 0.5
+wait 2s
+shot {out}/shots/intro-11.png 0.5
+wait 2s
+shot {out}/shots/intro-12.png 0.5
+wait 2s
+shot {out}/shots/intro-13.png 0.5
+wait 2s
+shot {out}/shots/intro-14.png 0.5
+wait 2s
+shot {out}/shots/intro-15.png 0.5
+wait 2s
+shot {out}/shots/intro-16.png 0.5
+wait 2s
+shot {out}/shots/intro-17.png 0.5
+wait 2s
+shot {out}/shots/intro-18.png 0.5
+wait 2s
+shot {out}/shots/intro-19.png 0.5
+wait 2s
+shot {out}/shots/intro-20.png 0.5
+wait 2s
+shot {out}/shots/intro-21.png 0.5
+wait 2s
+shot {out}/shots/intro-22.png 0.5
+wait 2s
+shot {out}/shots/intro-23.png 0.5
+wait 2s
+shot {out}/shots/intro-24.png 0.5
+wait 2s
+shot {out}/shots/intro-25.png 0.5
+wait 2s
+shot {out}/shots/intro-26.png 0.5
+wait 2s
+shot {out}/shots/intro-27.png 0.5
+wait 2s
+shot {out}/shots/intro-28.png 0.5
+wait 2s
+shot {out}/shots/intro-29.png 0.5
+wait 2s
+shot {out}/shots/intro-30.png 0.5
+wait 2s
+shot {out}/shots/intro-31.png 0.5
+wait 2s
+shot {out}/shots/intro-32.png 0.5
+wait 2s
+shot {out}/shots/intro-33.png 0.5
+wait 2s
+shot {out}/shots/intro-34.png 0.5
+wait 2s
+shot {out}/shots/intro-35.png 0.5
+wait 2s
+shot {out}/shots/intro-36.png 0.5
+wait 2s
+shot {out}/shots/intro-37.png 0.5
+wait 2s
+shot {out}/shots/intro-38.png 0.5
+wait 2s
+shot {out}/shots/intro-39.png 0.5
+wait 2s
+shot {out}/shots/intro-40.png 0.5
+wait 2s
+shot {out}/shots/intro-41.png 0.5
+wait 2s
+shot {out}/shots/intro-42.png 0.5
+wait 2s
+shot {out}/shots/intro-43.png 0.5
+wait 2s
+shot {out}/shots/intro-44.png 0.5
+wait 2s
+shot {out}/shots/intro-45.png 0.5
+wait 2s
+shot {out}/shots/intro-46.png 0.5
+wait 2s
+shot {out}/shots/intro-47.png 0.5
+wait 2s
+shot {out}/shots/intro-48.png 0.5
+wait 2s
+shot {out}/shots/intro-49.png 0.5
+wait 2s
+shot {out}/shots/intro-50.png 0.5
+wait 2s
+shot {out}/shots/intro-51.png 0.5
+wait 2s
+shot {out}/shots/intro-52.png 0.5
+wait 2s
+shot {out}/shots/intro-53.png 0.5
+wait 2s
+shot {out}/shots/intro-54.png 0.5
+wait 2s
+shot {out}/shots/intro-55.png 0.5
+wait 2s
+shot {out}/shots/intro-56.png 0.5
+wait 2s
+shot {out}/shots/intro-57.png 0.5
+wait 2s
+shot {out}/shots/intro-58.png 0.5
+wait 2s
+shot {out}/shots/intro-59.png 0.5
+wait 2s
+shot {out}/shots/intro-60.png 0.5
+wait 2s
+mark intro_end
+quit

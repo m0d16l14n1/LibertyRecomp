@@ -218,29 +218,13 @@ enum Catalogue {
     static let sony = Setting("gta4_sony_enabled", "DualSense features", .toggle, on(true), live: true,
         "A Sony controller's extras: adaptive triggers, the light bar, rumble and touchpad gestures.")
 
-    // MARK: Native audio mixer (testing)
+    // MARK: Audio
 
-    // The mixer thread's four effects, ported to native code and proven bit-exact against the generated
-    // originals offline (gta4-audio-effects-test). "Check" runs both and logs any difference
-    // (gta4-audio-*-verify in the log); the game hears the original then.
-    static let audioFilter = Setting("gta4_native_audio_filter", "Native filter", .toggle, on(false),
-        "The mixer's 4th-order filter effect, the busiest part of the audio thread, in native code.")
-    static let audioFilterVerify = Setting("gta4_native_audio_filter_verify", "Check the filter", .toggle, on(false),
-        "Runs the original filter and the native one and logs any difference. Costs more CPU than either.")
-    static let audioEq = Setting("gta4_native_audio_biquad", "Native EQ", .toggle, on(false),
-        "The mixer's per-channel EQ effect in native code.")
-    static let audioEqVerify = Setting("gta4_native_audio_biquad_verify", "Check the EQ", .toggle, on(false),
-        "Runs the original EQ and the native one and logs any difference.")
-    static let audioReverb = Setting("gta4_native_audio_reverb", "Native reverb", .toggle, on(false),
-        "The mixer's reverb (8 combs, 4 allpasses) in native code.")
-    static let audioReverbVerify = Setting("gta4_native_audio_reverb_verify", "Check the reverb", .toggle, on(false),
-        "Runs the original reverb and the native one and logs any difference.")
-    static let audioLimiter = Setting("gta4_native_audio_limiter", "Native limiter", .toggle, on(false),
-        "The mixer's limiter (both modes) in native code.")
-    static let audioLimiterVerify = Setting("gta4_native_audio_limiter_verify", "Check the limiter", .toggle, on(false),
-        "Runs the original limiter and the native one and logs any difference.")
-    static let nativeAudio: [Setting] = [audioFilter, audioFilterVerify, audioEq, audioEqVerify,
-                                         audioReverb, audioReverbVerify, audioLimiter, audioLimiterVerify]
+    static let nativeAudioMixer = Setting("gta4_native_audio_mixer", "Native audio mixer", .toggle, on(true),
+        "Runs the game's audio mixer effects (filter, EQ, reverb, limiter) as native code instead of the "
+        + "translated Xbox code, with the same output bit for bit and less CPU time on the audio thread. "
+        + "Turn it off only to compare.")
+    static let audio: [Setting] = [nativeAudioMixer]
 
     static let mouse: [Setting] = [keyboard, mouseSensitivity, invertY, mouseAim, aimKey, lookHold]
     static let trackpad: [Setting] = [trackpadAim, trackpadSensitivity]

@@ -344,7 +344,7 @@ struct AdvancedView: View {
                 Choice(label: "Errors only", value: .string("error")), Choice(label: "Warnings", value: .string("warn")),
                 Choice(label: "Information (default)", value: .string("info")), Choice(label: "Debug (large)", value: .string("debug")),
             ]), .string("info"), "How much the game writes to its log. Warnings and errors always go to the errors log.")])
-            SettingsCard(title: "Native audio mixer (testing)", settings: Catalogue.nativeAudio)
+            SettingsCard(title: "Audio", settings: Catalogue.audio)
             Card(title: "More options for the game", footer: "Command-line options the game gets when it starts from the launcher, "
                  + "for example --diagnostics=true or --gta4_metal_frame_log=/tmp/frames.csv. Separate them with spaces. "
                  + "Options given here are not saved into the settings file.") {

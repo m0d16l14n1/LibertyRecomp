@@ -1,0 +1,100 @@
+# Audio check: cutscenes, radio, the phone, pedestrian speech, gunfire and explosions, each
+# between marks so the audio trace (REX_AUDIO_HANDOFF_DIR) and the mixer checks can be read
+# per scene. About 9 minutes.
+await 5m
+wait 10s
+nowanted
+invincible
+
+# 1. Cutscenes: dialogue, music and effects streams.
+mark cutscene_rom2
+cutscene rom2_a 240
+mark cutscene_rom2_end
+wait 2s
+mark cutscene_intro
+cutscene intro 300
+mark cutscene_intro_end
+wait 2s
+
+# 2. Radio: a drive with the station changed every 10 s.
+road 1040 150 20
+clock 13 0
+weather 1
+car sultan
+wait 6s
+drive 18 0
+wait 4s
+mark radio
+native GET_PLAYER_RADIO_STATION_INDEX
+wait 10s
+native RETUNE_RADIO_UP
+wait 10s
+native RETUNE_RADIO_UP
+wait 10s
+native RETUNE_RADIO_DOWN
+wait 10s
+native RETUNE_RADIO_TO_STATION_INDEX 5
+wait 10s
+native GET_PLAYER_RADIO_STATION_INDEX
+mark radio_end
+shot {out}/shots/1-radio.png 0.5
+
+# 3. The phone: open it (ring and menu sounds), browse, close.
+mark phone
+press up
+wait 3s
+press down
+wait 1s
+press down
+wait 1s
+press b
+wait 1s
+press b
+wait 2s
+mark phone_end
+
+# 4. Pedestrians: on foot in a crowd, with greetings asked of the player and the peds.
+road 892 -500 10
+clock 15 0
+wait 4s
+peds 10 0 8
+wait 2s
+mark speech
+native SAY_AMBIENT_SPEECH $ped "GENERIC_HI" 1 1 0
+wait 3s
+stick ly 0.6 8s
+release all
+native SAY_AMBIENT_SPEECH $ped "GENERIC_INSULT" 1 1 0
+wait 3s
+stick ly -0.6 8s
+release all
+wait 4s
+mark speech_end
+shot {out}/shots/2-speech.png 0.5
+
+# 5. Gunfire among hostile peds, then explosions.
+road 1040 150 20
+clock 13 0
+wait 4s
+weapon 14 9999
+cars sultan 4 14
+peds 8 1 12
+wait 2s
+mark combat
+trigger lt 1
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+stick rx 0.6 1s
+trigger rt 1 1.5s
+wait 0.5s
+release all
+explode 1
+wait 2s
+boom 12
+wait 3s
+mark combat_end
+shot {out}/shots/3-combat.png 0.5
+wait 1s
+quit
