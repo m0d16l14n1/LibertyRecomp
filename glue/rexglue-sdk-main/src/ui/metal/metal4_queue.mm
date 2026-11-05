@@ -80,6 +80,8 @@ enum class RenderBarrier { kFull, kFragment, kTracked };
 // Persistent residency: an allocation leaves the queue set after this many command buffers unused
 // (gta4_metal4_residency_idle). The floor keeps it far past any command buffer still in flight.
 constexpr uint64_t kPersistentIdleCommandBuffers = 1000, kPersistentIdleFloor = 64;
+// The budget pass must not remove an allocation a command buffer still in flight can reference.
+constexpr uint64_t kPersistentKeepCommandBuffers = 8;
 // Persistent residency's byte cap: a settings change can orphan a whole render-target set, so the
 // idle window alone is not enough. The cap is a fraction of the device's working set.
 constexpr uint64_t kPersistentBudgetCap = 3584ull * 1024 * 1024;
@@ -1243,8 +1245,12 @@ LX_LOG_UNRECOGNIZED
     by_age.reserve(_persisted.size());
     for (const auto& entry : _persisted) by_age.emplace_back(entry.second.last, entry.first);
     std::sort(by_age.begin(), by_age.end());
+    // Never remove an allocation used by a command buffer that may still be in flight.
+    const uint64_t keep_since =
+        _commandBufferIndex > kPersistentKeepCommandBuffers ? _commandBufferIndex - kPersistentKeepCommandBuffers : 0;
     for (const auto& [last, key] : by_age) {
       if (_persistBytes <= _persistBudget) break;
+      if (last > keep_since) break;  // the rest are recent; leave the set over budget for now
       auto it = _persisted.find(key);
       if (it == _persisted.end()) continue;
       _persistBytes -= it->second.bytes;
