@@ -62,10 +62,14 @@ acceleration-structure path is covered by `rex-metal-raytracing-structures-test`
   cost the same. The career city drive with frame generation (BACKLOG 88) is GPU-bound (scene GPU
   p50 19.6 ms, render thread 53% busy while paced), so Metal 4 would not change its frame rate.
 - **Copy barriers:** dependency tracking keeps the blit-stage barriers where the resolve chain needs
-  them and drops the rest. In a Metal 4 boot/loading run (career save, `gta4_metal_api=metal4`, stats
-  line at frame 26,100), 3,559 copies in one interval needed 628 barriers (18%) while 2,931 were
-  independent; before this every copy after the first in an encoder took one. The screenshot of the
-  same run renders normally.
+  them and drops the rest. In the career city drive (`gta4_metal_api=metal4`, stats line at frame
+  35,700) 137,146 copies needed 9,578 barriers (7%) while 127,568 were independent; before this
+  every copy after the first in an encoder took one. `rex-metal4-proxy-copy-test` checks the policy.
+- **A/B against metal3** (career city drive, MetalFX TAA 1280x720 → 2560x1440, frame generation off,
+  three interleaved 180 s runs, 75 s rests, fanless Air): both are GPU-bound at 25-43 fps per
+  window. City mean metal3 29.5 fps / submit 22.9 ms, metal4 31.2 fps / 22.2 ms. Thermal order
+  (m3, m4, m3) and different traffic between runs put this within noise; there is no frame-rate
+  regression. A CPU-bound run (an episode downtown) is still needed before the default changes.
 - **Flexible pipelines** were checked against the recorded recipes: 727 recipes collapse to 624 when
   colour formats, write masks and blending are left open, 14% fewer compiles. With the archive and
   the bundled seed, first-sight compiles are already rare (0-2 frames over 4 ms per 3-minute drive,
