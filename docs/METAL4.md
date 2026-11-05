@@ -25,13 +25,15 @@ before while the work runs on Metal 4: `MTL4CommandQueue`, pooled `MTL4CommandAl
 command buffers, `MTL4ArgumentTable`s (vertex, fragment, compute) fed GPU addresses and resource
 IDs, a per-command-buffer transient buffer instead of `set*Bytes`, a per-command-buffer
 `MTLResidencySet` holding every bound or declared resource (retained until commit feedback) or,
-with `gta4_metal4_residency = persistent`, one queue-level set, blits on
+with `gta4_metal4_residency = persistent`, one queue-level set; new allocations join either set in
+one `addAllocations:count:` call per command buffer rather than one call each, blits on
 `MTL4ComputeCommandEncoder`, a queue barrier at each encoder start plus encoder barriers only
 between copies that overlap and between serial dispatches, commit feedback for completion handlers,
 and queue waits/signals for events and drawables (the layer's residency set joins the queue).
 `gta4-metal4` reports the counters behind those choices: `barriers=`, `copy-barriers=`,
-`copy-independent=`, `fragment-barriers=`, `vertex-barriers=`, `evicted=` and
-`residency-commits=`. `gta4_metal4_pass_timing` adds GPU milliseconds per encoder label.
+`copy-independent=`, `fragment-barriers=`, `vertex-barriers=`, `resident-adds=`,
+`resident-batches=`, `evicted=` and `residency-commits=`. `gta4_metal4_pass_timing` adds GPU
+milliseconds per encoder label.
 MetalFX runs natively: the temporal scaler, the frame interpolator and (with
 `gta4_metal_raytracing_denoiser = metalfx`) the denoised scaler are their `MTL4FX` objects, made from
 the queue's `MTL4Compiler` and encoded into the open `MTL4CommandBuffer` by `EncodeMetal4`. An empty
@@ -86,9 +88,9 @@ Done:
    go to a per-frame bump buffer bound by address. Prerequisite for 2.
 2. **Metal 4 command model for the title passes**: `MTL4CommandQueue`, allocators per frame in
    flight, argument tables per encoder thread, barriers instead of tracking, one batch encoder for
-   consecutive resolves, and dependency-aware copy barriers. Validated with `MTL_DEBUG_LAYER=1` and
-   shader validation on the GPU tests; the resolve chain (28 resolves a frame, deferred resolves,
-   BACKLOG 17) is why the barrier modes exist.
+   consecutive resolves, dependency-aware copy barriers, and batched residency adds. Validated with
+   `MTL_DEBUG_LAYER=1` and shader validation on the GPU tests; the resolve chain (28 resolves a
+   frame, deferred resolves, BACKLOG 17) is why the barrier modes exist.
 3. **MetalFX on Metal 4** (`MTL4FXTemporalScaler`, `MTL4FXFrameInterpolator`,
    `MTL4FXTemporalDenoisedScaler`): done, see Switching. The denoised scaler is Metal 4 only
    (docs/RAYTRACING.md).

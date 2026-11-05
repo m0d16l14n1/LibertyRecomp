@@ -160,13 +160,14 @@ class PointerSet {
   RenderBarrier _renderBarrier;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
   std::atomic<uint64_t> _binds, _bindHits, _fragmentBarriers, _vertexBarriers, _evicted, _residencyCommits;
-  std::atomic<uint64_t> _copyBarriers, _copyIndependent;
+  std::atomic<uint64_t> _copyBarriers, _copyIndependent, _residentBatches;
   // gta4_metal4_residency = persistent
   BOOL _persistentResidency;
   BOOL _leanTracking;  // gta4_metal4_lean_tracking, only with persistent residency
   std::mutex _persistLock;
   id<MTLResidencySet> _persistent;
   std::unordered_map<const void*, Persisted> _persisted;
+  std::vector<id<MTLAllocation>> _persistPending;  // new allocations, added in one call per commit
   uint64_t _commandBufferIndex;
   uint64_t _persistIdle;  // gta4_metal4_residency_idle, set with persistent residency
   bool _persistDirty;
@@ -198,6 +199,7 @@ class PointerSet {
   NSMutableArray* _finished;  // MTL4 command buffers and allocators of committed parts
   id<MTLResidencySet> _set;
   NSMutableArray* _retained;
+  std::vector<id<MTLAllocation>> _residentPending;  // this part's new allocations, added in one call
   PointerSet _seen;
   uint64_t _binds, _bindHits;  // this command buffer's, added to the queue's at commit
   id<MTL4CounterHeap> _stampHeap;          // gta4_metal4_pass_timing
@@ -685,14 +687,14 @@ LX_LOG_UNRECOGNIZED
   }
   if (!lean) [_retained addObject:allocation];
   if (_q->_persistentResidency) { [_q persist:allocation]; return; }
-  [_set addAllocation:allocation];
+  _residentPending.push_back(allocation);
   ++_q->_resident;
 }
 - (void)trackHeap:(id<MTLHeap>)heap {
   if (!heap || !_seen.insert((__bridge const void*)heap)) return;
   [_retained addObject:heap];
   if (_q->_persistentResidency) { [_q persist:heap]; return; }
-  [_set addAllocation:heap];
+  _residentPending.push_back(heap);
   ++_q->_resident;
 }
 // The bind hot path: one direct-mapped probe instead of a hash-set insert and a message for
@@ -869,6 +871,12 @@ LX_LOG_UNRECOGNIZED
     // The queue-level set (added to the queue once) holds everything; commit what changed.
     [_q commitPersistent:last];
   } else {
+    if (!_residentPending.empty()) {
+      // One driver call rather than one per resource (a frame adds hundreds to thousands).
+      [_set addAllocations:_residentPending.data() count:_residentPending.size()];
+      _residentPending.clear();
+      ++_q->_residentBatches;
+    }
     [_set commit];
     [_cb useResidencySet:_set];
     ++_q->_residencyCommits;
@@ -983,6 +991,7 @@ LX_LOG_UNRECOGNIZED
   }
   [_finished removeAllObjects]; [_chunks removeAllObjects];
   _set = nil; _chunk = nil;
+  _residentPending.clear();
   [_retained removeAllObjects]; _seen.clear();
   dispatch_group_leave(_done);
 }
@@ -1109,12 +1118,18 @@ LX_LOG_UNRECOGNIZED
   it->second.last = _commandBufferIndex;
   if (!inserted) return;
   it->second.allocation = allocation;
-  [_persistent addAllocation:allocation];
+  _persistPending.push_back(allocation);
   _persistDirty = true;
   ++_resident;
 }
 - (void)commitPersistent:(BOOL)evict {
   std::lock_guard<std::mutex> lock(_persistLock);
+  if (!_persistPending.empty()) {
+    // One call for everything this command buffer added, like the per-frame set.
+    [_persistent addAllocations:_persistPending.data() count:_persistPending.size()];
+    _persistPending.clear();
+    ++_residentBatches;
+  }
   // Every 64 command buffers (16 for a short idle window): drop what has not been bound for a
   // long time. It is far past any command buffer in flight, and a later bind adds it again.
   const uint64_t every = _persistIdle < kPersistentIdleCommandBuffers ? 16 : 64;
@@ -1239,6 +1254,7 @@ Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue) {
   s.binds = q->_binds; s.bind_hits = q->_bindHits; s.fragment_barriers = q->_fragmentBarriers;
   s.vertex_barriers = q->_vertexBarriers; s.evicted = q->_evicted; s.residency_commits = q->_residencyCommits;
   s.copy_barriers = q->_copyBarriers; s.copy_independent = q->_copyIndependent;
+  s.resident_batches = q->_residentBatches;
   return s;
 }
 
