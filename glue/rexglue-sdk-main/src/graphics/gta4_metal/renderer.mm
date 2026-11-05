@@ -93,13 +93,15 @@ bool Renderer::Initialize(std::string& error,const std::filesystem::path& direct
       }
       uint64_t memsize=0; size_t len=sizeof(memsize);
       sysctlbyname("hw.memsize",&memsize,&len,nullptr,0);
-      // Metal 4 (MTL4 queues, argument tables, MTL4Compiler, MTL4FX) is not used yet: see
-      // docs/METAL4.md for what it would change here. Logged so reports show what a Mac offers.
+      // Metal 4 (MTL4 queues, argument tables, MTL4Compiler, MTL4FX) with
+      // gta4_metal_api = metal4; ray tracing and the MTL4FX objects need Apple9.
       bool metal4=false;
       if(@available(macOS 26.0,*)) metal4=[device supportsFamily:MTLGPUFamilyMetal4];
-      REXLOG_WARN("gta4-metal: device summary (informational): {} family=Apple{} metal4={} 32-bit-float-msaa={} "
+      const bool raytracing=[device supportsFamily:MTLGPUFamilyApple9];
+      REXLOG_WARN("gta4-metal: device summary (informational): {} family=Apple{} metal4={} raytracing={} 32-bit-float-msaa={} "
                   "bc-textures={} working-set={:.1f} GB memory={:.1f} GB macOS {}",
-                  device.name.UTF8String, family, metal4 ? "yes" : "no", device.supports32BitMSAA ? "yes" : "no",
+                  device.name.UTF8String, family, metal4 ? "yes" : "no", raytracing ? "yes" : "no",
+                  device.supports32BitMSAA ? "yes" : "no",
                   device.supportsBCTextureCompression ? "yes" : "no",
                   double(device.recommendedMaxWorkingSetSize)/(1024.0*1024.0*1024.0),
                   double(memsize)/(1024.0*1024.0*1024.0),

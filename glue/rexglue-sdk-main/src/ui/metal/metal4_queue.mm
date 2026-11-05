@@ -1259,7 +1259,8 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       q->_tableTextures = std::min<NSUInteger>(q->_tableTextures, std::max<uint32_t>(textures, 16));
     const uint32_t samplers = REXCVAR_GET(gta4_metal4_table_samplers);
     q->_tableSamplers = samplers ? std::min<uint32_t>(std::max<uint32_t>(samplers, 8), 16) : 16;
-    if (REXCVAR_GET(gta4_metal4_residency) == "persistent") {
+    const std::string residency = REXCVAR_GET(gta4_metal4_residency);
+    if (residency == "persistent") {
       MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
       d.initialCapacity = 8192;
       d.label = @"Liberty Metal 4 persistent";
@@ -1279,6 +1280,11 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       q->_stampHeaps = [NSMutableArray new];
       q->_passTiming = YES;
     }
+    REXLOG_INFO("gta4-metal4: residency={} render-barrier={} lean-tracking={} pass-timing={} "
+                "texture-slots={} sampler-slots={} buffer-slots=31",
+                q->_persistentResidency ? "persistent" : "frame", barrier.c_str(),
+                q->_leanTracking ? "on" : "off", q->_passTiming ? "on" : "off",
+                unsigned(q->_tableTextures), unsigned(q->_tableSamplers));
     return q;
   }
   error = "Metal 4 needs macOS 26 or later.";
