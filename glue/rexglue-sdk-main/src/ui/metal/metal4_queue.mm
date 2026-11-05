@@ -1120,6 +1120,12 @@ LX_LOG_UNRECOGNIZED
 - (void)insertDebugCaptureBoundary {}
 - (void)addResidencySet:(id<MTLResidencySet>)set { [_queue4 addResidencySet:set]; }
 - (void)removeResidencySet:(id<MTLResidencySet>)set { [_queue4 removeResidencySet:set]; }
+- (void)addResidencySets:(const id<MTLResidencySet>[])sets count:(NSUInteger)count {
+  for (NSUInteger i = 0; i < count; ++i) if (sets[i]) [_queue4 addResidencySet:sets[i]];
+}
+- (void)removeResidencySets:(const id<MTLResidencySet>[])sets count:(NSUInteger)count {
+  for (NSUInteger i = 0; i < count; ++i) if (sets[i]) [_queue4 removeResidencySet:sets[i]];
+}
 - (id<MTL4CommandAllocator>)takeAllocator {
   std::lock_guard<std::mutex> lock(_lock);
   id<MTL4CommandAllocator> a = _allocators.lastObject;
