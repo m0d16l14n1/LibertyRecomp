@@ -5,7 +5,8 @@
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include "gta4_init.h"
-#include "gta4_audio_filter.h"
+#include "gta4_audio_effects.h"
+#include <vector>
 
 REXCVAR_DEFINE_BOOL(gta4_native_audio_filter, false, "GTA IV/Performance",
     "Run the audio mixer's 4th-order filter effect (sub_829321A0, the hottest leaf of the mixer "
@@ -16,6 +17,18 @@ REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad, false, "GTA IV/Performance",
 REXCVAR_DEFINE_BOOL(gta4_native_audio_biquad_verify, false, "GTA IV/Diagnostics",
     "Run the original per-channel EQ on the real data and the native one on copies, and compare the "
     "samples and channel state bit for bit; the game hears the original");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_reverb, false, "GTA IV/Performance",
+    "Run the audio mixer's reverb effect (sub_82935BD0: 8 combs, 4 allpasses) natively, with the "
+    "generated code's vector operations");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_reverb_verify, false, "GTA IV/Diagnostics",
+    "Run the native reverb and the original on the same data and compare everything it writes bit for "
+    "bit; the game hears the original");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter, false, "GTA IV/Performance",
+    "Run the audio mixer's limiter effect (sub_82934F00, both modes) natively, with the generated "
+    "code's rounding");
+REXCVAR_DEFINE_BOOL(gta4_native_audio_limiter_verify, false, "GTA IV/Diagnostics",
+    "Run the native limiter and the original on the same data and compare everything it writes bit for "
+    "bit; the game hears the original");
 REXCVAR_DEFINE_BOOL(gta4_native_audio_filter_verify, false, "GTA IV/Diagnostics",
     "Run the original filter on the real data and the native one on a copy, and compare them bit "
     "for bit (buffer, state, coefficients, frequency cache, reset flags); the game hears the original");
@@ -33,37 +46,6 @@ void SetBeFloat(uint8_t* p, float f) { uint32_t b; std::memcpy(&b, &f, 4); SetBe
 bool Contiguous(uint32_t address, uint32_t size) {
   const uint64_t end = uint64_t(address) + size;
   return end <= 0x100000000ull && !(address < 0xE0000000u && end > 0xE0000000ull);
-}
-
-// The whole effect on host views of the object and the samples (guest memory or a copy).
-// `coefficients(kind, frequency, out)` runs sub_82932090. Returns false when nothing ran.
-template <class Coefficients>
-void Run(uint8_t* object, uint8_t* samples, float zero, Coefficients&& coefficients) {
-  const uint32_t frequency_b = Be32(object + 76), frequency_a = Be32(object + 80);
-  const bool use_a = frequency_a < 23900, use_b = frequency_b != 0;
-  if (!use_a && !use_b) return;
-  gta4::audio::FilterSlot a{}, b{};
-  for (int i = 0; i < 5; ++i) { a.c[i] = BeFloat(object + 4 + 4 * i); b.c[i] = BeFloat(object + 40 + 4 * i); }
-  for (int i = 0; i < 4; ++i) { a.s[i] = BeFloat(object + 24 + 4 * i); b.s[i] = BeFloat(object + 60 + 4 * i); }
-  if (use_a && object[100]) for (float& v : a.s) v = zero;
-  if (use_b && object[101]) for (float& v : b.s) v = zero;
-  if (Be32(object + 88) != frequency_a) {
-    coefficients(1u, frequency_a, a.c);
-    for (int i = 0; i < 5; ++i) SetBeFloat(object + 4 + 4 * i, a.c[i]);
-  }
-  if (Be32(object + 84) != frequency_b) {
-    coefficients(0u, frequency_b, b.c);
-    for (int i = 0; i < 5; ++i) SetBeFloat(object + 40 + 4 * i, b.c[i]);
-  }
-  SetBe32(object + 88, frequency_a);
-  SetBe32(object + 84, frequency_b);
-  object[101] = use_b ? 0 : 1;
-  object[100] = use_a ? 0 : 1;
-  gta4::audio::Filter256(samples, a, use_a, b, use_b);
-  for (int i = 0; i < 4; ++i) {
-    SetBeFloat(object + 24 + 4 * i, gta4::audio::FlushDenormal(a.s[i], zero));
-    SetBeFloat(object + 60 + 4 * i, gta4::audio::FlushDenormal(b.s[i], zero));
-  }
 }
 
 struct VerifyCounters { uint64_t calls = 0, mismatched_calls = 0, logged = 0; };
@@ -93,26 +75,8 @@ REX_HOOK_RAW(sub_829321A0) {
     __imp__sub_829321A0(ctx, base);
     return;
   }
-  const uint32_t zero_bits = REX_LOAD_U32(0x82000A34);  // the constant the original loads into f31
-  float zero;
-  std::memcpy(&zero, &zero_bits, 4);
-  const uint32_t caller_stack = ctx.r1.u32, frame = caller_stack - 240;
-  // sub_82932090 (r4 = 1 for slot A, 0 for B) writes five coefficients to a stack area of the
-  // original's frame (r1 - 240, +144 for A, +96 for B); it reads nothing else of the object.
-  const auto coefficients = [&](uint32_t kind, uint32_t frequency, float (&out)[5]) {
-    const uint32_t area = frame + (kind ? 144 : 96);
-    REX_STORE_U32(frame, caller_stack);
-    ctx.r1.u64 = frame;
-    ctx.r3.u64 = self; ctx.r4.u64 = kind; ctx.r5.u64 = frequency; ctx.r6.u64 = area;
-    ctx.lr = kind ? 0x82932294 : 0x829322DC;
-    sub_82932090(ctx, base);
-    ctx.r1.u64 = caller_stack;
-    for (int i = 0; i < 5; ++i) out[i] = BeFloat(REX_RAW_ADDR(area + 4 * i));
-    ctx.fpscr.disableFlushMode();
-  };
   if (!verify) {
-    ctx.fpscr.disableFlushMode();
-    Run(REX_RAW_ADDR(self), REX_RAW_ADDR(samples), zero, coefficients);
+    gta4::audio::RunFilterGuest(ctx, base, self, samples);
     ctx.r3.u64 = 0;
     return;
   }
@@ -124,7 +88,10 @@ REX_HOOK_RAW(sub_829321A0) {
   __imp__sub_829321A0(ctx, base);
   const uint64_t result = ctx.r3.u64;
   ctx.fpscr.disableFlushMode();
-  Run(object_copy.data(), samples_copy.data(), zero, coefficients);
+  gta4::audio::RunFilterEffect(object_copy.data(), samples_copy.data(), gta4::audio::ImageZero(base),
+      [&](uint32_t kind, uint32_t frequency, float (&out)[5]) {
+        gta4::audio::FilterCoefficients(ctx, base, self, kind, frequency, out);
+      });
   ctx.r3.u64 = result;
   auto& v = verify_counters;
   ++v.calls;
@@ -139,21 +106,66 @@ REX_HOOK_RAW(sub_829321A0) {
   // +76/+80 (the slots' target frequencies) are inputs the game's sound thread rewrites at any
   // time; a change there between the snapshot and this check is a race, not a filter difference.
   for (uint32_t offset = 4; offset < 92; offset += 4)
-    if (offset != 76 && offset != 80 && Be32(object + offset) != Be32(object_copy.data() + offset))
+    if (offset != 76 && offset != 80 &&
+        !gta4::audio::SameResultWord(Be32(object + offset), Be32(object_copy.data() + offset)))
       report(FieldName(offset), offset, Be32(object + offset), Be32(object_copy.data() + offset));
   for (uint32_t offset : {100u, 101u})
     if (object[offset] != object_copy[offset]) report("reset-flag", offset, object[offset], object_copy[offset]);
   const uint8_t* real = REX_RAW_ADDR(samples);
   for (uint32_t i = 0; i < 256; ++i)
-    if (Be32(real + 4 * i) != Be32(samples_copy.data() + 4 * i))
+    if (!gta4::audio::SameResultWord(Be32(real + 4 * i), Be32(samples_copy.data() + 4 * i)))
       report("sample", i, Be32(real + 4 * i), Be32(samples_copy.data() + 4 * i));
   v.mismatched_calls += mismatch;
   if (v.calls % 1000 == 0)
     REXLOG_INFO("gta4-audio-filter-verify: calls={} mismatched-calls={}", v.calls, v.mismatched_calls);
 }
 
+
 namespace {
-VerifyCounters biquad_counters;  // the mixer thread only
+// Verify for the effects that write many guest regions: snapshot every region the effect writes,
+// run the port, keep its result, restore the snapshot, run the original (the game hears it), and
+// compare the two results word by word.
+struct Region { uint32_t address, size; };
+
+template <class Native, class Original>
+void VerifyEffect(const char* tag, VerifyCounters& v, uint8_t* base, const std::vector<Region>& regions,
+                  Native&& native, Original&& original) {
+  size_t total = 0;
+  for (const auto& r : regions) total += r.size;
+  std::vector<uint8_t> before(total), ported(total);
+  size_t at = 0;
+  for (const auto& r : regions) { std::memcpy(before.data() + at, REX_RAW_ADDR(r.address), r.size); at += r.size; }
+  native();
+  at = 0;
+  for (const auto& r : regions) { std::memcpy(ported.data() + at, REX_RAW_ADDR(r.address), r.size); at += r.size; }
+  at = 0;
+  for (const auto& r : regions) { std::memcpy(REX_RAW_ADDR(r.address), before.data() + at, r.size); at += r.size; }
+  original();
+  ++v.calls;
+  bool mismatch = false;
+  at = 0;
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const uint8_t* real = REX_RAW_ADDR(regions[i].address);
+    for (uint32_t offset = 0; offset + 4 <= regions[i].size; offset += 4) {
+      const uint32_t original_word = Be32(real + offset), native_word = Be32(ported.data() + at + offset);
+      if (gta4::audio::SameResultWord(original_word, native_word)) continue;
+      mismatch = true;
+      if (v.logged++ < 8)
+        REXLOG_WARN("{}: mismatch call={} region={} address={:08X} original={:08X} native={:08X}", tag, v.calls, i,
+                    regions[i].address + offset, original_word, native_word);
+    }
+    at += regions[i].size;
+  }
+  v.mismatched_calls += mismatch;
+  if (v.calls % 1000 == 0) REXLOG_INFO("{}: calls={} mismatched-calls={}", tag, v.calls, v.mismatched_calls);
+}
+
+bool AllContiguous(const std::vector<Region>& regions) {
+  for (const auto& r : regions) if (!Contiguous(r.address, r.size)) return false;
+  return true;
+}
+
+VerifyCounters biquad_counters, reverb_counters, limiter_counters;  // the mixer thread only
 }  // namespace
 
 REX_HOOK_RAW(sub_82936CE0) {
@@ -166,61 +178,110 @@ REX_HOOK_RAW(sub_82936CE0) {
   }
   const uint8_t* object = REX_RAW_ADDR(self);
   const uint32_t channels = REX_LOAD_U8(buffer + 13), sample_base = REX_LOAD_U32(buffer + 20);
-  const uint32_t mask = object[74] & ((1u << std::min<uint32_t>(channels, 8)) - 1);
-  const uint32_t enabled = uint32_t(__builtin_popcount(mask));
+  uint32_t enabled = 0;
+  std::vector<Region> regions;
+  if (!object[68]) {
+    for (uint32_t channel = 0; channel < channels; ++channel)
+      if (gta4::audio::ChannelEnabled(object[74], channel)) {
+        ++enabled;
+        regions.push_back({sample_base + channel * kSampleBytes, kSampleBytes});
+      }
+  }
   uint32_t arrays[4];
-  bool ok = Contiguous(sample_base, std::max<uint32_t>(channels, 1) * kSampleBytes);
   for (int i = 0; i < 4; ++i) {
     arrays[i] = gta4::audio::LoadBe32(object + 32 + 4 * i);
-    ok = ok && Contiguous(arrays[i], std::max<uint32_t>(enabled, 1) * 4);
+    if (enabled) regions.push_back({arrays[i], enabled * 4});
   }
-  if (!ok) {
+  if (!AllContiguous(regions)) {
     __imp__sub_82936CE0(ctx, base);
     return;
   }
-  const uint32_t zero_bits = REX_LOAD_U32(0x82000A34);  // the constant the original loads into f2
-  float zero;
-  std::memcpy(&zero, &zero_bits, 4);
-  ctx.fpscr.disableFlushMode();
+  const auto native = [&] { gta4::audio::RunBiquadGuest(ctx, base, self, channels, sample_base); };
   if (!verify) {
-    gta4::audio::RunBiquadEffect(object, channels, zero,
-        [&](int i, uint32_t k) { return REX_RAW_ADDR(arrays[i] + 4 * k); },
-        [&](uint32_t channel) { return REX_RAW_ADDR(sample_base + channel * kSampleBytes); });
+    native();
     ctx.r3.u64 = 0;
     return;
   }
-  // Verify: copies of what the effect writes (the enabled channels' samples and state).
-  std::array<uint8_t, 8 * kSampleBytes> samples_copy;
-  std::array<uint8_t, 4 * 8 * 4> state_copy;
-  const uint32_t sample_bytes = std::min<uint32_t>(channels, 8) * kSampleBytes;
-  std::memcpy(samples_copy.data(), REX_RAW_ADDR(sample_base), sample_bytes);
-  for (int i = 0; i < 4; ++i) std::memcpy(state_copy.data() + i * 32, REX_RAW_ADDR(arrays[i]), enabled * 4);
-  __imp__sub_82936CE0(ctx, base);
-  const uint64_t result = ctx.r3.u64;
-  ctx.fpscr.disableFlushMode();
-  gta4::audio::RunBiquadEffect(object, channels, zero,
-      [&](int i, uint32_t k) { return state_copy.data() + i * 32 + 4 * k; },
-      [&](uint32_t channel) { return samples_copy.data() + channel * kSampleBytes; });
-  ctx.r3.u64 = result;
-  auto& v = biquad_counters;
-  ++v.calls;
-  bool mismatch = false;
-  const auto report = [&](const char* what, uint32_t index, uint32_t original, uint32_t native) {
-    mismatch = true;
-    if (v.logged++ < 5)
-      REXLOG_WARN("gta4-audio-biquad-verify: mismatch call={} {} index={} original={:08X} native={:08X}",
-                  v.calls, what, index, original, native);
-  };
-  const uint8_t* real = REX_RAW_ADDR(sample_base);
-  for (uint32_t i = 0; i < sample_bytes / 4; ++i)
-    if (Be32(real + 4 * i) != Be32(samples_copy.data() + 4 * i))
-      report("sample", i, Be32(real + 4 * i), Be32(samples_copy.data() + 4 * i));
-  for (int a = 0; a < 4; ++a)
-    for (uint32_t k = 0; k < enabled; ++k) {
-      const uint32_t original = REX_LOAD_U32(arrays[a] + 4 * k), native = Be32(state_copy.data() + a * 32 + 4 * k);
-      if (original != native) report("state", uint32_t(a) * 8 + k, original, native);
+  VerifyEffect("gta4-audio-biquad-verify", biquad_counters, base, regions, native,
+               [&] { __imp__sub_82936CE0(ctx, base); });
+}
+
+REX_HOOK_RAW(sub_82935BD0) {
+  const bool verify = REXCVAR_GET(gta4_native_audio_reverb_verify);
+  const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_reverb)) || !buffer || !Contiguous(self, 80) ||
+      !Contiguous(buffer, 24) || !gta4::audio::ReverbLengthsValid(base)) {
+    __imp__sub_82935BD0(ctx, base);
+    return;
+  }
+  const uint32_t channels = REX_LOAD_U8(buffer + 13), samples = REX_LOAD_U32(buffer + 20);
+  const auto native = [&] { gta4::audio::RunReverb(ctx, base, self, channels, samples); };
+  if (!verify) {
+    native();
+    ctx.r3.u64 = 0;
+    return;
+  }
+  std::vector<Region> regions;
+  const uint32_t mask = REX_LOAD_U8(self + 78);
+  uint32_t enabled = 0;
+  for (uint32_t channel = 0; channel < channels; ++channel) {
+    if (!gta4::audio::ChannelEnabled(mask, channel)) continue;
+    const uint32_t e4 = 4 * enabled++;
+    regions.push_back({samples + channel * kSampleBytes, kSampleBytes});
+    const uint32_t comb_positions = REX_LOAD_U32(REX_LOAD_U32(self + 16) + e4);
+    const uint32_t comb_buffers = REX_LOAD_U32(REX_LOAD_U32(self + 8) + e4);
+    const uint32_t allpass_positions = REX_LOAD_U32(REX_LOAD_U32(self + 48) + e4);
+    const uint32_t allpass_buffers = REX_LOAD_U32(REX_LOAD_U32(self + 44) + e4);
+    regions.push_back({comb_positions, 32});
+    regions.push_back({allpass_positions, 16});
+    regions.push_back({REX_LOAD_U32(REX_LOAD_U32(self + 12) + e4), 32});
+    for (uint32_t k = 0; k < 8; ++k)
+      regions.push_back({REX_LOAD_U32(comb_buffers + 4 * k) & ~0xFu,
+                         REX_LOAD_U32(gta4::audio::kReverbCombLengths + 4 * k) * 4 + 32});
+    for (uint32_t k = 0; k < 4; ++k)
+      regions.push_back({REX_LOAD_U32(allpass_buffers + 4 * k) & ~0xFu,
+                         REX_LOAD_U32(gta4::audio::kReverbAllpassLengths + 4 * k) * 4 + 32});
+  }
+  if (!AllContiguous(regions)) {
+    __imp__sub_82935BD0(ctx, base);
+    return;
+  }
+  VerifyEffect("gta4-audio-reverb-verify", reverb_counters, base, regions, native,
+               [&] { __imp__sub_82935BD0(ctx, base); });
+}
+
+REX_HOOK_RAW(sub_82934F00) {
+  const bool verify = REXCVAR_GET(gta4_native_audio_limiter_verify);
+  const uint32_t self = ctx.r3.u32, buffer = ctx.r4.u32;
+  if ((!verify && !REXCVAR_GET(gta4_native_audio_limiter)) || !buffer || !Contiguous(self, 660) ||
+      !Contiguous(buffer, 24)) {
+    __imp__sub_82934F00(ctx, base);
+    return;
+  }
+  const uint32_t channels = REX_LOAD_U8(buffer + 13), samples = REX_LOAD_U32(buffer + 20);
+  const bool lookahead = REX_LOAD_U8(self + 652) != 0;
+  const uint32_t mask = REX_LOAD_U8(self + 658);
+  std::vector<Region> regions;
+  if (lookahead && channels) regions.push_back({gta4::audio::kLimiterScratch, 1024});
+  for (uint32_t channel = 0; channel < channels; ++channel) {
+    if (!gta4::audio::ChannelEnabled(mask, channel) || (!lookahead && channel == 3)) continue;
+    regions.push_back({samples + channel * kSampleBytes, kSampleBytes});
+    if (lookahead) {
+      regions.push_back({self + 12 + 80 * channel, 80});
+      regions.push_back({self + 492 + 4 * channel, 4});
+    } else {
+      for (uint32_t offset : {516u, 540u, 564u}) regions.push_back({self + offset + 4 * channel, 4});
     }
-  v.mismatched_calls += mismatch;
-  if (v.calls % 1000 == 0)
-    REXLOG_INFO("gta4-audio-biquad-verify: calls={} mismatched-calls={}", v.calls, v.mismatched_calls);
+  }
+  if (!AllContiguous(regions)) {
+    __imp__sub_82934F00(ctx, base);
+    return;
+  }
+  const auto native = [&] { gta4::audio::RunLimiter(ctx, base, self, channels, samples); };
+  if (verify) {
+    VerifyEffect("gta4-audio-limiter-verify", limiter_counters, base, regions, native,
+                 [&] { __imp__sub_82934F00(ctx, base); });
+    return;
+  }
+  gta4::audio::RunLimiterTimed(ctx, base, self, channels, samples);
 }

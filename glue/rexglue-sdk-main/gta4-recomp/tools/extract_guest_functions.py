@@ -3,7 +3,8 @@
 
 Offline tests of native ports run the generated original next to the port on fake guest memory:
     extract_guest_functions.py <generated-dir> <output.cpp> name [name ...]
-The output includes gta4_init.h and holds each named function verbatim.
+The output includes gta4_init.h and holds each named function verbatim, plus every guest function
+they call directly (transitively), so the originals run as they do in the game.
 """
 import pathlib
 import re
@@ -12,20 +13,30 @@ import sys
 
 def main() -> int:
     generated, output, names = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3:]
-    wanted = {name: None for name in names}
     start = re.compile(r"^DEFINE_REX_FUNC\((\w+)\)")
+    call = re.compile(r"\b((?:sub_[0-9A-F]{8})|(?:__\w+))\(ctx, base\)")
+    bodies = {}
     for source in sorted(generated.glob("*.cpp")):
         lines = source.read_text().splitlines()
         i = 0
         while i < len(lines):
             m = start.match(lines[i])
-            if m and m.group(1) in wanted and wanted[m.group(1)] is None:
+            if m:
                 j = i + 1
                 while j < len(lines) and lines[j] != "}":
                     j += 1
-                wanted[m.group(1)] = "\n".join(lines[i:j + 1])
+                bodies.setdefault(m.group(1), "\n".join(lines[i:j + 1]))
                 i = j
             i += 1
+    wanted = {}
+    pending = list(names)
+    while pending:
+        name = pending.pop(0)
+        if name in wanted:
+            continue
+        wanted[name] = bodies.get(name)
+        if wanted[name] is not None:
+            pending += [c for c in call.findall(wanted[name]) if c not in wanted]
     missing = [n for n, body in wanted.items() if body is None]
     if missing:
         print(f"extract_guest_functions: not found: {' '.join(missing)}", file=sys.stderr)

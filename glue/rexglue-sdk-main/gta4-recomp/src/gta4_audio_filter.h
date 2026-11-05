@@ -61,6 +61,23 @@ inline float FlushDenormal(float v, float zero) {
   return (bits & 0x7F800000u) ? v : zero;
 }
 
+// The mixer effects' channel test: `slw 1,channel` on the channel index's low byte (a shift of
+// 32..63 gives 0; 64 and up wrap back onto the low bits), against a byte of enable bits.
+inline bool ChannelEnabled(uint32_t mask, uint32_t channel) {
+  const uint32_t c = channel & 0xFF;
+  return (c & 0x20) ? false : ((1u << (c & 0x1F)) & mask) != 0;
+}
+
+// How the ports are compared with the originals: equal words, or two NaNs. Which NaN a two-NaN
+// operation returns (ARM: the first operand's) follows the operand order clang picks for commutative
+// ops, in the generated original as much as in a port, so a NaN's sign and payload belong to neither;
+// whether a result is NaN does (IEEE), and nothing downstream reads a NaN's sign (fsel, the abs bit
+// clear, the denormal flush and the integer conversion treat every NaN alike).
+inline bool IsNanWord(uint32_t v) { return (v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu); }
+inline bool SameResultWord(uint32_t original, uint32_t native) {
+  return original == native || (IsNanWord(original) && IsNanWord(native));
+}
+
 inline uint32_t LoadBe32(const uint8_t* p) {
   return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
@@ -93,7 +110,7 @@ inline void Biquad256(uint8_t* samples, const float (&c)[5], float (&s)[4], bool
 
 // The whole of sub_82936CE0 on host views. Object (r3): +12..+28 coefficients b0 b1 b2 a1 a2,
 // +32/+36/+40/+44 guest pointers to the s0..s3 arrays (one float per enabled channel, in channel
-// order), +60 gain, +68 bypass, +74 channel-enable mask, +75 two sections. The voice buffer
+// order), +60 gain, +68 bypass, +74 channel-enable mask (ChannelEnabled), +75 two sections. The voice buffer
 // (r4, through sub_8218FB98) gives the channel count at +13 and the samples at +20, 1024 bytes a
 // channel. `state(i, k)` maps state array i's entry k to host memory; `samples(channel)` the same
 // for a channel's block. Returns the number of channels run.
@@ -106,8 +123,8 @@ uint32_t RunBiquadEffect(const uint8_t* object, uint32_t channels, float zero, S
   const bool cascade = object[75] != 0;
   const float gain = LoadBeFloat(object + 60);
   uint32_t k = 0;
-  for (uint32_t channel = 0; channel < channels && channel < 8; ++channel) {
-    if (!(mask & (1u << channel))) continue;
+  for (uint32_t channel = 0; channel < channels; ++channel) {
+    if (!ChannelEnabled(mask, channel)) continue;
     float s[4];
     for (int i = 0; i < 4; ++i) s[i] = LoadBeFloat(state(i, k));
     Biquad256(samples(channel), c, s, cascade, gain);
