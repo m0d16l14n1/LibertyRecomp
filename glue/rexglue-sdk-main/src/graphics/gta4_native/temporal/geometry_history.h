@@ -566,12 +566,14 @@ class GeometryHistory {
       if (claimed_.count(candidate.snapshot.get()) || candidate.key == key ||
           current_.count(candidate.key) || PreviousAmbiguous(candidate.key))
         continue;
-      // One pass gives both the world step and the full difference (all includes world_).
-      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
-      if (!Near(d)) {
+      // Near() reads only the world registers (at most four): test those first, so the many
+      // far candidates of a common shape skip the full pass over every register the shader
+      // reads. Same result as testing the full difference.
+      if (!Near(Distance(candidate.snapshot->vertex, vertex, false))) {
         ++statistics_.far_world;
         continue;
       }
+      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
       if (d.max_any > kMaximumConstantStep) {
         ++statistics_.far_register[(d.max_index / 4) % statistics_.far_register.size()];
         continue;

@@ -73,7 +73,7 @@ run_game() {  # <out folder> <flags...>
     *) ( sleep 4; osascript -e 'tell application "Liberty Recompiled" to activate' >/dev/null 2>&1 ) & ;;
   esac
   HOME="$throwaway" caffeinate -dimsu /usr/bin/time -l "$app" --diagnostics=true \
-    --diagnostics_categories=logging --log_file="$out/game.log" \
+    --diagnostics_categories="${DIAG_CATEGORIES:-logging}" --log_file="$out/game.log" \
     --gta4_metal_frame_log="$out/frames.csv" --gta4_pad_marks="$out/marks.csv" \
     --gta4_input_shots="$out/shots" "$@" > "$out/stdout.log" 2>&1 || true
   cp "$throwaway/Library/Application Support/LibertyRecomp/native.toml" "$out/native.toml" 2>/dev/null || true

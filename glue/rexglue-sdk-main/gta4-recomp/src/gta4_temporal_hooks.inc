@@ -8,6 +8,9 @@ struct Instance {
 };
 thread_local Instance instance;
 std::atomic<bool> enabled{false};
+// gta4_native_upscaler is fsr3 or dlss (their jitter comes from the provider). Set by Begin once a
+// frame, so the per-draw BeginOnExecution needs no cvar lookup by name.
+std::atomic<bool> provider_upscaler{false};
 std::atomic<uint32_t> primary_view{0};
 TemporalCommand scene{};
 // The scene the render thread began itself (BeginOnExecution); the scheduler's later Begin
@@ -73,6 +76,7 @@ void Begin(uint8_t* base, uint32_t device, uint32_t viewport) {
       gta4::temporal_boundary::DeclaredBoundary(base,device,next.sequence,
           viewport-gta4::temporal_boundary::kViewportOffset):gta4::temporal_boundary::Decision{};
   const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
+  provider_upscaler.store(upscaler == "fsr3" || upscaler == "dlss", std::memory_order_relaxed);
   if (upscaler == "fsr3" || upscaler == "dlss") {
     TemporalUpscalerResult provider;
     if (!QueryNativeTemporalUpscaler(next.output_width, next.output_height, next.sequence, provider) ||
@@ -158,12 +162,12 @@ void Event(TemporalEvent event) {
 // render thread begins the frame itself at its first scene-geometry draw, from the
 // previous scene's settings; the camera comes from the executed draws as before.
 void BeginOnExecution(uint32_t device, uint64_t sequence) {
-  if (!rex::cvar::Query<bool>("gta4_temporal_begin_on_execution")) return;
+  // Runs for every draw: no cvar lookups by name here (they were about 40% of temporal_host::Draw).
+  if (!REXCVAR_GET(gta4_temporal_begin_on_execution)) return;
   const uint32_t exec_flags = TemporalExecutionFlags(gta4::gpu_pass::current.attributed(),
                                                      gta4::gpu_pass::current.retail_phase);
   if (!(exec_flags & kTemporalSceneGeometry)) return;
-  const auto upscaler = rex::cvar::GetFlagByName("gta4_native_upscaler");
-  if (upscaler == "fsr3" || upscaler == "dlss") return;  // their jitter comes from the provider
+  if (provider_upscaler.load(std::memory_order_relaxed)) return;  // their jitter comes from the provider
   TemporalCommand next;
   {
     std::lock_guard lock(scene_mutex);
