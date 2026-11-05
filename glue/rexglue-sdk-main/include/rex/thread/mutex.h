@@ -57,6 +57,12 @@ class global_critical_region {
  public:
   static std::recursive_mutex& mutex();
 
+  // Whether the guest's "interrupts disabled" regions (mtmsrd r13 ... mtmsrd) go without this
+  // lock: the cvar guest_atomics_lock_free, read once and kept for the life of the process, so
+  // that a thread cannot enter a region with the lock and leave it without. See the macros in
+  // the code generator's init_h template (resources/templates/codegen/init_h.inja).
+  static bool guest_regions_lock_free();
+
   // Acquires a lock on the global critical section.
   // Use this when keeping an instance is not possible. Otherwise, prefer
   // to keep an instance of global_critical_region near the members requiring
