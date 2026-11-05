@@ -64,6 +64,28 @@ enum Catalogue {
         + "renders the same city route. Needs macOS 26 or later and falls back to Metal 3 otherwise. Metal 3 "
         + "stays the default while the CPU-bound comparison is finished.")
 
+    // Metal 4 test knobs (Advanced). They are read when the queue is created, so they take effect on the
+    // next start, and only with Command API = Metal 4.
+    static let metal4Residency = Setting("gta4_metal4_residency", "Residency", .choice([
+        c("Per command buffer (default)", s("frame")), c("Persistent queue set", s("persistent")),
+    ]), s("frame"),
+        "Frame builds a residency set for each command buffer; persistent keeps one queue-level set and drops "
+        + "an allocation after it has gone unused for a thousand command buffers. The Metal 4 guidance prefers "
+        + "the queue-level set for resources used every frame; frame is the conservative default until the A/B.")
+    static let metal4Barrier = Setting("gta4_metal4_render_barrier", "Render pass barrier", .choice([
+        c("Full (default)", s("full")), c("Fragment only (measurement)", s("fragment")), c("Tracked", s("tracked")),
+    ]), s("full"),
+        "What a render pass waits for at its start. Full waits for every earlier stage before vertex and "
+        + "fragment. Fragment lets vertex work overlap earlier passes (measurement only: it is not safe for "
+        + "vertex-stage reads). Tracked waits for fragment after render-only work and for everything after "
+        + "compute, copies or a Metal 3 hop, adding a vertex barrier when a draw samples an earlier attachment.")
+    static let metal4Lean = Setting("gta4_metal4_lean_tracking", "Lean residency tracking", .toggle, on(false),
+        "With persistent residency, stop retaining resources the queue set already holds and take indexed "
+        + "draws' index addresses from the bind cache. Only meaningful with Persistent queue set.")
+    static let metal4PassTiming = Setting("gta4_metal4_pass_timing", "GPU pass timing", .toggle, on(false),
+        "Write a GPU timestamp before every encoder and log the time of each pass label (gta4-metal4-passes). "
+        + "Adds GPU work; use it for a diagnosis, not for play.")
+
     static let resolution = Setting("resolution", "Output resolution", .choice([
         c("Automatic", s("")), c("720p", s("720p")), c("1080p", s("1080p")), c("1440p", s("1440p")), c("4K", s("4k")),
     ]), s(""),

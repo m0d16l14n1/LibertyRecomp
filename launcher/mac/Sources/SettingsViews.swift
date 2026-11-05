@@ -310,6 +310,8 @@ struct AdvancedView: View {
     @State private var confirmCache = false
     @State private var cacheNote: String?
 
+    private var metal4: Bool { (launcher.value("gta4_metal_api")?.asString ?? "metal3") == "metal4" }
+
     var body: some View {
         Page(title: "Advanced", subtitle: "Files, logs, the shader cache, and options for testing.") {
             Card(title: "When the game starts") {
@@ -347,6 +349,16 @@ struct AdvancedView: View {
                 Choice(label: "Information (default)", value: .string("info")), Choice(label: "Debug (large)", value: .string("debug")),
             ]), .string("info"), "How much the game writes to its log. Warnings and errors always go to the errors log.")])
             SettingsCard(title: "Audio", settings: Catalogue.audio)
+            Card(title: "Metal 4 (testing)", footer: "These take effect on the next start, and only with "
+                 + "Graphics > Renderer > Command API set to Metal 4. The defaults are the conservative path.") {
+                SettingRow(setting: Catalogue.metal4Residency, disabled: !metal4)
+                Divider()
+                SettingRow(setting: Catalogue.metal4Barrier, disabled: !metal4)
+                Divider()
+                SettingRow(setting: Catalogue.metal4Lean, disabled: !metal4)
+                Divider()
+                SettingRow(setting: Catalogue.metal4PassTiming, disabled: !metal4)
+            }
             Card(title: "More options for the game", footer: "Command-line options the game gets when it starts from the launcher, "
                  + "for example --diagnostics=true or --gta4_metal_frame_log=/tmp/frames.csv. Separate them with spaces. "
                  + "Options given here are not saved into the settings file.") {
