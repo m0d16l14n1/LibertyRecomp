@@ -289,15 +289,20 @@ kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write>
  constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
  constexpr sampler linear_sampler(coord::normalized,address::clamp_to_edge,filter::linear);
  const float2 uv=(float2(id)+0.5f)*c.output_texel;
+ // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
+ // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
+ float weight=smoothstep(0.5f,0.9f,reactive.sample(nearest,uv).r);
+ // Edge repair is off (gta4_metalfx_frame_generation_repair_px = 0, sent as threshold 65504):
+ // the ring search below cannot raise the weight then ((dm - 65504) / 65504 saturates to 0),
+ // so a pixel without a strong reactive value is done. The search was ~8 ms per 1440p frame.
+ const bool edges=c.threshold<60000.0f;
+ if(!edges && weight<=0)return;
  const float z0=depth.sample(nearest,uv).r;
  if(!temporal_valid_depth(z0))return;
  const float v0=temporal_view_depth(z0,c.near_plane,c.far_plane,c.reversed!=0);
  const float2 m0=motion.sample(nearest,uv).xy*c.motion_scale;
- // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
- // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
- float weight=smoothstep(0.5f,0.9f,reactive.sample(nearest,uv).r);
  const float distances[4]={2,6,14,30};
- for(uint ring=0;ring<4;++ring)for(uint k=0;k<8;++k){
+ if(edges)for(uint ring=0;ring<4;++ring)for(uint k=0;k<8;++k){
   const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
   const float2 tap=uv+float2(cos(angle),sin(angle))*distances[ring]*c.input_texel;
   const float z=depth.sample(nearest,tap).r;

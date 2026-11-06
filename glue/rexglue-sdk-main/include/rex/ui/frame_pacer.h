@@ -209,20 +209,20 @@ class FramePublicationGate {
   // waits until the previous publication is admitted (shown), so the producer may
   // render the next frame meanwhile but never overwrites an unshown one.
   // A generated pair is admitted when its generated frame is submitted, and accepted
-  // when its real frame is; a frame after a pair waits for the pair's real frame.
-  // With frame generation the producer used to wait after each publish until the
-  // generated frame was submitted (up to a refresh period, 12-18 ms median when
-  // CPU-bound) before it could start the next frame.
+  // when its real frame is. A frame after a pair waits only for the admission: once the
+  // generated frame is out, the presenter holds the pair's real image itself (its
+  // pending pair, not the mailbox), so the next publication cannot replace it.
+  // Waiting for the real frame instead serialised the pair's display with the next
+  // frame's GPU work: with ~25 ms of GPU per real frame on a 60 Hz panel each pair took
+  // three refreshes (20 real fps, 38 ms median wait here) instead of two.
   bool WaitBeforePublish(uint32_t fps, bool paired, uint32_t ahead) {
     std::unique_lock lock(mutex_);
     // Hidden: the handoff wait after publishing already paces at its slow watchdog.
     if (!ahead || hidden_ || (!fps && !paired && !previous_paired_)) return true;
     const uint64_t epoch = epoch_, previous = published_;
-    const bool whole_pair = previous_paired_;
     const uint64_t watchdog = WatchdogNs(fps);
     return condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
-      return stopped_ || !available_ || epoch_ != epoch ||
-             (whole_pair ? accepted_ : admitted_) >= previous;
+      return stopped_ || !available_ || epoch_ != epoch || admitted_ >= previous;
     });
   }
   static constexpr uint64_t kHiddenWatchdogNs = 500'000'000;

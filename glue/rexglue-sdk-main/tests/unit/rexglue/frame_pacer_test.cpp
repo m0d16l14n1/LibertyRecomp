@@ -342,21 +342,18 @@ TEST_CASE("Metal software wakeups never consume future or canceled deadlines", "
   pending.Reset(); REQUIRE(pending.Request(UINT64_MAX - 2, UINT64_MAX));
   CHECK(pending.due() == UINT64_MAX); CHECK(pending.Consume(UINT64_MAX));
 }
-TEST_CASE("A generated pair runs one frame ahead but is never replaced before its real frame", "[frame-pacer]") {
+TEST_CASE("A generated pair runs one frame ahead and releases the producer once its generated frame is out", "[frame-pacer]") {
   FramePublicationGate g;g.SetAvailable(true);
   auto pair=g.Publish(60,true,1);
   REQUIRE(g.Wait(pair));                        // the producer goes on to the next frame
   auto next_ready=std::async(std::launch::async,[&]{return g.WaitBeforePublish(60,true,1);});
-  REQUIRE(next_ready.wait_for(5ms)==std::future_status::timeout);
-  g.Admit(pair);                                // generated frame submitted: not enough
-  REQUIRE(next_ready.wait_for(5ms)==std::future_status::timeout);
-  g.Accept(pair);                               // real frame submitted
+  REQUIRE(next_ready.wait_for(5ms)==std::future_status::timeout);  // nothing of the pair shown yet
+  g.Admit(pair);                                // generated frame submitted: the presenter holds the real one
   REQUIRE(next_ready.wait_for(100ms)==std::future_status::ready);REQUIRE(next_ready.get());
-  // An ordinary frame after a pair also waits for the pair's real frame, even uncapped.
+  // An ordinary frame after a pair also waits for the pair's generated frame, even uncapped.
   auto second=g.Publish(0,true,1);
   auto plain=std::async(std::launch::async,[&]{return g.WaitBeforePublish(0,false,1);});
-  g.Admit(second);
   REQUIRE(plain.wait_for(5ms)==std::future_status::timeout);
-  g.Accept(second);
+  g.Admit(second);
   REQUIRE(plain.wait_for(100ms)==std::future_status::ready);REQUIRE(plain.get());
 }
