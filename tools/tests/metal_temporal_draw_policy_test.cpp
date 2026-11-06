@@ -4,8 +4,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <vector>
 #include <limits>
+#include <string_view>
+#include <vector>
 #include <rex/graphics/gta4_native/temporal_commands.h>
 #include "graphics/gta4_metal/temporal/composite_contract.h"
 #include "graphics/gta4_metal/temporal/draw_policy.h"
@@ -115,7 +116,7 @@ void GeometrySiblings() {
     }
     const auto statistics=h.TakeStatistics();
     CHECK(statistics.sibling==8&&statistics.sibling_ambiguous==0);
-    CHECK(h.Begin(1,1,3,false));  // and the frame after, from the new poses
+    CHECK(h.Begin(1,1,5,false));  // selected mailbox IDs may jump; the poses are consecutive
     for(size_t w=0;w<4;++w)
       CHECK(same(h.Record(key(100),bank(0.4f,w,0.1f*w+0.8f,9),shared,{}),bank(0.2f,w,0.1f*w+0.4f,5)));
   }
@@ -451,11 +452,13 @@ void DeclaredBoundaries() {
   CHECK(!registry.Find(1,1,11));
   registry.Composite(1,1,21,31,true);
   CHECK(registry.Find(1,1,11).composite_phase==31);
-  CHECK(!registry.Find(1,2,11));
+  CHECK(registry.Find(1,2,11).composite_phase==31);
+  CHECK(std::string_view(registry.Find(1,2,11).reason)==
+        "previous exact title boundary remains eligible");
   CHECK(!registry.Find(2,1,11));
   CHECK(!registry.Find(1,1,12));
   registry.Composite(1,2,21,31,true);
-  CHECK(!registry.Find(1,2,11));
+  CHECK(registry.Find(1,2,11).composite_phase==31);
   registry.GBuffer(1,2,11,21);
   CHECK(registry.Find(1,2,11).composite_phase==31);
   registry.GBuffer(1,3,11,21);
@@ -479,11 +482,26 @@ void DeclaredBoundaries() {
   Registry full;
   for(uint32_t i=1;i<=129;++i){full.GBuffer(1,1,i,i);full.Composite(1,1,i,i,true);}
   CHECK(!full.Find(1,1,1));
-  // An old worker observation may remove admission, but never borrows the
-  // newer frame's boundary for an older frame or vice versa.
+  // Adjacent scheduler workers may report out of order. Both exact records
+  // remain usable, and neither can borrow the other's boundary.
   registry.Composite(1,5,21,31,true);
-  CHECK(!registry.Find(1,6,11));
-  CHECK(!registry.Find(1,5,11));
+  CHECK(registry.Find(1,6,11).composite_phase==32);
+  CHECK(!registry.Find(1,5,11));  // its deliberately conflicting GBuffer stays rejected
+  Registry interleaved;
+  interleaved.GBuffer(1,20,11,21);
+  interleaved.GBuffer(1,21,11,22);
+  interleaved.Composite(1,21,22,32,true);
+  interleaved.Composite(1,20,21,31,true);
+  CHECK(interleaved.Find(1,20,11).composite_phase==31);
+  CHECK(interleaved.Find(1,21,11).composite_phase==32);
+  CHECK(!interleaved.Find(1,20,12));
+  // Retention is bounded; sufficiently old records fail closed.
+  for(uint64_t sequence=22;sequence<30;++sequence){
+    interleaved.GBuffer(1,sequence,11,21);
+    interleaved.Composite(1,sequence,21,31,true);
+  }
+  CHECK(!interleaved.Find(1,20,11));
+  CHECK(interleaved.Find(1,29,11).composite_phase==31);
 }
 }  // namespace
 int main(){GeometryBindings();RigidDeformationClassification();GeometrySiblings();GeometryReadMask();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();

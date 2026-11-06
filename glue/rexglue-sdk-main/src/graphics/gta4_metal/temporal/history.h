@@ -88,9 +88,13 @@ class History {
         relative_jump(f.aspect, previous_.aspect, 0.02f) ||
         relative_jump(f.near_plane, previous_.near_plane, 0.10f) ||
         relative_jump(f.far_plane, previous_.far_plane, 0.10f);
+    // The renderer consumes a latest-image mailbox. At a 30 Hz frame-generation
+    // cadence the title can submit two frames before the next one is selected,
+    // so submitted IDs legitimately jump while these are still consecutive
+    // temporal samples. Monotonic identity and elapsed time above establish the
+    // real continuity; requiring +1 reset MetalFX on nearly every real frame.
     if (f.camera_cut || f.color_domain != previous_.color_domain ||
-        previous_.sequence == UINT64_MAX || f.sequence != previous_.sequence + 1 ||
-        seconds > 0.25f || projection_cut)
+        previous_.sequence == UINT64_MAX || seconds > 0.25f || projection_cut)
       return {true, true, seconds, "history discontinuity"};
     return {true, false, seconds, {}};
   }

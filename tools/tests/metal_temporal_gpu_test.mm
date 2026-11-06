@@ -253,6 +253,9 @@ void HistoryTests() {
   auto next = MakeFrame(2);
   Check(h.Inspect(next).accepted && !h.Inspect(next).reset,
         "continuous frame reset");
+  auto mailbox_jump = MakeFrame(4);
+  Check(h.Inspect(mailbox_jump).accepted && !h.Inspect(mailbox_jump).reset,
+        "selected mailbox frame ID jump reset history");
   auto animated_projection = next;
   animated_projection.field_of_view += 4.5f;
   animated_projection.near_plane *= 1.001f;
@@ -308,7 +311,7 @@ void HistoryTests() {
     }
     Check(!h.Inspect(bad).accepted, "invalid temporal metadata accepted");
   }
-  for (int field = 0; field < 6; ++field) {
+  for (int field = 0; field < 5; ++field) {
     auto cut = next;
     switch (field) {
     case 0:
@@ -321,12 +324,9 @@ void HistoryTests() {
       cut.view = 2;
       break;
     case 3:
-      cut.sequence = 3;
-      break;
-    case 4:
       cut.time_ns += 1000000000;
       break;
-    case 5:
+    case 4:
       cut.field_of_view = 70;
       break;
     }

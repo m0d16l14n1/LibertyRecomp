@@ -155,8 +155,11 @@ class GeometryHistory {
     if (!epoch || !view || !sequence || epoch < epoch_) return false;
     if (epoch == epoch_ && view == view_ && sequence == sequence_) return !reset;
     if (epoch == epoch_ && view == view_ && sequence < sequence_) return false;
-    const bool continuous = !reset && epoch == epoch_ && view == view_ && sequence_ != UINT64_MAX &&
-                            sequence == sequence_ + 1;
+    // Submitted frame IDs may jump when the renderer's latest-image mailbox
+    // coalesces frames (especially with frame generation capped to half the
+    // display refresh). Begin is called once per selected scene, so any newer
+    // ID in the same view/epoch is the next geometry sample we rendered.
+    const bool continuous = !reset && epoch == epoch_ && view == view_ && sequence_ != UINT64_MAX;
     // `matched` serves repeats within the frame that recorded it; dropping it here lets the
     // snapshots it names (now two frames old) return to the pool.
     for (auto& [key, entry] : current_) entry.matched.reset();
