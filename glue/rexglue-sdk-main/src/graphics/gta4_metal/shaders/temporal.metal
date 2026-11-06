@@ -402,6 +402,7 @@ kernel void liberty_temporal_scaler_reactive(texture2d<float,access::read> react
 kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write> generated [[texture(0)]],
  texture2d<float> scene [[texture(1)]],texture2d<float> motion [[texture(2)]],texture2d<float> depth [[texture(3)]],
  texture2d<float> repair_weight [[texture(4)]],
+ texture2d<float> true_motion [[texture(5)]],texture2d<float> reactive [[texture(6)]],
  constant TemporalRepairConstants& c [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
  if(id.x>=generated.get_width() || id.y>=generated.get_height())return;
  constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
@@ -414,7 +415,18 @@ kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write>
  const float2 m0=warp.xy*c.motion_scale;
  if(warp.z>0.5f){
   // Replaced whole: a blend with the interpolator's own wheel at the edge left a see-through ring.
-  generated.write(temporal_finite(scene.sample(linear_sampler,uv-0.5f*m0*c.output_texel)),id);
+  // Half a step of spin as well: where the rigid warp lands on the wheel, its true motion minus the
+  // rigid one is that point's spin. The spin field is smooth across a wheel, so the whole wheel
+  // turns by half a step (spokes no longer advance only on real frames). Capped, so a fast wheel
+  // cannot fetch from far away.
+  float2 source=uv-0.5f*m0*c.output_texel;
+  if(liberty_tyre_marker(reactive.sample(nearest,source).r)){
+   float2 spin=true_motion.sample(nearest,source).xy*c.motion_scale-m0;
+   const float cap=12.0f*c.motion_scale.x,length_spin=length(spin);
+   if(isfinite(length_spin)&&length_spin>cap)spin*=cap/length_spin;
+   if(all(isfinite(spin)))source-=0.5f*spin*c.output_texel;
+  }
+  generated.write(temporal_finite(scene.sample(linear_sampler,source)),id);
   return;
  }
  const float z0=depth.sample(nearest,uv).r;

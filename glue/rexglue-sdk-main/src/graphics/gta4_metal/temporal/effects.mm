@@ -1161,6 +1161,8 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       [encoder setTexture:s.repair_motion atIndex:2];
       [encoder setTexture:in.depth atIndex:3];
       [encoder setTexture:s.repair_weights atIndex:4];
+      [encoder setTexture:in.motion atIndex:5];
+      [encoder setTexture:in.reactive atIndex:6];
       [encoder setBytes:&c length:sizeof(c) atIndex:0];
       const NSUInteger w = s.repair.threadExecutionWidth,
                        h = std::max<NSUInteger>(
