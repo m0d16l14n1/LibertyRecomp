@@ -81,6 +81,15 @@ acceleration-structure path is covered by `rex-metal-raytracing-structures-test`
   colour formats, write masks and blending are left open, 14% fewer compiles. With the archive and
   the bundled seed, first-sight compiles are already rare (0-2 frames over 4 ms per 3-minute drive,
   BACKLOG 89), so moving to `MTL4Compiler` for this alone is not worth the risk.
+- **Render-thread profile, 2026-11-06** (career city drive, metal4, persistent residency, lean
+  tracking, draw distance 2.0, 10 s `sample`): Metal-side work is 17.7% of the render thread, and most
+  of it is Apple's driver: indexed draws 3.7% (of which our index-address lookup 0.7%), command
+  buffer commit 2.3% (`preCommit`, about 1.8 commits per frame), render encoder creation 2.0% (about
+  110 encoders per frame), argument-table setters ~3%. Per frame: ~20,000 binds with a 90% bind-cache
+  hit rate, ~2 residency batches. The proxy's own bookkeeping (`track:`, `persist:`, bind cache,
+  transient bytes) is about 3% of the thread; the rest is the game's recompiled code and our draw
+  translation. Further Metal 4 CPU gains need fewer encoders (merging passes) or fewer draws, not
+  proxy work.
 - **Known fault:** on macOS 27.2, `MTL4CompilerTask` (asynchronous builds) with a pipeline data set
   serializer attached faulted in another port; synchronous `MTL4Compiler` calls on a GCD queue worked.
   Any move to `MTL4Compiler` uses synchronous calls on our own queue.

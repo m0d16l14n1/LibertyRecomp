@@ -174,6 +174,17 @@ detail without crawling, and the GPU time against `native` (4x AO rays, one Meta
 four of ours plus the scaler). Things to tune if the image is wrong (check with `_ao_view = guides`): the normal
 swizzle, and the matrix handedness (D3D view space looks down +z).
 
+### Measured (2026-11-06, M5 Air, metal4, career city drive, 1440p MetalFX TAA performance)
+
+| denoiser | GPU cost | drive fps |
+|---|---|---|
+| `native` | structures 0.69 ms, trace 0.21 ms, filters ~0.09 ms (~1 ms total) | 61.1 |
+| `metalfx` | denoised scaler 8.7 ms per frame | 32.2 |
+
+Both images were correct (AO contact shadows, no crawl). The MetalFX denoised scaler costs about as
+much as the rest of the frame on an M5 Air, so `native` stays the default and the recommendation;
+`metalfx` is for larger GPUs.
+
 ## Open questions (need a diagnostic run)
 
 1. G-buffer formats and per-channel contents: the ambient-scale channel, normal encoding, depth
