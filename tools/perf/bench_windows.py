@@ -26,6 +26,10 @@ def main():
     print(f"{'window':<10} {'s':>5} {'fps':>6} {'p50ms':>6} {'p95ms':>6} {'p99ms':>6} {'>25ms':>6} "
           f"{'gpu':>5} {'gpu95':>6} {'submit':>6} {'draws':>5} {'pipes':>5} {'pwait':>6}")
     if action_bench:
+        game_log = folder / "game.log"
+        if game_log.exists() and "window covered: frames paced at 2 fps" in game_log.read_text(
+                errors="replace"):
+            action_failures.append("environment: game window was covered and throttled to 2 fps")
         for name in action_windows:
             if name not in marks or name + "_end" not in marks:
                 action_failures.append(f"{name}: missing marks")
