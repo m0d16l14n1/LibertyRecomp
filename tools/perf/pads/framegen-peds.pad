@@ -18,7 +18,13 @@ set gta4_metalfx_frame_generation_dump_max 30
 mark framegen
 trigger lt 1
 stick rx 0.35 8s
+# Capture the source scene and reconstructed result across the aim-camera
+# release. This transition is a hostile close-player disocclusion case.
+set gta4_temporal_snapshot {out}/temporal
+set gta4_temporal_snapshot_every 1
+set gta4_temporal_snapshot_max 8
 release all
+wait 500ms
 mark framegen_end
 shot {out}/shots/framegen-peds-end.png 0.5
 wait 1s
