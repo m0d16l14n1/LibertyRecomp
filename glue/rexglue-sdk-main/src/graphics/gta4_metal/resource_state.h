@@ -1,6 +1,7 @@
 #include "material_binding.h"
 #pragma once
 #include "resources.h"
+#include "vertex_conversion_plan.h"
 #include "sampler_key.h"
 #include "texture_preparation.h"
 #include "../gta4_native/native_reflection_registry.h"
@@ -124,6 +125,16 @@ struct ResourceStore::State {
   size_t vertex_conversion_bytes = 0;
   size_t vertex_conversion_budget_bytes = 0;
   uint64_t vertex_conversion_hits = 0, vertex_conversion_misses = 0;
+  // VertexBuffer's correction plan and its hash depend only on the declaration definition, the
+  // vertex shader's attribute layout, the stream and the stride: memoised per bind instead of
+  // rebuilt (declaration elements x shader attributes, then hashed) for every stream of every draw.
+  struct CorrectionMemo {
+    uint64_t declaration = 0, shader = 0;
+    uint32_t stream = UINT32_MAX, stride = 0;
+    uint64_t key = 0;
+    VertexCorrectionPlan plan;
+  };
+  std::array<CorrectionMemo, 256> correction_memo{};
   uint64_t vertex_conversion_evictions = 0;
   void InstallTexture(uint32_t handle, std::shared_ptr<TextureResource> value);
   void InstallSurface(uint32_t handle, std::shared_ptr<SurfaceResource> value);

@@ -188,7 +188,7 @@ uint64_t ResourceStore::CapturedBufferGeneration(uint32_t handle) const {
 
 id<MTLBuffer> ResourceStore::VertexBuffer(uint32_t handle,const VertexDeclaration& declaration,
     const ShaderMetadata& shader,uint32_t stream,uint32_t offset,uint32_t stride,std::string& error) {
-  @autoreleasepool {
+  {
     error.clear();
     if (!stride || stream>=gta4_native::kVertexStreamCount) { error="Invalid vertex stream"; return nil; }
     auto* source=state_->CaptureBuffer(handle,error); if (!source) return nil;
@@ -200,11 +200,18 @@ id<MTLBuffer> ResourceStore::VertexBuffer(uint32_t handle,const VertexDeclaratio
       attributes[i] = {shader.attributes[i].semantic_location, shader.attributes[i].scalar_type};
     struct Inputs {std::span<const Input> vertex_inputs;} inputs{{attributes.data(), shader.attribute_count}};
     if(declaration.elements.size()>gta4_native::kMaximumVertexElementCount){error="Vertex declaration exceeds its bound";return nil;}
-    const auto plan=VertexCorrections(declaration,shader,stream,stride);
+    auto& memo=state_->correction_memo[(declaration.identity*0x9E3779B97F4A7C15ull^shader.hash^(uint64_t(stream)<<56)^stride)>>56];
+    if(memo.declaration!=declaration.identity||memo.shader!=shader.hash||memo.stream!=stream||memo.stride!=stride||!declaration.identity){
+      memo.plan=VertexCorrections(declaration,shader,stream,stride);
+      const auto values=memo.plan.values();
+      memo.key=values.empty()?0:XXH3_64bits(values.data(),values.size_bytes());
+      memo.declaration=declaration.identity;memo.shader=shader.hash;memo.stream=stream;memo.stride=stride;
+    }
+    const auto& plan=memo.plan;
     // Shader/declaration identities do not alter bytes. Only effective ordered
     // correction operations do. Hash collisions always receive an exact check.
     const auto steps=plan.values();
-    const uint64_t key_declaration=steps.empty()?0:XXH3_64bits(steps.data(),steps.size_bytes());
+    const uint64_t key_declaration=memo.key;
     uint64_t key_shader=0;const uint32_t key_stream=0;
     const uint32_t key_offset=steps.empty()?0:offset,key_stride=steps.empty()?0:stride;
     State::ConversionKey key;
@@ -219,6 +226,7 @@ id<MTLBuffer> ResourceStore::VertexBuffer(uint32_t handle,const VertexDeclaratio
       return converted.buffer;
     }
     ++state_->vertex_conversion_misses;
+    @autoreleasepool {  // only a miss creates Metal objects
     auto buffer=[state_->context->device newBufferWithLength:source->payload.size()
         options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeDefaultCache];
     if (!buffer) { error="Metal vertex allocation failed"; return nil; }
@@ -243,6 +251,7 @@ id<MTLBuffer> ResourceStore::VertexBuffer(uint32_t handle,const VertexDeclaratio
     state_->vertex_conversion_budget_bytes += allocated_bytes + metadata_charge;
     state_->resident_buffer_bytes += allocated_bytes;
     return buffer;
+    }
   }
 }
 
