@@ -15,11 +15,20 @@ namespace rex::graphics::gta4_metal::temporal {
 // is a generic gta_default / gta_normal_spec variant (notably Niko's materials).
 // A name-only gta_ped test therefore misses parts of the player and lets MetalFX
 // blend incompatible poses into a doubled silhouette.
+//
+// The rigid treatment also marks the draw fully reactive in the one mask the MetalFX temporal
+// scaler reads, so the scaler stops accumulating there, and it hands the scaler motion without
+// the deformation. Over Niko, peds and whole car bodies (bone-palette shaders) that is a large
+// share of the frame showing raw jittered samples: the shimmer on characters and cars with frame
+// generation on. `wheels_only` limits it to tires, where spinning spokes are what the
+// interpolator cannot handle; peds keep their real skinned motion and accumulate normally.
 constexpr bool IsRigidDeformationShader(std::string_view name,
-                                        const std::array<uint64_t, 4>& reads) {
+                                        const std::array<uint64_t, 4>& reads,
+                                        bool wheels_only = false) {
+  if (name.find("gta_vehicle_tire") != name.npos) return true;
+  if (wheels_only) return false;
   const bool bone_palette = reads[2] == ~uint64_t{0} && reads[3] == ~uint64_t{0};
-  return name.find("gta_vehicle_tire") != name.npos ||
-         name.find("gta_ped") != name.npos || bone_palette;
+  return name.find("gta_ped") != name.npos || bone_palette;
 }
 inline float MaterialMipBias(const Configuration& config, bool scene_material) {
   if (!scene_material || config.method != Method::kMetalFx || !ValidConfiguration(config) ||

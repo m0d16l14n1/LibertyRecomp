@@ -453,7 +453,8 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       temporal_generation_rigid_deformation&&
       temporal_vertex!=shaders.end()&&
       temporal::IsRigidDeformationShader(temporal_vertex_name,
-                                         temporal_vertex->second.float_constant_mask);
+                                         temporal_vertex->second.float_constant_mask,
+                                         temporal_generation_rigid_wheels_only);
   if((requested_colors&7u)==7u&&fixed.depth_enable&&fixed.depth_write_enable){
     if(!temporal.active)++gbuffer_inactive;
     else if(!temporal_extent){++gbuffer_off_extent;gbuffer_last_w=targets.width;gbuffer_last_h=targets.height;}

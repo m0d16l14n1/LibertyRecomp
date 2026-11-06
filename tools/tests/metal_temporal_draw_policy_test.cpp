@@ -74,6 +74,12 @@ void RigidDeformationClassification() {
   CHECK(temporal::IsRigidDeformationShader("shader/gta_default/gta_default_vs5.bin",palette));
   CHECK(temporal::IsRigidDeformationShader("shader/gta_normal_spec/gta_normal_spec_vs4.bin",palette));
   CHECK(!temporal::IsRigidDeformationShader("shader/gta_default/gta_default_vs5.bin",ordinary));
+  // Wheels only (the default scope): peds and bone-palette bodies keep real motion and
+  // stay out of the scaler's reactive mask.
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_vehicle_tire/vs.bin",ordinary,true));
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_vehicle_tire/vs.bin",palette,true));
+  CHECK(!temporal::IsRigidDeformationShader("shader/gta_ped/vs.bin",ordinary,true));
+  CHECK(!temporal::IsRigidDeformationShader("shader/gta_default/gta_default_vs5.bin",palette,true));
 }
 // gta_vehicle_tire VS_VehicleTransformD reads matWheelTransform at c64-c67; c0-c3 still holds
 // the body gWorld, so every wheel of one car shares the unscoped owner key.

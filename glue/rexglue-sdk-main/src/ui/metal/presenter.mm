@@ -367,9 +367,9 @@ void MetalPresenter::PollPresentationTiming() {
         const double mean = w.intervals ? w.sum_ms / w.intervals : 0;
         const double sd = w.intervals ? std::sqrt(std::max(0.0, w.sum_sq_ms / w.intervals - mean * mean)) : 0;
         REXLOG_INFO("gta4-metal-display shown-fps={:.1f} real={} generated={} not-displayed={} "
-                    "interval-ms mean={:.2f} sd={:.2f} max={:.1f} long={} over={:.1f}s",
+                    "interval-ms mean={:.2f} sd={:.2f} max={:.1f} long={} over={:.1f}s spatial-encodes={}",
                     (w.real + w.generated) / seconds, w.real, w.generated, w.missed, mean, sd, w.max_ms,
-                    w.long_intervals, seconds);
+                    w.long_intervals, seconds, state_->spatial.encodes());
         w = {}; w.start_ns = value.actual_host_ns;
       }
     }
@@ -748,6 +748,16 @@ Presenter::PaintResult MetalPresenter::PaintAndPresentImpl(bool execute_ui_drawe
           source = upscaled;
         } else if (!error.empty()) {
           REXLOG_ERROR("gta4-metal: {}", error); error.clear();
+        } else {
+          // Not an error, but say once why the setting has no effect (usually: the window is not
+          // larger than the game image, so there is nothing to upscale).
+          static bool reported = false;
+          if (!reported) {
+            reported = true;
+            REXLOG_INFO("gta4-metal: MetalFX spatial upscaling skipped: source {}x{} format {} -> output {}x{} "
+                        "(it only upscales to a larger output; set a lower `resolution` or use fullscreen)",
+                        source.width, source.height, uint32_t(source.pixelFormat), extent.first, extent.second);
+          }
         }
       } else if (!metalfx_spatial) {
         state_->spatial.Reset();

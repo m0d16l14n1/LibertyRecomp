@@ -30,6 +30,16 @@ the 60 shown frames the game nearly reaches without generation, at half the inpu
 interpolator itself is 5.8-6.6 ms of GPU at 2560x1440 output and the sharpen pass 1.2 ms. Generation
 only makes sense on a 120 Hz panel, or when the real rate is well under 30.
 
+Shimmer on Niko, peds and cars with generation on (fixed the same day): the rigid-deformation
+treatment (`gta4_metalfx_frame_generation_rigid_deformation`) covered `gta_ped` and every
+bone-palette shader, which includes Niko's generic materials and whole car bodies. It writes reactive
+1.0 into the one mask the MetalFX *temporal scaler* also reads, and strips the deformation from the
+motion the scaler gets, so those objects were shown from raw jittered samples. Snapshots of the
+action pad: 6-40% of the frame at reactive > 0.5 (Niko and the player's car pure white in the mask).
+`gta4_metalfx_frame_generation_rigid_scope = wheels` (new default) keeps it to tires: 0-2% outside
+explosions, Metal API validation clean on Metal 3 and Metal 4, generated frames keep the car intact
+on a hard turn (no doubled silhouette). `all` restores the old scope.
+
 Unrelated to generation but found on the way: with `MetalForceHudEnabled` set for every app (this
 Mac) and `gta4_performance_hud = system`, Apple's HUD hooks every encoder; vsync drive 42.8 fps
 with it, 49.8 with `gta4_performance_hud = off`.

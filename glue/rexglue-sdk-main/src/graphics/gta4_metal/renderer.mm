@@ -42,6 +42,12 @@ REXCVAR_DEFINE_DOUBLE(gta4_temporal_reactive_strength, 0.10, "GPU",
     "Maximum MetalFX history rejection for alpha/additive scene layers (glass, reflections, signs and lights); invalid geometry still rejects history fully");
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_rigid_deformation, true, "GPU",
     "Frame generation: use rigid-object motion for spinning vehicle tires and skeletal peds; avoids disappearing or double-exposed spokes and limbs");
+REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_rigid_scope, "wheels", "GPU",
+    "Which draws get the rigid frame-generation treatment: wheels (tires only) or all (also peds and "
+    "bone-palette shaders, which covers Niko and whole car bodies). Those draws are fully reactive to "
+    "the MetalFX temporal scaler and lose their deformation motion, so `all` makes characters and cars "
+    "shimmer under upscaling")
+    .allowed({"wheels", "all"});
 REXCVAR_DEFINE_BOOL(gta4_temporal_history_vertex_textures, true, "GPU", "Give draws whose vertex shader reads a texture motion history (previous position from this frame's texture)");
 REXCVAR_DEFINE_UINT32(gta4_metal_split_commit_draws, 0, "GPU", "Commit the frame's first part to the GPU once this many draws are encoded (at a render-pass break; once a frame; 0 = one command buffer a frame)");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_encoder_state, true, "GPU", "Reuse unchanged state in one Metal encoder");
@@ -270,6 +276,8 @@ bool Renderer::State::Begin(std::string& error) {
   temporal_reactive_log = rex::cvar::Query<bool>("gta4_temporal_reactive_log");
   temporal_generation_rigid_deformation =
       rex::cvar::Query<bool>("gta4_metalfx_frame_generation_rigid_deformation");
+  temporal_generation_rigid_wheels_only =
+      rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_rigid_scope") != "all";
   {
     const auto trace=rex::cvar::GetFlagByName("gta4_temporal_trace_vs");
     temporal_trace_vs=trace.empty()?0:std::strtoull(trace.c_str(),nullptr,16);
