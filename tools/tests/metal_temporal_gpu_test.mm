@@ -253,6 +253,13 @@ void HistoryTests() {
   auto next = MakeFrame(2);
   Check(h.Inspect(next).accepted && !h.Inspect(next).reset,
         "continuous frame reset");
+  auto animated_projection = next;
+  animated_projection.field_of_view += 4.5f;
+  animated_projection.near_plane *= 1.001f;
+  animated_projection.far_plane *= 0.999f;
+  animated_projection.aspect *= 1.001f;
+  Check(h.Inspect(animated_projection).accepted && !h.Inspect(animated_projection).reset,
+        "smooth gameplay projection animation reset history");
   for (auto coverage : {InputCoverage::kUnknown, InputCoverage::kCameraOnly}) {
     auto bad = next;
     bad.coverage = coverage;

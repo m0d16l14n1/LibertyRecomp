@@ -400,6 +400,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
   @autoreleasepool {
     error.clear();
     out = {};
+    diagnostic_ = {};
     if (!state_) {
       error = "temporal AA is not configured";
       return false;
@@ -420,6 +421,31 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       s.seen_failure = failure;
     }
     const auto decision = s.history.Inspect(frame, true);
+    const bool metal4 = rex::ui::metal::IsMetal4(commands);
+    const auto effective_jitter =
+        s.config.method == Method::kMetalFx ? MetalFxJitter(frame.jitter) : frame.jitter;
+    diagnostic_.valid = true;
+    diagnostic_.accepted = decision.accepted;
+    diagnostic_.reset = decision.reset;
+    diagnostic_.metal4 = metal4;
+    diagnostic_.depth_reversed = s.config.depth_reversed;
+    diagnostic_.exposure_texture = in.exposure != nil;
+    diagnostic_.method = s.config.method;
+    diagnostic_.sequence = frame.sequence;
+    diagnostic_.input_width = s.config.input_width;
+    diagnostic_.input_height = s.config.input_height;
+    diagnostic_.output_width = s.config.output_width;
+    diagnostic_.output_height = s.config.output_height;
+    diagnostic_.source_jitter = frame.jitter;
+    diagnostic_.effective_jitter = effective_jitter;
+    diagnostic_.near_plane = frame.near_plane;
+    diagnostic_.far_plane = frame.far_plane;
+    diagnostic_.field_of_view = frame.field_of_view;
+    diagnostic_.aspect = frame.aspect;
+    diagnostic_.pre_exposure = frame.pre_exposure;
+    diagnostic_.exposure = frame.exposure;
+    diagnostic_.delta_seconds = decision.delta_seconds;
+    diagnostic_.reason = decision.reason;
     if (!decision.accepted) {
       error = decision.reason;
       return false;
@@ -433,7 +459,6 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       error = "temporal AA input aliases the next history output";
       return false;
     }
-    const bool metal4 = rex::ui::metal::IsMetal4(commands);
     if (s.scaler && metal4 && !s.scaler4 && s.scaler_descriptor) {
       if (auto compiler = rex::ui::metal::Metal4Compiler(commands.commandQueue)) {
         s.scaler4 = [s.scaler_descriptor newTemporalScalerWithDevice:s.device compiler:compiler];
@@ -501,7 +526,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       [transfer endEncoding];
       exposure_texture = slot.exposure;
       }
-      const auto jitter = MetalFxJitter(frame.jitter);
+      const auto jitter = effective_jitter;
       if (s.denoiser4) {
         id<MTL4FXTemporalDenoisedScaler> denoiser = s.denoiser4;
         if (!s.neutral_cleared) {
@@ -672,6 +697,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
     lease->second = slot.depth;
     slot.lease = lease;
     out = {slot.color, decision.reset, std::move(lease)};
+    diagnostic_.encoded = true;
     return true;
   }
 }
@@ -837,6 +863,13 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     }
     auto ui = ui_input.image;
     if (!CommonInputs(commands, in, frame, s.device, s.config, true, error)) return false;
+    const bool repair_requested = in.repair_motion_px > 0 || in.deformation_repair;
+    if (repair_requested &&
+        !TextureMatches(in.reactive, s.device, MTLPixelFormatR8Unorm, s.config.input_width,
+                        s.config.input_height, MTLTextureUsageShaderRead)) {
+      error = "frame interpolation repair reactive-mask contract is unmet";
+      return false;
+    }
     if (s.queue && s.queue != commands.commandQueue) {
       error = "frame interpolation cannot cross command queues";
       return false;
@@ -1029,7 +1062,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     // Both paths join here: the native MTL4FX encode updates fence4, which the next proxy
     // encoder waits on (as the UI pass below), and the Metal 3 hop encodes into this command
     // buffer. Same slot, same command buffer: no new lifetime; slot.owner is set below.
-    if (in.repair_motion_px > 0 && s.repair && !decision.reset) {
+    if (repair_requested && s.repair && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/repair");
       if (!encoder) {
         s.history.Reset();
@@ -1046,13 +1079,15 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
            float(s.config.output_height) / s.config.input_height},
           {1.0f / s.config.input_width, 1.0f / s.config.input_height},
           {1.0f / s.config.output_width, 1.0f / s.config.output_height},
-          in.repair_motion_px, frame.near_plane, frame.far_plane,
+          in.repair_motion_px > 0 ? in.repair_motion_px : 65504.0f,
+          frame.near_plane, frame.far_plane,
           uint32_t(s.config.depth_reversed), 0.10f, 0};
       [encoder setComputePipelineState:s.repair];
       [encoder setTexture:interpolated atIndex:0];
       [encoder setTexture:slot.scene atIndex:1];
       [encoder setTexture:in.motion atIndex:2];
       [encoder setTexture:in.depth atIndex:3];
+      [encoder setTexture:in.reactive atIndex:4];
       [encoder setBytes:&c length:sizeof(c) atIndex:0];
       const NSUInteger w = s.repair.threadExecutionWidth,
                        h = std::max<NSUInteger>(

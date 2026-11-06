@@ -32,6 +32,9 @@ struct Inputs {
   // Frame generation: output-pixel motion difference at which the discontinuity repair starts
   // (gta4_metalfx_frame_generation_repair_px; 0 off).
   float repair_motion_px = 0;
+  // Frame generation: replace strongly reactive rigid wheel/ped deformation with a crisp
+  // current-pose half-step warp instead of blending incompatible poses.
+  bool deformation_repair = false;
   // Frame generation: unsharp amount for the generated image (gta4_metalfx_frame_generation_sharpen; 0 off).
   float sharpen = 0;
   // Frame generation: limit generated pixels to the colours of the real images they come from
@@ -64,6 +67,20 @@ struct Capabilities {
   bool temporal = false, interpolation = false;
   float minimum_scale = 1, maximum_scale = 1;
 };
+// The exact temporal contract presented to the AA implementation for the most
+// recent Encode call. Kept CPU-only so live diagnostics and tests can inspect
+// the contract without a GPU readback or changing effect behaviour.
+struct AntiAliasingDiagnostic {
+  bool valid = false, accepted = false, encoded = false, reset = true;
+  bool metal4 = false, depth_reversed = false, exposure_texture = false;
+  Method method = Method::kTaa;
+  uint64_t sequence = 0;
+  uint32_t input_width = 0, input_height = 0, output_width = 0, output_height = 0;
+  std::array<float, 2> source_jitter{}, effective_jitter{}, motion_scale{1, 1};
+  float near_plane = 0.1f, far_plane = 1000.0f, field_of_view = 60.0f, aspect = 1;
+  float pre_exposure = 1, exposure = 1, delta_seconds = 0;
+  std::string reason;
+};
 Capabilities QueryCapabilities(id<MTLDevice> device);
 // MTL4FXTemporalDenoisedScaler: the device supports it on Metal 4 for this scale, and no creation
 // has failed in this process (a failure latches: callers configure the plain scaler instead).
@@ -89,6 +106,7 @@ class AntiAliasing {
   bool Encode(id<MTLCommandBuffer>, const Inputs&, const Frame&, Output&, std::string&);
   void Reset();
   size_t owned_bytes() const;
+  const AntiAliasingDiagnostic& diagnostic() const { return diagnostic_; }
   // A line for the caller to log (this library does not log): the denoised scaler's creation,
   // its creation failure, and its periodic statistics. Empty when there is none.
   std::string TakeNotice();
@@ -96,6 +114,7 @@ class AntiAliasing {
  private:
   struct State;
   std::unique_ptr<State> state_;
+  AntiAliasingDiagnostic diagnostic_{};
   std::string notice_;
   id<MTLDevice> rejected_device_ = nil;
   id<MTLLibrary> rejected_library_ = nil;

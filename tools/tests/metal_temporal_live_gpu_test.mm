@@ -139,6 +139,24 @@ void LiveChain(Fixture &f, Method method, bool upscaled) {
       ++depth->content_serial;
       auto reconstructed = live.Resolve(commands, scene.color, error);
       Check(reconstructed != nil, error);
+      const auto& diagnostic = live.AntiAliasingState();
+      Check(diagnostic.valid && diagnostic.accepted && diagnostic.encoded,
+            "live AA diagnostic did not record a successful encode");
+      Check(diagnostic.sequence == sequence && diagnostic.method == method,
+            "live AA diagnostic frame identity");
+      Check(diagnostic.input_width == input && diagnostic.input_height == input &&
+                diagnostic.output_width == output && diagnostic.output_height == output,
+            "live AA diagnostic dimensions");
+      Check(diagnostic.source_jitter == c.jitter && diagnostic.effective_jitter == c.jitter,
+            "live AA diagnostic jitter contract");
+      Check(diagnostic.motion_scale == std::array<float, 2>{1, 1},
+            "live AA diagnostic motion scale");
+      Check(diagnostic.reset == (sequence == 1 || sequence == 4),
+            "live AA diagnostic reset reason");
+      Check((diagnostic.reason == "first frame") == (sequence == 1),
+            "live AA diagnostic first-frame reason");
+      Check((diagnostic.reason == "history discontinuity") == (sequence == 4),
+            "live AA diagnostic discontinuity reason");
       Check(reconstructed.width == output && reconstructed.height == output,
             "MetalFX live output dimensions");
       auto high = live.HighComposite(MTLPixelFormatRGBA16Float, error);

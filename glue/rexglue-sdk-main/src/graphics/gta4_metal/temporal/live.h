@@ -8,7 +8,9 @@
 namespace rex::graphics::gta4_metal::temporal {
 struct DrawParameters {
   std::array<float, 2> input_extent{}, jitter_clip{}, previous_jitter_clip{};
-  uint32_t valid_history = 0, reactive = 0, ui_mode = 0, padding[3]{};
+  uint32_t valid_history = 0, reactive = 0, ui_mode = 0;
+  float reactive_strength = 1.0f;
+  uint32_t padding[2]{};
 };
 static_assert(sizeof(DrawParameters) == 48);
 class Live {
@@ -44,6 +46,9 @@ class Live {
   // an input to frame generation.
   bool HasSceneOutput() const { return resolved || spatial_fallback; }
   bool TemporalHistoryReset() const { return resolved && resolved_.history_reset; }
+  const AntiAliasingDiagnostic& AntiAliasingState() const { return aa_.diagnostic(); }
+  bool BackgroundHistoryValid() const { return background_history_valid_; }
+  bool CameraTransformValid() const { return camera_transform_valid_; }
   bool active = false, ui_active = false, resolved = false, depth_captured = false,
        frame_generation = false, ui_exact = true, spatial_fallback = false,
        composite_seen = false;

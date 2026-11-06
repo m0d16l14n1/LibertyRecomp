@@ -64,6 +64,16 @@ void GeometryBindings() {
   const auto unclear=history.Record(base,vertex,shared,{});
   CHECK(!unclear.previous&&unclear.ambiguous);
 }
+void RigidDeformationClassification() {
+  const std::array<uint64_t,4> ordinary{0xFFF,0,0,0};
+  const std::array<uint64_t,4> palette{0xFFF,0,~uint64_t{0},~uint64_t{0}};
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_vehicle_tire/vs.bin",ordinary));
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_ped/vs.bin",ordinary));
+  // Niko and some ambient-ped materials use generic shader families.
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_default/gta_default_vs5.bin",palette));
+  CHECK(temporal::IsRigidDeformationShader("shader/gta_normal_spec/gta_normal_spec_vs4.bin",palette));
+  CHECK(!temporal::IsRigidDeformationShader("shader/gta_default/gta_default_vs5.bin",ordinary));
+}
 // gta_vehicle_tire VS_VehicleTransformD reads matWheelTransform at c64-c67; c0-c3 still holds
 // the body gWorld, so every wheel of one car shares the unscoped owner key.
 void GeometrySiblings() {
@@ -118,6 +128,16 @@ void GeometrySiblings() {
     const auto r=h.Record(key(100),middle,shared,{});
     CHECK(!r.previous&&r.ambiguous);
     CHECK(h.Record(key(100),middle,shared,{}).ambiguous);  // its repeat too
+  }
+  {  // Fast spin must not make a wheel borrow another hub's previous transform.
+    temporal::GeometryHistory h;
+    const rex::graphics::gta4_native::temporal::ConstantMask tire_reads{0xFF0,0xF,0,0};
+    CHECK(h.Begin(1,1,1,false));
+    h.Record(key(100),bank(0,0,0,0),shared,{},tire_reads);
+    h.Record(key(100),bank(0,1,2.8f,0),shared,{},tire_reads);
+    CHECK(h.Begin(1,1,2,false));
+    const auto spun=h.Record(key(100),bank(0,0,2.8f,0),shared,{},tire_reads);
+    CHECK(!spun.ambiguous&&same(spun,bank(0,0,0,0)));
   }
   {  // a car that lost a wheel this frame: the other three still match
     temporal::GeometryHistory h;
@@ -466,5 +486,5 @@ void DeclaredBoundaries() {
   CHECK(!registry.Find(1,5,11));
 }
 }  // namespace
-int main(){GeometryBindings();GeometrySiblings();GeometryReadMask();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
+int main(){GeometryBindings();RigidDeformationClassification();GeometrySiblings();GeometryReadMask();GeometryTransformMatch();MaterialSampling();CompositeScratch();ExecutionAndJitter();Provenance();DeclaredBoundaries();
   std::printf("temporal draw policy: %u checks passed\n",checks);return 0;}

@@ -57,6 +57,9 @@ REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_repair_px, 0.0, "GPU",
                       "Frame generation: where nearby pixels at another depth move this many output "
                       "pixels differently, blend the generated pixel toward a half-step warp of the "
                       "real scene (fully at twice this; 0 off). Targets smears at the player's car");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_deformation_repair, true, "GPU",
+                    "Frame generation: keep wheels and skeletal pedestrians crisp by half-step "
+                    "warping the current pose instead of blending incompatible deformation");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
                     "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
@@ -212,6 +215,7 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
   // if its depth convention differs from the subsequently adopted camera.
   if (!Clear(cb, inputs.motion, 0, error) || !Clear(cb, inputs.reactive, 1, error) ||
       !Clear(cb, inputs.previous_depth, -1, error)) return false;
+  snapshot_reactive = !rex::cvar::GetFlagByName("gta4_temporal_snapshot").empty();
   frame_generation = generation;
   active = true;
   return true;
@@ -651,6 +655,7 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   Inputs in = inputs;
   in.color = final_scene;
   in.repair_motion_px = float(REXCVAR_GET(gta4_metalfx_frame_generation_repair_px));
+  in.deformation_repair = REXCVAR_GET(gta4_metalfx_frame_generation_deformation_repair);
   in.sharpen = float(REXCVAR_GET(gta4_metalfx_frame_generation_sharpen));
   in.source_clamp = REXCVAR_GET(gta4_metalfx_frame_generation_source_clamp);
   in.camera_matrices = REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices) &&

@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -73,12 +74,23 @@ class History {
     if (f.sequence <= previous_.sequence || f.time_ns <= previous_.time_ns)
       return {false, true, 0, "duplicate or out-of-order temporal frame"};
     const float seconds = float(double(f.time_ns - previous_.time_ns) * 1.0e-9);
+    const auto relative_jump = [](float current, float previous, float fraction) {
+      return std::abs(current - previous) >
+          fraction * std::max(std::abs(current), std::abs(previous));
+    };
+    // GTA animates the gameplay/aim FOV smoothly (often by multiple degrees per frame) and may
+    // introduce harmless floating-point drift in its clip planes. Motion vectors and camera
+    // reprojection already include both projections, so resetting on any such change discards the
+    // history throughout the zoom and makes distant geometry, lights and reflections shimmer.
+    // Keep a reset for genuinely abrupt projection changes that can represent an untagged cut.
+    const bool projection_cut =
+        std::abs(f.field_of_view - previous_.field_of_view) > 5.0f ||
+        relative_jump(f.aspect, previous_.aspect, 0.02f) ||
+        relative_jump(f.near_plane, previous_.near_plane, 0.10f) ||
+        relative_jump(f.far_plane, previous_.far_plane, 0.10f);
     if (f.camera_cut || f.color_domain != previous_.color_domain ||
         previous_.sequence == UINT64_MAX || f.sequence != previous_.sequence + 1 ||
-        seconds > 0.25f || f.near_plane != previous_.near_plane ||
-        f.far_plane != previous_.far_plane ||
-        std::abs(f.field_of_view - previous_.field_of_view) > 0.01f ||
-        std::abs(f.aspect - previous_.aspect) > 0.0001f)
+        seconds > 0.25f || projection_cut)
       return {true, true, seconds, "history discontinuity"};
     return {true, false, seconds, {}};
   }

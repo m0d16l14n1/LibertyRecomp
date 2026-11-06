@@ -440,6 +440,55 @@ class GeometryHistory {
           }
       }
     }
+    // Vehicle tires use c64-c67 as matWheelTransform. Rotation can advance far
+    // enough in one 30 Hz frame that the full-matrix nearest match prefers a
+    // different wheel whose old rotation happens to be closer. That gives the
+    // wheel hundreds of pixels of false motion and frame interpolation replaces
+    // it with the bumper/road. The hub translation in c67.xyz is the stable
+    // sibling identity; use it before the rotating basis. An exactly equidistant
+    // hub stays ambiguous instead of inventing motion.
+    if (Reads(world_, 67)) {
+      const auto load_float = [](std::span<const uint8_t> bytes, size_t index) {
+        float value;
+        std::memcpy(&value, bytes.data() + index * sizeof(float), sizeof(value));
+        return value;
+      };
+      const GeometrySnapshot* hub_best = nullptr;
+      double hub_best_sum = 0, hub_second_sum = -1;
+      for (const auto& sibling : siblings) {
+        const auto& old = sibling.snapshot->vertex;
+        if (old.size() != vertex.size() || claimed_.count(sibling.snapshot.get()) ||
+            !Near(Distance(old, vertex, false)))
+          continue;
+        double sum = 0;
+        bool finite = true;
+        for (size_t component = 0; component < 3; ++component) {
+          const size_t index = 67 * 4 + component;
+          const float x = load_float(old, index), y = load_float(vertex, index);
+          if (!std::isfinite(x) || !std::isfinite(y)) { finite = false; break; }
+          sum += double(x - y) * double(x - y);
+        }
+        if (!finite) continue;
+        if (!hub_best || sum < hub_best_sum) {
+          if (hub_best) hub_second_sum = hub_best_sum;
+          hub_best = sibling.snapshot.get();
+          hub_best_sum = sum;
+        } else if (hub_second_sum < 0 || sum < hub_second_sum) {
+          hub_second_sum = sum;
+        }
+      }
+      if (hub_best && (hub_second_sum < 0 || hub_second_sum > 2.25 * hub_best_sum + 1e-6)) {
+        ++statistics_.sibling;
+        claimed_.insert(hub_best);
+        for (const auto& sibling : siblings)
+          if (sibling.snapshot.get() == hub_best) return sibling.snapshot;
+      }
+      if (hub_best) {
+        ++statistics_.sibling_ambiguous;
+        unclear = true;
+        return nullptr;
+      }
+    }
     const GeometrySnapshot* best = nullptr;
     double best_sum = 0, second_sum = -1;
     for (const auto& sibling : siblings) {

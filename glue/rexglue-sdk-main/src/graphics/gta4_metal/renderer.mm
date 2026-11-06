@@ -38,6 +38,10 @@ REXCVAR_DEFINE_BOOL(gta4_metal_cache_pipeline_lookup, true, "GPU", "Reuse recent
 REXCVAR_DEFINE_STRING(gta4_temporal_trace_vs, "", "GPU/Diagnostics", "Hex vertex shader hash whose draws log their temporal classification");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_log, false, "GPU/Diagnostics", "Log the draws that mark the temporal scaler's reactive mask, with their blend state (every 300th frame)");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_weighting, true, "GPU", "Weight the temporal scaler's reactive mask by what each untracked draw adds to the image (off: every such draw marks its pixels fully reactive)");
+REXCVAR_DEFINE_DOUBLE(gta4_temporal_reactive_strength, 0.10, "GPU",
+    "Maximum MetalFX history rejection for alpha/additive scene layers (glass, reflections, signs and lights); invalid geometry still rejects history fully");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_rigid_deformation, true, "GPU",
+    "Frame generation: use rigid-object motion for spinning vehicle tires and skeletal peds; avoids disappearing or double-exposed spokes and limbs");
 REXCVAR_DEFINE_BOOL(gta4_temporal_history_vertex_textures, true, "GPU", "Give draws whose vertex shader reads a texture motion history (previous position from this frame's texture)");
 REXCVAR_DEFINE_UINT32(gta4_metal_split_commit_draws, 0, "GPU", "Commit the frame's first part to the GPU once this many draws are encoded (at a render-pass break; once a frame; 0 = one command buffer a frame)");
 REXCVAR_DEFINE_BOOL(gta4_metal_cache_encoder_state, true, "GPU", "Reuse unchanged state in one Metal encoder");
@@ -261,7 +265,11 @@ bool Renderer::State::Begin(std::string& error) {
   split_commit_draws = rex::cvar::Query<uint32_t>("gta4_metal_split_commit_draws");
   temporal_vertex_texture_history = rex::cvar::Query<bool>("gta4_temporal_history_vertex_textures");
   temporal_reactive_weighting = rex::cvar::Query<bool>("gta4_temporal_reactive_weighting");
+  temporal_reactive_strength = std::clamp(
+      float(rex::cvar::Query<double>("gta4_temporal_reactive_strength")), 0.0f, 1.0f);
   temporal_reactive_log = rex::cvar::Query<bool>("gta4_temporal_reactive_log");
+  temporal_generation_rigid_deformation =
+      rex::cvar::Query<bool>("gta4_metalfx_frame_generation_rigid_deformation");
   {
     const auto trace=rex::cvar::GetFlagByName("gta4_temporal_trace_vs");
     temporal_trace_vs=trace.empty()?0:std::strtoull(trace.c_str(),nullptr,16);

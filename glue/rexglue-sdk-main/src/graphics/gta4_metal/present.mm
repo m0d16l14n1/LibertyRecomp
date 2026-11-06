@@ -13,6 +13,7 @@
 #include <vector>
 #include <bit>
 #include <chrono>
+#include <filesystem>
 #include <iterator>
 
 REXCVAR_DECLARE(bool, gta4_temporal_late_constants_diag);  // temporal/live.mm
@@ -26,14 +27,29 @@ REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_every, 120, "GPU/Diagno
                       "Frame generation dump: every Nth generated frame (at least 2)");
 REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_max, 6, "GPU/Diagnostics",
                       "Frame generation dump: at most this many generated frames per run");
+REXCVAR_DEFINE_BOOL(gta4_temporal_diagnostics, false, "GPU/Diagnostics",
+                    "Log the exact temporal AA contract at startup, resets, and every 60 frames");
+REXCVAR_DEFINE_STRING(gta4_temporal_snapshot, "", "GPU/Diagnostics",
+                      "Folder for bounded temporal AA input/output snapshots (empty = off)");
+REXCVAR_DEFINE_UINT32(gta4_temporal_snapshot_every, 120, "GPU/Diagnostics",
+                      "Temporal snapshot: capture every Nth accepted frame");
+REXCVAR_DEFINE_UINT32(gta4_temporal_snapshot_max, 4, "GPU/Diagnostics",
+                      "Temporal snapshot: maximum captures for one output folder");
 
 namespace rex::graphics::gta4_metal {
 namespace {
 
+bool PrepareDumpPath(const std::string& path) {
+  std::error_code error;
+  const auto parent = std::filesystem::path(path).parent_path();
+  return parent.empty() || std::filesystem::create_directories(parent, error) ||
+         std::filesystem::is_directory(parent, error);
+}
+
 // Copies a finished frame (RGBA16Float, display-perceptual) into a shared
 // buffer and writes it as an 8-bit PPM once the command buffer completes.
 void DumpFrameImage(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::string path) {
-  if (!image || image.pixelFormat != MTLPixelFormatRGBA16Float) return;
+  if (!image || image.pixelFormat != MTLPixelFormatRGBA16Float || !PrepareDumpPath(path)) return;
   const NSUInteger w = image.width, h = image.height, pitch = w * 8;
   auto buffer = [commands.device newBufferWithLength:pitch * h options:MTLResourceStorageModeShared];
   auto blit = [commands blitCommandEncoder];
@@ -61,10 +77,11 @@ void DumpFrameImage(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::st
 // Raw texel dump for offline analysis of the frame generation inputs (motion RG16Float, depth and
 // history depth R32Float): "<w> <h> <bytes per texel>\n" then the rows.
 void DumpRawTexture(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::string path) {
-  if (!image) return;
+  if (!image || !PrepareDumpPath(path)) return;
   NSUInteger texel = 0;
   switch (image.pixelFormat) {
     case MTLPixelFormatRG16Float: case MTLPixelFormatR32Float: texel = 4; break;
+    case MTLPixelFormatR16Float: texel = 2; break;
     case MTLPixelFormatR8Unorm: texel = 1; break;
     default: return;
   }
@@ -83,6 +100,45 @@ void DumpRawTexture(id<MTLCommandBuffer> commands, id<MTLTexture> image, std::st
       std::fprintf(f, "%lu %lu %lu\n", (unsigned long)w, (unsigned long)h, (unsigned long)texel);
       std::fwrite(buffer.contents, 1, pitch * h, f);
       std::fclose(f);
+    }
+  }];
+}
+
+void DumpTemporalManifest(id<MTLCommandBuffer> commands, const temporal::Live& live,
+                          uint32_t submitted_frame, std::string path) {
+  if (!PrepareDumpPath(path)) return;
+  const auto& d = live.AntiAliasingState();
+  const auto texture = [](id<MTLTexture> image) {
+    return image ? fmt::format("{}x{} format={} bytes={}", image.width, image.height,
+                               uint32_t(image.pixelFormat), image.allocatedSize)
+                 : std::string("missing");
+  };
+  const std::string manifest = fmt::format(
+      "frame={}\nsequence={}\nmethod={}\npath={}\naccepted={}\nencoded={}\nreset={}\n"
+      "reason={}\ninput={}x{}\noutput={}x{}\nsource_jitter={},{}\neffective_jitter={},{}\n"
+      "motion_scale={},{}\ndepth_reversed={}\nnear={}\nfar={}\nfov={}\naspect={}\n"
+      "pre_exposure={}\nexposure={}\nexposure_texture={}\ncamera_cut={}\nadopted_camera={}\n"
+      "background_history={}\ncamera_transform={}\nworld_draws={}\nhistory_draws={}\n"
+      "reactive_draws={}\njittered_draws={}\nscene_color={}\nmotion={}\ndepth={}\n"
+      "previous_depth={}\nreactive={}\nexposure_input={}\nreconstructed_scene={}\n",
+      submitted_frame, d.sequence, d.method == temporal::Method::kMetalFx ? "metalfx" : "taa",
+      d.metal4 ? "metal4" : "metal3", d.accepted, d.encoded, d.reset,
+      d.reason.empty() ? "continuous" : d.reason, d.input_width, d.input_height,
+      d.output_width, d.output_height, d.source_jitter[0], d.source_jitter[1],
+      d.effective_jitter[0], d.effective_jitter[1], d.motion_scale[0], d.motion_scale[1],
+      d.depth_reversed, d.near_plane, d.far_plane, d.field_of_view, d.aspect,
+      d.pre_exposure, d.exposure, d.exposure_texture, live.metadata.camera_cut,
+      live.adopted_camera, live.BackgroundHistoryValid(), live.CameraTransformValid(),
+      live.world_draws, live.history_draws, live.reactive_draws, live.jittered_draws,
+      texture(live.inputs.color), texture(live.inputs.motion), texture(live.inputs.depth),
+      texture(live.inputs.previous_depth),
+      texture(live.reactive_snapshot ? live.reactive_snapshot : live.inputs.reactive),
+      texture(live.inputs.exposure), texture(live.final_scene));
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    if (done.status != MTLCommandBufferStatusCompleted) return;
+    if (FILE* file = std::fopen(path.c_str(), "wb")) {
+      std::fwrite(manifest.data(), 1, manifest.size(), file);
+      std::fclose(file);
     }
   }];
 }
@@ -208,8 +264,36 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         DumpRawTexture(commands,temporal.inputs.motion,fmt::format("{}/framegen_{}_motion.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.previous_depth,fmt::format("{}/framegen_{}_history.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.depth,fmt::format("{}/framegen_{}_depth.raw",folder,present.submitted_frame));
-        if(temporal.reactive_snapshot)DumpRawTexture(commands,temporal.reactive_snapshot,fmt::format("{}/framegen_{}_reactive.raw",folder,present.submitted_frame));
+        // Generate has already consumed this frame's live mask, and later scene
+        // draws cannot occur after presentation. Dump it directly so framegen
+        // captures diagnose the exact deformation/disocclusion input used.
+        DumpRawTexture(commands,temporal.inputs.reactive,fmt::format("{}/framegen_{}_reactive.raw",folder,present.submitted_frame));
       }
+    }
+  }
+  if (temporal_output && temporal.resolved) {
+    static std::string snapshot_folder;
+    static uint64_t snapshot_count = 0;
+    const std::string folder = rex::cvar::GetFlagByName("gta4_temporal_snapshot");
+    if (folder != snapshot_folder) {
+      snapshot_folder = folder;
+      snapshot_count = 0;
+    }
+    const uint64_t every = std::max<uint32_t>(1, REXCVAR_GET(gta4_temporal_snapshot_every));
+    const uint64_t most = REXCVAR_GET(gta4_temporal_snapshot_max);
+    if (!folder.empty() && temporal.metadata.sequence % every == 0 && snapshot_count < most) {
+      ++snapshot_count;
+      const std::string prefix = fmt::format("{}/temporal_{}", folder, present.submitted_frame);
+      DumpFrameImage(commands, temporal.inputs.color, prefix + "_scene.ppm");
+      DumpRawTexture(commands, temporal.inputs.motion, prefix + "_motion.raw");
+      DumpRawTexture(commands, temporal.inputs.depth, prefix + "_depth.raw");
+      DumpRawTexture(commands, temporal.inputs.previous_depth, prefix + "_previous_depth.raw");
+      DumpRawTexture(commands,
+                     temporal.reactive_snapshot ? temporal.reactive_snapshot : temporal.inputs.reactive,
+                     prefix + "_reactive.raw");
+      DumpRawTexture(commands, temporal.inputs.exposure, prefix + "_exposure.raw");
+      DumpFrameImage(commands, temporal.final_scene, prefix + "_reconstructed.ppm");
+      DumpTemporalManifest(commands, temporal, present.submitted_frame, prefix + "_manifest.txt");
     }
   }
   // An unsupported affine HUD still exists in the original guest composite.
@@ -297,6 +381,28 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
       temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
       temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason,temporal.slow_generation_skips);
+  if (temporal.active && REXCVAR_GET(gta4_temporal_diagnostics)) {
+    const auto& d = temporal.AntiAliasingState();
+    if (d.valid && (present.submitted_frame <= 6 || present.submitted_frame % 60 == 0 ||
+                    d.reset || !d.accepted || !d.encoded)) {
+      REXLOG_INFO(
+          "gta4-metal-temporal-contract frame={} sequence={} method={} path={} accepted={} encoded={} reset={} reason=\"{}\" input={}x{} output={}x{} scale={:.4f}x{:.4f} source-jitter={:.6f},{:.6f} effective-jitter={:.6f},{:.6f} motion-scale={:.3f},{:.3f} depth-reversed={} near={} far={} fov={} aspect={} pre-exposure={} exposure={} exposure-texture={} camera-cut={} adopted-camera={} background-history={} camera-transform={} world={} history={} reactive={} jittered={}",
+          present.submitted_frame, d.sequence,
+          d.method == temporal::Method::kMetalFx ? "metalfx" : "taa",
+          d.metal4 ? "metal4" : "metal3", d.accepted, d.encoded, d.reset,
+          d.reason.empty() ? "continuous" : d.reason, d.input_width, d.input_height,
+          d.output_width, d.output_height,
+          d.input_width ? double(d.output_width) / d.input_width : 0.0,
+          d.input_height ? double(d.output_height) / d.input_height : 0.0,
+          d.source_jitter[0], d.source_jitter[1], d.effective_jitter[0],
+          d.effective_jitter[1], d.motion_scale[0], d.motion_scale[1], d.depth_reversed,
+          d.near_plane, d.far_plane, d.field_of_view, d.aspect, d.pre_exposure,
+          d.exposure, d.exposure_texture, temporal.metadata.camera_cut,
+          temporal.adopted_camera, temporal.BackgroundHistoryValid(),
+          temporal.CameraTransformValid(), temporal.world_draws, temporal.history_draws,
+          temporal.reactive_draws, temporal.jittered_draws);
+    }
+  }
   if(temporal.active&&present.submitted_frame%60==0&&REXCVAR_GET(gta4_temporal_late_constants_diag)){
     static constexpr const char* kKinds[]={"tire","vehicle","ped","palette","late"};
     for(size_t k=0;k<temporal.late_counters.size();++k){

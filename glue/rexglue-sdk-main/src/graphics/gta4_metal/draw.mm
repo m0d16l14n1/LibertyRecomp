@@ -446,6 +446,14 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       registered_primary,temporal.execution_scene_geometry,temporal.execution_screen_space,
       execution_camera_matches,lighting);
   const bool world=scene_policy.world;
+  const auto temporal_vertex=shaders.find(vertex_shader);
+  const std::string_view temporal_vertex_name=temporal_vertex!=shaders.end()
+      ?std::string_view(temporal_vertex->second.name):std::string_view{};
+  const bool rigid_deformation=world&&temporal.frame_generation&&
+      temporal_generation_rigid_deformation&&
+      temporal_vertex!=shaders.end()&&
+      temporal::IsRigidDeformationShader(temporal_vertex_name,
+                                         temporal_vertex->second.float_constant_mask);
   if((requested_colors&7u)==7u&&fixed.depth_enable&&fixed.depth_write_enable){
     if(!temporal.active)++gbuffer_inactive;
     else if(!temporal_extent){++gbuffer_off_extent;gbuffer_last_w=targets.width;gbuffer_last_h=targets.height;}
@@ -463,8 +471,15 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   bool scene_blending=false;
   for(size_t i=0;i<fixed.blend_controls.size();++i)
     if((requested_colors&(uint32_t{1}<<i))&&IsNativeBlendControlEnabled(fixed.blend_controls[i]))scene_blending=true;
-  targets.temporal_motion=world&&fixed.depth_enable&&fixed.depth_write_enable&&!scene_blending;
-  targets.temporal_reactive=(world||scene_policy.effect)&&!targets.temporal_motion&&requested_colors;
+  // Alpha-tested foliage, wheels, vehicle trim and ped materials often keep
+  // blending enabled while writing the primary depth. They are still real
+  // geometry and need their own object motion; treating them as reactive-only
+  // made MetalFX frame interpolation borrow the road/background motion and
+  // partially erase them at disocclusions. The pipeline supports writing both
+  // motion and a weighted reactive mask for these draws.
+  targets.temporal_motion=world&&fixed.depth_enable&&fixed.depth_write_enable;
+  targets.temporal_reactive=((world||scene_policy.effect)&&scene_blending&&requested_colors)||
+      (rigid_deformation&&requested_colors);
   // gta4_temporal_trace_vs=<hex>: how that vertex shader's draws are classified (12 per 120th frame).
   const auto traced_vertex=temporal_trace_vs?shaders.find(vertex_shader):shaders.end();
   if(traced_vertex!=shaders.end()&&traced_vertex->second.hash==temporal_trace_vs&&temporal.metadata.sequence%120==0&&temporal.diagnostic_trace++<12)
@@ -825,6 +840,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   }
   temporal::DrawParameters temporal_parameters{};
   temporal_parameters.input_extent={float(targets.width),float(targets.height)};
+  // Fast wheel/bone deformation is deliberately removed from frame-generation motion below.
+  // Tag those pixels strongly so the interpolation repair can use a crisp half-step warp of the
+  // current pose instead of blending two incompatible wheel spokes or skeletal silhouettes.
+  // Ordinary glass, lamps and alpha layers keep the bounded user-facing strength.
+  temporal_parameters.reactive_strength=rigid_deformation?1.0f:temporal_reactive_strength;
   if(targets.temporal_jitter)temporal_parameters.jitter_clip={2*temporal.metadata.jitter[0]/targets.width,-2*temporal.metadata.jitter[1]/targets.height};
   temporal_parameters.ui_mode=temporal_ui_mode;
   temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
@@ -885,9 +905,29 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       }
       std::memcpy(&prior_shared,history.previous->shared.data(),sizeof(prior_shared));
       standard_motion_depth&=temporal::StandardDepthViewport(prior_shared);
+      // Fast wheel rotation and skeletal deformation are valid raster motion, but MetalFX frame
+      // interpolation double-exposes or removes those thin features. Preserve the previous
+      // camera/body transform while evaluating the current c64+ wheel/bone pose: the object still
+      // moves correctly on screen, without a rapidly divergent vector field inside it.
+      std::array<uint8_t,4096> rigid_previous{};
+      std::span<const uint8_t> previous_constants=history.previous->vertex;
+      if(rigid_deformation){
+        std::copy(history.previous->vertex.begin(),history.previous->vertex.end(),rigid_previous.begin());
+        const auto& reads=pipeline->vertex.float_constant_mask;
+        for(size_t word=1;word<reads.size();++word)
+          for(uint64_t bits=reads[word];bits;bits&=bits-1){
+            const size_t reg=word*64+size_t(std::countr_zero(bits));
+            std::memcpy(rigid_previous.data()+reg*16,captured_vertex.data()+reg*16,16);
+          }
+        previous_constants=rigid_previous;
+      }
       // The variant runs the same vertex function on this bank, so it reads the current shader's range.
-      if(range_constants_enabled||previous_bank_range){
-        const auto previous=UploadRange(SIZE_MAX,history.previous->vertex,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
+      if(rigid_deformation){
+        previous_vertex=Upload(previous_constants,false,error);
+        previous_vertex_address=previous_vertex.gpu_address;
+        previous_shared=Upload(history.previous->shared,false,error);
+      }else if(range_constants_enabled||previous_bank_range){
+        const auto previous=UploadRange(SIZE_MAX,previous_constants,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
         previous_vertex=previous.slice;previous_vertex_address=previous.address;
         previous_shared=Upload(history.previous->shared,false,error);
       }else if(const auto* snapshot=UploadSnapshot(history.previous,error)){

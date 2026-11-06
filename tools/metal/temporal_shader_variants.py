@@ -29,16 +29,25 @@ REACTIVE = """
 // The temporal scaler's reactive mask for this pixel. Motion-tracked draws (reactive 0): 1 only
 // without history. Untracked draws by what they add to colour 0 (draw.mm ReactiveMode): 1 all,
 // 2 alpha, 3 colour, 4 colour times alpha, 5 none. The mask is max-blended across draws.
-inline float liberty_reactive(bool valid, uint mode, float4 color) {
+inline float liberty_reactive(bool valid, uint mode, float4 color, float strength) {
     color=select(color,float4(0),!isfinite(color));
+    strength=clamp(strength,0.0f,1.0f);
     const float brightest=max(color.r,max(color.g,color.b));
     switch(mode) {
         case 0u: return valid?0.0f:1.0f;
-        case 2u: return saturate(color.a);
-        case 3u: return saturate(brightest);
-        case 4u: return saturate(brightest*color.a);
+        // Transparent and additive layers retain the opaque surface's motion.
+        // A full-strength mask made bright windows, signs, glass and lamps use
+        // only the current jittered sample, so they visibly vibrated. Keep a
+        // bounded amount of history rejection for genuine color changes.
+        case 1u: return strength;
+        case 2u: return saturate(color.a)*strength;
+        case 3u: return saturate(brightest)*strength;
+        case 4u: return saturate(brightest*color.a)*strength;
         case 5u: return 0.0f;
-        default: return 1.0f;
+        // Unknown guest blend factors must not silently restore the old
+        // full-history rejection. They are still reactive, but bounded by
+        // the same user-visible stability control as known blends.
+        default: return strength;
     }
 }
 #endif
@@ -52,7 +61,7 @@ struct LibertyTemporalDraw {
     uint validHistory;
     uint reactive;
     uint uiMode;
-    uint padding0;
+    float reactiveStrength;
     uint padding1;
     uint padding2;
 };
@@ -144,7 +153,7 @@ fragment PixelShaderOutput shaderMain(Interpolators input [[stage_in]],bool iFac
     if(valid) velocity=(input.libertyPreviousClip.xy/input.libertyPreviousClip.w-input.libertyCurrentClip.xy/input.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
     valid=valid && all(isfinite(velocity)) && all(abs(velocity)<=65504.0f);
     result.libertyMotion=valid?velocity:float2(0);
-    result.libertyReactive=liberty_reactive(valid,temporal.reactive,{"result.oC0" if re.search(r"float4 oC0", prefix) else "float4(1)"});
+    result.libertyReactive=liberty_reactive(valid,temporal.reactive,{"result.oC0" if re.search(r"float4 oC0", prefix) else "float4(1)"},temporal.reactiveStrength);
     {ui_outputs("result.oC0" if re.search(r"float4 oC0", prefix) else "float4(0)")}
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?input.libertyPreviousClip.z/input.libertyPreviousClip.w:-1.0f;
@@ -232,7 +241,7 @@ def transform_override(source: str, stage: int) -> str:
     float2 velocity=float2(0);
     if(valid) velocity=({input_name}.libertyPreviousClip.xy/{input_name}.libertyPreviousClip.w-{input_name}.libertyCurrentClip.xy/{input_name}.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
     valid=valid && all(isfinite(velocity)) && all(abs(velocity)<=65504.0f);
-    result.libertyMotion=valid?velocity:float2(0);result.libertyReactive=liberty_reactive(valid,temporal.reactive,{'result.' + color[1] if color else 'float4(1)'});
+    result.libertyMotion=valid?velocity:float2(0);result.libertyReactive=liberty_reactive(valid,temporal.reactive,{'result.' + color[1] if color else 'float4(1)'},temporal.reactiveStrength);
     {ui_outputs('result.' + color[1] if color else 'float4(0)')}
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?{input_name}.libertyPreviousClip.z/{input_name}.libertyPreviousClip.w:-1.0f;

@@ -1,12 +1,26 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
+#include <cstdint>
+#include <string_view>
 #include <rex/graphics/gta4_native/lighting_semantics.h>
 #include "../../gta4_native/core/draw_state.h"
 #include "history.h"
 
 namespace rex::graphics::gta4_metal::temporal {
+// The archive expands an a0-relative vertex-constant read to the whole c128-c255
+// tail.  Those shaders are skinning from a bone palette even when their filename
+// is a generic gta_default / gta_normal_spec variant (notably Niko's materials).
+// A name-only gta_ped test therefore misses parts of the player and lets MetalFX
+// blend incompatible poses into a doubled silhouette.
+constexpr bool IsRigidDeformationShader(std::string_view name,
+                                        const std::array<uint64_t, 4>& reads) {
+  const bool bone_palette = reads[2] == ~uint64_t{0} && reads[3] == ~uint64_t{0};
+  return name.find("gta_vehicle_tire") != name.npos ||
+         name.find("gta_ped") != name.npos || bone_palette;
+}
 inline float MaterialMipBias(const Configuration& config, bool scene_material) {
   if (!scene_material || config.method != Method::kMetalFx || !ValidConfiguration(config) ||
       (config.input_width == config.output_width && config.input_height == config.output_height))

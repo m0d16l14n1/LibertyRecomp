@@ -360,6 +360,8 @@ struct Renderer::State {
   bool PassContinues(const Targets&) const;
   uint32_t split_commit_draws=0;
   bool temporal_vertex_texture_history=true,temporal_reactive_weighting=true,temporal_reactive_log=false;
+  bool temporal_generation_rigid_deformation=true;
+  float temporal_reactive_strength=0.10f;
   uint64_t temporal_trace_vs=0;
   uint64_t part_first_draw=0, split_commits=0;
   bool frame_split=false;
