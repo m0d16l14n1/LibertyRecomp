@@ -845,10 +845,12 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   // Tag those pixels strongly so the interpolation repair can use a crisp half-step warp of the
   // current pose instead of blending two incompatible wheel spokes or skeletal silhouettes.
   // Ordinary glass, lamps and alpha layers keep the bounded user-facing strength.
-  temporal_parameters.reactive_strength=rigid_deformation?1.0f:temporal_reactive_strength;
+  temporal_parameters.reactive_strength=rigid_deformation?temporal::kRigidReactiveMarker:temporal_reactive_strength;
   if(targets.temporal_jitter)temporal_parameters.jitter_clip={2*temporal.metadata.jitter[0]/targets.width,-2*temporal.metadata.jitter[1]/targets.height};
   temporal_parameters.ui_mode=temporal_ui_mode;
   temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
+  // The marker must be the exact value whatever the blend state (mode 1 writes the strength).
+  if(rigid_deformation&&targets.temporal_reactive)temporal_parameters.reactive=1u;
   ui::metal::UploadSlice previous_vertex,previous_shared;
   uint64_t previous_vertex_address=0;
   const gta4_native::temporal::GeometrySnapshot* recorded_snapshot=nullptr;  // tagged with this frame's uploads below
@@ -912,7 +914,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       // moves correctly on screen, without a rapidly divergent vector field inside it.
       std::array<uint8_t,4096> rigid_previous{};
       std::span<const uint8_t> previous_constants=history.previous->vertex;
-      if(rigid_deformation){
+      // Tyres keep their true motion (spin included): the temporal scaler accumulates them with it
+      // (body-only motion made the tread disagree with its history every frame: vibrating wheels),
+      // and the frame-generation repair warps tyre pixels with the car body's motion instead
+      // (liberty_temporal_framegen_repair_weight). Peds/bone palettes (scope `all`) stay rigid.
+      if(rigid_deformation&&!temporal_generation_rigid_wheels_only){
         std::copy(history.previous->vertex.begin(),history.previous->vertex.end(),rigid_previous.begin());
         const auto& reads=pipeline->vertex.float_constant_mask;
         for(size_t word=1;word<reads.size();++word)

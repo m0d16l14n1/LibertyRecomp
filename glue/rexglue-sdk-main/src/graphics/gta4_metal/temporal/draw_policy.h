@@ -30,6 +30,14 @@ constexpr bool IsRigidDeformationShader(std::string_view name,
   const bool bone_palette = reads[2] == ~uint64_t{0} && reads[3] == ~uint64_t{0};
   return name.find("gta_ped") != name.npos || bone_palette;
 }
+// Reactive value a rigid-deformation draw (tyres) writes: the frame-generation repair treats
+// >= 0.5 as its marker, and before the temporal scaler liberty_temporal_scaler_reactive turns this
+// band into kRigidScalerReactive so MetalFX still accumulates the wheel. Written as 1.0 before,
+// the scaler showed raw jittered samples there: wheels jumped every frame, even standing still.
+// Other reactive writes stay apart: alpha/additive layers are bounded by
+// gta4_temporal_reactive_strength (0.1) and missing history is 1.0.
+constexpr float kRigidReactiveMarker = 0.75f;
+constexpr float kRigidScalerReactive = 0.1f;
 inline float MaterialMipBias(const Configuration& config, bool scene_material) {
   if (!scene_material || config.method != Method::kMetalFx || !ValidConfiguration(config) ||
       (config.input_width == config.output_width && config.input_height == config.output_height))

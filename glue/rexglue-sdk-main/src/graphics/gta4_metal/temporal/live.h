@@ -109,7 +109,8 @@ class Live {
   id<MTLFunction> depth_motion_fragment_ = nil;
   id<MTLComputePipelineState> depth_export_ = nil, color_copy_ = nil, compose_ = nil,
                               compose_inplace_ = nil, exposure_hint_ = nil, background_motion_ = nil,
-                              camera_motion_fill_ = nil;
+                              camera_motion_fill_ = nil, scaler_reactive_ = nil;
+  id<MTLTexture> scaler_reactive_image_ = nil;  // the mask the temporal scaler reads (tyres decoded)
   id<MTLTexture> converted_ = nil, half_scene_ = nil, spatial_output_ = nil;
   id<MTLTexture> exposure_ = nil;
   id<MTLTexture> recovered_composite_ = nil;

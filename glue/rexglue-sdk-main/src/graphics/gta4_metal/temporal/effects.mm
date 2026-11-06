@@ -726,6 +726,9 @@ struct FrameInterpolation::State {
   bool native4_unavailable = false;
   id<MTLComputePipelineState> composite = nil, overlay = nil;
   id<MTLComputePipelineState> repair = nil;  // optional: nil skips the discontinuity repair
+  id<MTLComputePipelineState> repair_weight = nil;  // its input-resolution weight pass
+  id<MTLTexture> repair_weights = nil;               // R8, input size
+  id<MTLTexture> repair_motion = nil;                // RG16Float, input size: the warp's motion
   id<MTLComputePipelineState> sharpen = nil;  // optional: nil skips the sharpening
   uint64_t sharpen_failures = 0;
   // Three: a slot is reused three frames later. With two, the frame that last wrote it was
@@ -816,6 +819,24 @@ bool FrameInterpolation::Configure(id<MTLDevice> device, id<MTLLibrary> library,
     // Optional (an older metallib may lack it): without it the repair is skipped.
     if (auto repair_function = [library newFunctionWithName:@"liberty_temporal_framegen_repair"])
       next->repair = [device newComputePipelineStateWithFunction:repair_function error:nil];
+    if (auto weight_function = [library newFunctionWithName:@"liberty_temporal_framegen_repair_weight"])
+      next->repair_weight = [device newComputePipelineStateWithFunction:weight_function error:nil];
+    if (!next->repair_weight) next->repair = nil;  // the repair reads the weight map
+    if (next->repair) {
+      MTLTextureDescriptor* w = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+          width:c.input_width height:c.input_height mipmapped:NO];
+      w.storageMode = MTLStorageModePrivate;
+      w.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      next->repair_weights = [device newTextureWithDescriptor:w];
+      w.pixelFormat = MTLPixelFormatRG16Float;
+      next->repair_motion = [device newTextureWithDescriptor:w];
+      if (next->repair_weights && next->repair_motion) {
+        next->repair_weights.label = @"Liberty frame-generation repair weights";
+        next->repair_motion.label = @"Liberty frame-generation repair motion";
+      } else {
+        next->repair = nil;
+      }
+    }
     if (auto sharpen_function = [library newFunctionWithName:@"liberty_temporal_framegen_sharpen"])
       next->sharpen = [device newComputePipelineStateWithFunction:sharpen_function error:nil];
     next->interpolator = next->CreateInterpolator();
@@ -1063,13 +1084,6 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     // encoder waits on (as the UI pass below), and the Metal 3 hop encodes into this command
     // buffer. Same slot, same command buffer: no new lifetime; slot.owner is set below.
     if (repair_requested && s.repair && !decision.reset) {
-      auto encoder = ComputeEncoder(commands, "framegen/repair");
-      if (!encoder) {
-        s.history.Reset();
-        error = "frame-generation repair encoder failed";
-        return false;
-      }
-      encoder.label = @"Liberty frame-generation discontinuity repair";
       struct {
         float motion_scale[2], input_texel[2], output_texel[2];
         float threshold, near_plane, far_plane;
@@ -1082,12 +1096,42 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
           in.repair_motion_px > 0 ? in.repair_motion_px : 65504.0f,
           frame.near_plane, frame.far_plane,
           uint32_t(s.config.depth_reversed), 0.10f, 0};
+      // Pass 1 at input resolution: the weight map (tyre marker grown, depth/motion edges).
+      auto weights = ComputeEncoder(commands, "framegen/repair-weight");
+      if (!weights) {
+        s.history.Reset();
+        error = "frame-generation repair weight encoder failed";
+        return false;
+      }
+      weights.label = @"Liberty frame-generation repair weights";
+      [weights setComputePipelineState:s.repair_weight];
+      [weights setTexture:s.repair_weights atIndex:0];
+      [weights setTexture:in.motion atIndex:1];
+      [weights setTexture:in.depth atIndex:2];
+      [weights setTexture:in.reactive atIndex:3];
+      [weights setTexture:s.repair_motion atIndex:4];
+      [weights setBytes:&c length:sizeof(c) atIndex:0];
+      {
+        const NSUInteger w = s.repair_weight.threadExecutionWidth,
+                         h = std::max<NSUInteger>(1, std::min<NSUInteger>(8, s.repair_weight.maxTotalThreadsPerThreadgroup / w));
+        [weights dispatchThreads:MTLSizeMake(s.config.input_width, s.config.input_height, 1)
+           threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+      }
+      [weights endEncoding];
+      // Pass 2 at output resolution: the half-step warp where the weight is non-zero.
+      auto encoder = ComputeEncoder(commands, "framegen/repair");
+      if (!encoder) {
+        s.history.Reset();
+        error = "frame-generation repair encoder failed";
+        return false;
+      }
+      encoder.label = @"Liberty frame-generation discontinuity repair";
       [encoder setComputePipelineState:s.repair];
       [encoder setTexture:interpolated atIndex:0];
       [encoder setTexture:slot.scene atIndex:1];
-      [encoder setTexture:in.motion atIndex:2];
+      [encoder setTexture:s.repair_motion atIndex:2];
       [encoder setTexture:in.depth atIndex:3];
-      [encoder setTexture:in.reactive atIndex:4];
+      [encoder setTexture:s.repair_weights atIndex:4];
       [encoder setBytes:&c length:sizeof(c) atIndex:0];
       const NSUInteger w = s.repair.threadExecutionWidth,
                        h = std::max<NSUInteger>(

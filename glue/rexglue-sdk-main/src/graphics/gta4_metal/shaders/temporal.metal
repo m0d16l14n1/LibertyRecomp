@@ -281,40 +281,108 @@ struct TemporalRepairConstants {
  float depth_step;       // relative view-depth difference that counts as another layer
  float padding;
 };
+// Pass 1, at input resolution (a quarter of the output pixels): how strongly each input pixel's
+// neighbourhood needs the repair warp, into an R8 weight map.
+// - The rigid-deformation marker (tyres): the interpolator's failures on a spinning wheel (spoke
+//   debris, blocks of tyre dragged over the road and the arch) land just outside the current tyre
+//   silhouette, so the marked region is grown by two rings of 8 taps (3 and 7 input pixels).
+// - Edge repair (threshold < 60000, gta4_metalfx_frame_generation_repair_px): a depth step whose two
+//   sides move differently by more than the threshold (the bumper over the road seen from the side).
+// The search used to run per output pixel: ~8 ms (edges) and ~2.6 ms (marker growth) at 1440p.
+inline uint2 liberty_repair_tap(uint2 id,float2 offset,int2 last){
+ return uint2(clamp(int2(round(float2(id)+offset)),int2(0),last));
+}
+// Also writes the motion pass 2 warps with: a pixel's own motion, except on tyres. Tyre draws carry
+// their true motion (spin included) so the temporal scaler accumulates them; for the generated
+// frame a spinning wheel is drawn from the current pose moved with the car, so a tyre pixel takes
+// the mean motion of nearby non-tyre pixels at about its depth (wheel arch, sill, bumper).
+inline bool liberty_tyre_marker(float r){return r>0.70f&&r<0.80f;}
+kernel void liberty_temporal_framegen_repair_weight(texture2d<float,access::write> weights [[texture(0)]],
+ texture2d<float> motion [[texture(1)]],texture2d<float> depth [[texture(2)]],texture2d<float> reactive [[texture(3)]],
+ texture2d<float,access::write> repair_motion [[texture(4)]],
+ constant TemporalRepairConstants& c [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
+ const uint2 size=uint2(weights.get_width(),weights.get_height());
+ if(any(id>=size))return;
+ const int2 last=int2(size)-1;
+ float2 warp_motion=motion.read(id).xy;
+ if(liberty_tyre_marker(reactive.read(id).r)){
+  const float zc=depth.read(id).r;
+  if(temporal_valid_depth(zc)){
+   const float vc=temporal_view_depth(zc,c.near_plane,c.far_plane,c.reversed!=0);
+   float2 sum=0; float count=0;
+   const float body_rings[4]={4,8,13,20};
+   for(uint ring=0;ring<4&&count<6;++ring)for(uint k=0;k<8;++k){
+    const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
+    const uint2 tap=liberty_repair_tap(id,float2(cos(angle),sin(angle))*body_rings[ring],last);
+    if(reactive.read(tap).r>=0.5f)continue;  // another tyre pixel or no history
+    const float z=depth.read(tap).r;
+    if(!temporal_valid_depth(z))continue;
+    const float v=temporal_view_depth(z,c.near_plane,c.far_plane,c.reversed!=0);
+    if(abs(v-vc)>0.15f*vc)continue;  // the road or the background, not the car
+    sum+=motion.read(tap).xy; count+=1;
+   }
+   if(count>0)warp_motion=sum/count;
+  }
+ }
+ repair_motion.write(float4(warp_motion,0,0),id);
+ // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
+ // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
+ float weight=smoothstep(0.5f,0.7f,reactive.read(id).r);
+ const float rings[2]={3,7};
+ for(uint ring=0;ring<2&&weight<1;++ring)for(uint k=0;k<8;++k){
+  const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
+  weight=max(weight,smoothstep(0.5f,0.7f,reactive.read(liberty_repair_tap(id,float2(cos(angle),sin(angle))*rings[ring],last)).r));
+ }
+ if(c.threshold<60000.0f && weight<1){
+  const float z0=depth.read(id).r;
+  if(temporal_valid_depth(z0)){
+   const float v0=temporal_view_depth(z0,c.near_plane,c.far_plane,c.reversed!=0);
+   const float2 m0=motion.read(id).xy*c.motion_scale;
+   const float distances[4]={2,6,14,30};
+   for(uint ring=0;ring<4&&weight<1;++ring)for(uint k=0;k<8;++k){
+    const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
+    const uint2 tap=liberty_repair_tap(id,float2(cos(angle),sin(angle))*distances[ring],last);
+    const float z=depth.read(tap).r;
+    if(!temporal_valid_depth(z))continue;
+    const float v=temporal_view_depth(z,c.near_plane,c.far_plane,c.reversed!=0);
+    if(abs(v-v0)<=c.depth_step*min(v,v0))continue;
+    const float dm=length(motion.read(tap).xy*c.motion_scale-m0);
+    // The smear reaches about half the motion difference from the edge: farther taps need more.
+    if(dm*0.5f+2.0f<distances[ring]*c.motion_scale.x)continue;
+    weight=max(weight,saturate((dm-c.threshold)/max(c.threshold,1.0f)));
+   }
+  }
+ }
+ weights.write(float4(weight),id);
+}
+// Before the MetalFX temporal scaler: the mask it reads, with the tyre marker band
+// (kRigidReactiveMarker, 0.75) turned into a low reactive value so the scaler accumulates the
+// wheel instead of showing this frame's jittered sample. Everything else passes unchanged.
+kernel void liberty_temporal_scaler_reactive(texture2d<float,access::read> reactive [[texture(0)]],
+ texture2d<float,access::write> scaler [[texture(1)]],constant float& marker_value [[buffer(0)]],
+ uint2 id [[thread_position_in_grid]]) {
+ if(id.x>=scaler.get_width()||id.y>=scaler.get_height())return;
+ float r=reactive.read(id).r;
+ if(r>0.70f&&r<0.80f)r=marker_value;
+ scaler.write(float4(r),id);
+}
+// Pass 2, at output resolution: blend the generated pixel toward a half-step backward warp of the
+// current real scene by the (bilinear) weight from pass 1.
 kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write> generated [[texture(0)]],
  texture2d<float> scene [[texture(1)]],texture2d<float> motion [[texture(2)]],texture2d<float> depth [[texture(3)]],
- texture2d<float> reactive [[texture(4)]],
+ texture2d<float> repair_weight [[texture(4)]],
  constant TemporalRepairConstants& c [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
  if(id.x>=generated.get_width() || id.y>=generated.get_height())return;
  constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
  constexpr sampler linear_sampler(coord::normalized,address::clamp_to_edge,filter::linear);
  const float2 uv=(float2(id)+0.5f)*c.output_texel;
- // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
- // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
- float weight=smoothstep(0.5f,0.9f,reactive.sample(nearest,uv).r);
- // Edge repair is off (gta4_metalfx_frame_generation_repair_px = 0, sent as threshold 65504):
- // the ring search below cannot raise the weight then ((dm - 65504) / 65504 saturates to 0),
- // so a pixel without a strong reactive value is done. The search was ~8 ms per 1440p frame.
- const bool edges=c.threshold<60000.0f;
- if(!edges && weight<=0)return;
+ const float weight=repair_weight.sample(linear_sampler,uv).r;
+ if(weight<=0)return;
  const float z0=depth.sample(nearest,uv).r;
  if(!temporal_valid_depth(z0))return;
  const float v0=temporal_view_depth(z0,c.near_plane,c.far_plane,c.reversed!=0);
+ // Pass 1's warp motion: own motion, or the car body's next to a tyre.
  const float2 m0=motion.sample(nearest,uv).xy*c.motion_scale;
- const float distances[4]={2,6,14,30};
- if(edges)for(uint ring=0;ring<4;++ring)for(uint k=0;k<8;++k){
-  const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
-  const float2 tap=uv+float2(cos(angle),sin(angle))*distances[ring]*c.input_texel;
-  const float z=depth.sample(nearest,tap).r;
-  if(!temporal_valid_depth(z))continue;
-  const float v=temporal_view_depth(z,c.near_plane,c.far_plane,c.reversed!=0);
-  if(abs(v-v0)<=c.depth_step*min(v,v0))continue;
-  const float dm=length(motion.sample(nearest,tap).xy*c.motion_scale-m0);
-  // The smear reaches about half the motion difference from the edge: farther taps need more.
-  if(dm*0.5f+2.0f<distances[ring]*c.motion_scale.x)continue;
-  weight=max(weight,saturate((dm-c.threshold)/max(c.threshold,1.0f)));
- }
- if(weight<=0)return;
  // m points from the current position to the previous one; this pixel's content sits at the
  // midpoint, so it came from about uv - m/2 in the current image (scene only: the HUD is composed
  // over the generated image later, in present.mm).

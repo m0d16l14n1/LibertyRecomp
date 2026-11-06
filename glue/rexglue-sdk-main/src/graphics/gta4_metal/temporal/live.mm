@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <simd/simd.h>
+#include "draw_policy.h"
 #include "projection.h"
 #include "../raytracing/ambient_occlusion.h"
 #include "../raytracing/raytracing.h"
@@ -97,7 +98,8 @@ bool Live::Initialize(std::shared_ptr<ui::metal::MetalContext> c, std::string& e
          pipeline(@"liberty_temporal_background_motion", background_motion_) &&
          pipeline(@"liberty_temporal_camera_motion_fill", camera_motion_fill_) &&
          pipeline(@"liberty_temporal_affine_ui", compose_) &&
-         pipeline(@"liberty_temporal_affine_ui_inplace", compose_inplace_);
+         pipeline(@"liberty_temporal_affine_ui_inplace", compose_inplace_) &&
+         pipeline(@"liberty_temporal_scaler_reactive", scaler_reactive_);
 }
 bool Live::CreateImage(__strong id<MTLTexture>& image, MTLPixelFormat format, uint32_t w,
                        uint32_t h, NSString* name, std::string& error) {
@@ -416,9 +418,28 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
       std::memcpy(inputs.view_to_clip.data(), &projection, sizeof(projection));
       camera_matrices_sequence_ = metadata.sequence;
     }
+    // Frame generation marks tyres in the shared mask for its repair; the scaler gets a copy with
+    // that marker turned into a low reactive value (liberty_temporal_scaler_reactive).
+    Inputs scaler_inputs = inputs;
+    if (frame_generation && inputs.reactive && scaler_reactive_ &&
+        CreateImage(scaler_reactive_image_, MTLPixelFormatR8Unorm, config.input_width, config.input_height,
+                    @"Liberty temporal scaler reactive mask", error)) {
+      auto e = ComputeEncoder(cb, "temporal/scaler-reactive");
+      if (e) {
+        e.label = @"Liberty temporal scaler reactive mask";
+        const float marker = kRigidScalerReactive;
+        [e setComputePipelineState:scaler_reactive_];
+        [e setTexture:inputs.reactive atIndex:0];
+        [e setTexture:scaler_reactive_image_ atIndex:1];
+        [e setBytes:&marker length:sizeof(marker) atIndex:0];
+        Dispatch(e, scaler_reactive_, config.input_width, config.input_height);
+        [e endEncoding];
+        scaler_inputs.reactive = scaler_reactive_image_;
+      }
+    }
     const bool anti_aliased =
         aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
-        aa_.Encode(cb, inputs, metadata, resolved_, error);
+        aa_.Encode(cb, scaler_inputs, metadata, resolved_, error);
     if (std::string notice = aa_.TakeNotice(); !notice.empty()) REXLOG_INFO("{}", notice);
     if (anti_aliased) {
       KeepUntilCompleted(cb, resolved_.lease);

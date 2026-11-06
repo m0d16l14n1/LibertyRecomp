@@ -35,6 +35,9 @@ REXCVAR_DEFINE_UINT32(gta4_temporal_snapshot_every, 120, "GPU/Diagnostics",
                       "Temporal snapshot: capture every Nth accepted frame");
 REXCVAR_DEFINE_UINT32(gta4_temporal_snapshot_max, 4, "GPU/Diagnostics",
                       "Temporal snapshot: maximum captures for one output folder");
+REXCVAR_DEFINE_UINT32(gta4_temporal_snapshot_start, 0, "GPU/Diagnostics",
+                      "Temporal snapshot: first temporal sequence number to capture (0 = any); with "
+                      "_every = 1 this captures consecutive frames, for frame-to-frame stability");
 
 namespace rex::graphics::gta4_metal {
 namespace {
@@ -281,7 +284,9 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     }
     const uint64_t every = std::max<uint32_t>(1, REXCVAR_GET(gta4_temporal_snapshot_every));
     const uint64_t most = REXCVAR_GET(gta4_temporal_snapshot_max);
-    if (!folder.empty() && temporal.metadata.sequence % every == 0 && snapshot_count < most) {
+    const uint64_t start = REXCVAR_GET(gta4_temporal_snapshot_start);
+    if (!folder.empty() && temporal.metadata.sequence >= start &&
+        (temporal.metadata.sequence - start) % every == 0 && snapshot_count < most) {
       ++snapshot_count;
       const std::string prefix = fmt::format("{}/temporal_{}", folder, present.submitted_frame);
       DumpFrameImage(commands, temporal.inputs.color, prefix + "_scene.ppm");
