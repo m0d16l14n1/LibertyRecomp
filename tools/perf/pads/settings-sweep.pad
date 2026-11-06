@@ -1,0 +1,64 @@
+# Settings sweep: the action bench's heaviest windows, shortened (about 70 s timed): Broker drive at
+# noon, Hove Beach night drive in the rain, gunfight, explosions. Needs the career-street route save;
+# run through tools/perf/settings_sweep.sh (or route_bench.sh pad). Windows: drive, night, combat,
+# boom, all.
+await 5m
+wait 10s
+nowanted
+invincible
+clock 13 0
+weather 1
+
+road 1040 150 20
+car sultan
+wait 6s
+drive 18 0
+mark all
+mark drive
+wait 20s
+mark drive_end
+
+road 892 -500 10
+clock 21 30
+weather 4
+car infernus
+wait 6s
+drive 20 0
+mark night
+wait 15s
+mark night_end
+
+road 1040 150 20
+clock 13 0
+weather 1
+wait 4s
+weapon 14 9999
+cars sultan 4 14
+peds 8 1 12
+wait 2s
+mark combat
+trigger lt 1
+trigger rt 1 1.5s
+wait 0.5s
+trigger rt 1 1.5s
+wait 0.5s
+stick rx 0.6 1s
+trigger rt 1 1.5s
+wait 0.5s
+stick rx -0.6 1s
+trigger rt 1 1.5s
+release all
+mark combat_end
+
+mark boom
+explode 1
+wait 2s
+boom 12
+wait 2s
+explode 2
+wait 3s
+mark boom_end
+mark all_end
+shot {out}/shots/sweep.png 0.5
+wait 1s
+quit
