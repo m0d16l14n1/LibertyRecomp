@@ -109,6 +109,14 @@ acceleration-structure path is covered by `rex-metal-raytracing-structures-test`
   timestamps, debug groups, commit) closes it first. Pass timing turns it off (one stamp per
   encoder). Career city drive: ~3 merged blit encoders per frame (`copy-merged=`), 62 fps at 8.9 ms
   submit, image unchanged. `rex-metal4-proxy-copy-test` checks a dependency across merged encoders.
+- **Queued clears keep the open pass** (2026-11-06): `ClearSurface` ended the open render pass on
+  every clear, also when the clear was only folded into the next load action of a surface the pass
+  does not draw into. Surfaces are read only through resolves, which apply the queued clear first,
+  so the pass now ends only when the cleared surface is one of its attachments or a clear pass is
+  really encoded. Career city drive: clear-caused pass ends ~11 -> 7.9 per frame; the remaining
+  ones clear an attachment of the open pass (mostly a depth buffer reused between passes). Metal 3
+  62.3 fps / 7.65 ms submit, Metal 4 62.3 fps / 9.0 ms submit with no frame over 25 ms (~83
+  encoders per frame), images unchanged.
 - **Known fault:** on macOS 27.2, `MTL4CompilerTask` (asynchronous builds) with a pipeline data set
   serializer attached faulted in another port; synchronous `MTL4Compiler` calls on a GCD queue worked.
   Any move to `MTL4Compiler` uses synchronous calls on our own queue.

@@ -59,11 +59,20 @@ bool Renderer::State::ClearSurface(const std::shared_ptr<SurfaceResource>& surfa
     error = "Invalid depth clear value"; return false;
   }
   if (!Begin(error)) return false;
-  EndRender();
   const bool full = rectangle.full(uint32_t(image.width), uint32_t(image.height));
+  // A folded clear only queues a load action, so the open pass ends only when it draws into this
+  // surface. Surfaces are read through resolves, which apply the queued clear first, so a pass
+  // on other attachments cannot see it. This ended the pass on every clear (~10 a frame).
+  const auto attached = [&] {
+    if (!render) return false;
+    if (active_targets.depth && active_targets.depth->image == image) return true;
+    for (const auto& color : active_targets.colors) if (color && color->image == image) return true;
+    return false;
+  };
+  if (!(full && fold_full_clears) || attached()) EndRender();
   if (full && fold_full_clears) {
     if (!surface->pending_clear.aspects) {
-      if (pending_clears.size() >= 64 && !MaterializePendingClears(error)) return false;
+      if (pending_clears.size() >= 64) { EndRender(); if (!MaterializePendingClears(error)) return false; }
       pending_clears.push_back(surface);
     }
     surface->pending_clear.Merge(aspects, surface->depth, surface->initialized, color, depth, stencil);
