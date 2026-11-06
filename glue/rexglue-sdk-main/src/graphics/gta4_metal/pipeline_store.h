@@ -95,6 +95,7 @@ class PipelineStore {
   void Settle();
 
  private:
+  void PruneStaleArchives(const char* identity);
   static std::filesystem::path Directory(const std::filesystem::path& cache_root, uint32_t title_id);
   void TouchRebuildMarker();  // caller holds mutex_
   void ClearRebuildMarker();  // caller holds mutex_

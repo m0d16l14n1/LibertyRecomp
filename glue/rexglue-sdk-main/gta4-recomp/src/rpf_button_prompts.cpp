@@ -538,10 +538,24 @@ std::optional<std::filesystem::path> PrepareArchive(const std::filesystem::path&
       "xbox360-" + source_hash.substr(0, 16) + "-" + replacement_hash.substr(0, 16) + ".rpf";
   const auto destination = prompt_cache / cache_name;
 
+  // A game-data or prompt change gets a new ~60 MB archive name; drop the older ones (they were
+  // never removed). Only finished archives of this naming scheme, never the current one.
+  const auto prune_stale = [&] {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(prompt_cache, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (name == cache_name || name.rfind("xbox360-", 0) != 0 || entry.path().extension() != ".rpf") continue;
+      std::error_code remove_error;
+      if (std::filesystem::remove(entry.path(), remove_error))
+        REXLOG_INFO("Button prompts: removed stale archive '{}'", name);
+    }
+  };
+
   std::string error;
   if (std::filesystem::is_regular_file(destination, fs_error) &&
       VerifyShadow(destination, *key, replacement_hash, error)) {
     REXLOG_INFO("Button prompts: using cached '{}' archive", variant);
+    prune_stale();
     return destination;
   }
 
@@ -566,6 +580,7 @@ std::optional<std::filesystem::path> PrepareArchive(const std::filesystem::path&
     return std::nullopt;
   }
   REXLOG_INFO("Button prompts: built '{}' shadow archive at '{}'", variant, destination.string());
+  prune_stale();
   return destination;
 }
 

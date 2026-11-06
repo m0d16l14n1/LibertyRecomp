@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <functional>
 #include <cstring>
 #include <unistd.h>
 #include <rex/logging.h>
@@ -12,6 +13,34 @@ namespace rex::graphics::gta4_metal {
 
 namespace {
 constexpr const char* kRebuildMarker = "rebuild-pending";
+}
+
+// Every shader, OS or GPU change gets a new identity and a fresh ~40-50 MB archive; the old ones
+// were never removed (six of them, 227 MB, after two days of builds). Keep this identity's
+// archive and the most recently written other one (switching back to the previous build does not
+// recompile everything) and delete the rest.
+void PipelineStore::PruneStaleArchives(const char* identity) {
+  std::error_code ec;
+  const std::string current = std::string("pipelines-") + identity;
+  std::vector<std::pair<std::filesystem::file_time_type, std::string>> others;
+  for (const auto& entry : std::filesystem::directory_iterator(directory_, ec)) {
+    const auto path = entry.path();
+    if (path.extension() != ".metalar") continue;
+    const std::string stem = path.stem().string();
+    if (stem.rfind("pipelines-", 0) != 0 || stem == current) continue;
+    others.emplace_back(entry.last_write_time(ec), stem);
+  }
+  if (others.size() <= 1) return;
+  std::sort(others.begin(), others.end(), std::greater<>());
+  uintmax_t freed = 0;
+  for (size_t i = 1; i < others.size(); ++i) {
+    for (const char* extension : {".metalar", ".manifest"}) {
+      const auto path = directory_ / (others[i].second + extension);
+      const auto size = std::filesystem::file_size(path, ec);
+      if (std::filesystem::remove(path, ec) && !ec) freed += size;
+    }
+  }
+  REXLOG_INFO("gta4-metal-pipeline-cache: removed {} stale archives ({} MB)", others.size() - 1, freed >> 20);
 }
 
 std::filesystem::path PipelineStore::Directory(const std::filesystem::path& cache_root, uint32_t title_id) {
@@ -178,6 +207,7 @@ bool PipelineStore::Open(id<MTLDevice> device, const std::filesystem::path& cach
   manifest_path_ = directory_ / (std::string("pipelines-") + identity + ".manifest");
   marker_path_ = directory_ / kRebuildMarker;
   marker_present_ = std::filesystem::exists(marker_path_, ec);
+  PruneStaleArchives(identity);
 
   // Recipe log: a sequence of fixed-size records; a torn tail record is ignored.
   if (std::ifstream in(recipes_path_, std::ios::binary); in) {
