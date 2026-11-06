@@ -86,6 +86,8 @@ bool MetalShaderArchive::Open(std::span<const std::byte> bytes,
     record.output_mask = U32(row, 20);
     record.attribute_count = U32(row, 24);
     record.flags = U32(row, 28);
+    for (size_t word = 0; word < record.float_constant_mask.size(); ++word)
+      record.float_constant_mask[word] = U64(row, 96 + word * 8);
     if (record.hash <= previous || stage > 1 || (record.used_texture_mask & ~kMetalArchiveTextureMask) ||
         (record.output_mask & ~31u) || (record.flags & ~15u) || U32(row, 76) ||
         record.attribute_count > kMetalArchiveMaximumAttributes ||
@@ -133,6 +135,28 @@ bool MetalShaderArchive::Open(std::span<const std::byte> bytes,
   if (end != bytes.size()) return fail("Metal shader archive has an unreferenced tail");
   records_ = std::move(records);
   return true;
+}
+
+uint64_t MetalShaderArchive::PipelineIdentity(const MetalArchiveHash& hash) const {
+  uint64_t seed = records_.size();
+  const auto add = [&](std::span<const std::byte> bytes) { seed = hash(bytes, seed); };
+  for (const auto& record : records_) {
+    std::array<uint64_t, 8> fields{record.hash, uint64_t(record.stage), record.used_texture_mask,
+                                   record.specialization_constants_mask, record.output_mask,
+                                   record.flags, record.attribute_count, 0};
+    add(std::as_bytes(std::span(fields)));
+    for (uint32_t a = 0; a < record.attribute_count; ++a) {
+      const auto& attribute = record.attributes[a];
+      const std::array<uint32_t, 4> values{attribute.index, attribute.semantic_location,
+                                           uint32_t(attribute.scalar_type), attribute.components};
+      add(std::as_bytes(std::span(values)));
+    }
+    const std::array<uint64_t, 2> sizes{record.early_library.size(), record.late_library.size()};
+    add(std::as_bytes(std::span(sizes)));
+    add(record.early_library);
+    add(record.late_library);
+  }
+  return seed;
 }
 
 const MetalShaderRecord* MetalShaderArchive::Find(uint64_t hash, MetalArchiveStage stage) const noexcept {

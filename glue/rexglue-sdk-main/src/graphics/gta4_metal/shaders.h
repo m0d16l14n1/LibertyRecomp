@@ -27,6 +27,8 @@ struct ShaderMetadata {
   std::array<MetalVertexAttribute, kMetalArchiveMaximumAttributes> attributes{};
   bool native_output = false;
   bool coverage_output = false;
+  // Float constants of this stage's bank the shader may read (bit n = cN); see shader_archive.h.
+  std::array<uint64_t, 4> float_constant_mask{~0ull, ~0ull, ~0ull, ~0ull};  // unknown: every register
 };
 
 // Runtime libraries are mapped only for Metal. Vulkan/DXIL caches stay unopened.

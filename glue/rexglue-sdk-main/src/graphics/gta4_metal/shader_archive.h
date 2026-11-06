@@ -13,9 +13,9 @@ namespace rex::graphics::gta4_metal {
 
 // Serialized fields are little-endian; no compiler struct layout is on disk.
 // Views borrow the mapped file. Its owner must outlive the ArchiveIndex.
-inline constexpr uint32_t kMetalArchiveVersion = 2;
+inline constexpr uint32_t kMetalArchiveVersion = 3;
 inline constexpr size_t kMetalArchiveHeaderBytes = 64;
-inline constexpr size_t kMetalArchiveRecordBytes = 96;
+inline constexpr size_t kMetalArchiveRecordBytes = 128;  // v3: +256-bit constant mask
 inline constexpr size_t kMetalArchiveAttributeBytes = 16;
 inline constexpr size_t kMetalArchiveMaximumBytes = 256u * 1024u * 1024u;
 inline constexpr uint32_t kMetalArchiveMaximumShaders = 16384;
@@ -48,6 +48,9 @@ struct MetalShaderRecord {
   uint32_t flags = 0;
   uint32_t attribute_count = 0;
   std::array<MetalVertexAttribute, kMetalArchiveMaximumAttributes> attributes{};
+  // Bit n of word n/64: the shader may read float constant cN of its stage's bank.
+  // Derived from the translated source; all ones where reads were not derived.
+  std::array<uint64_t, 4> float_constant_mask{~0ull, ~0ull, ~0ull, ~0ull};  // unknown: every register
   std::string_view name;
   std::span<const std::byte> early_library;
   std::span<const std::byte> late_library;
@@ -55,6 +58,8 @@ struct MetalShaderRecord {
 
 using MetalArchiveDigestVerifier = std::function<bool(
     std::span<const std::byte>, std::span<const std::byte, 32>)>;
+// Seeded 64-bit hash (XXH3_64bits_withSeed at runtime); chained over the archive's records.
+using MetalArchiveHash = std::function<uint64_t(std::span<const std::byte>, uint64_t seed)>;
 
 class MetalShaderArchive {
  public:
@@ -63,6 +68,11 @@ class MetalShaderArchive {
             std::string& error);
   const MetalShaderRecord* Find(uint64_t hash, MetalArchiveStage stage) const noexcept;
   std::span<const MetalShaderRecord> records() const noexcept { return records_; }
+  // Identity of everything that can reach a compiled pipeline: each record's hash, stage,
+  // texture/specialization/output masks, flags, vertex attributes and Metal libraries. The
+  // name and float_constant_mask are left out, so metadata that no pipeline sees (and the
+  // archive container version) do not invalidate the pipeline binary archive keyed on it.
+  uint64_t PipelineIdentity(const MetalArchiveHash& hash) const;
   void Clear() noexcept { records_.clear(); }
 
  private:

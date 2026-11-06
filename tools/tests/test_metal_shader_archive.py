@@ -121,7 +121,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(a.parse_archive(a.build_archive(many)), many)
 
     def test_invalid_header(self):
-        for offset, fmt, value in [(0, "Q", 0), (8, "I", 3), (12, "I", 0), (16, "I", 0), (20, "I", 0), (20, "I", a.MAX_SHADERS + 1)]:
+        for offset, fmt, value in [(0, "Q", 0), (8, "I", 2), (8, "I", 4), (12, "I", 0), (16, "I", 0), (20, "I", 0), (20, "I", a.MAX_SHADERS + 1)]:
             with self.subTest(offset=offset, value=value), self.assertRaises(ValueError):
                 a.parse_archive(altered(self.data, offset, "<" + fmt, value))
 
@@ -198,6 +198,94 @@ class ArchiveTests(unittest.TestCase):
             a._atomic_write(path, b"new")
             self.assertEqual(path.read_bytes(), b"new")
             self.assertEqual(len(list(path.parent.iterdir())), 1)
+
+
+class ConstantMaskArchiveTests(unittest.TestCase):
+    def test_default_is_every_register(self):
+        self.assertEqual(fixtures()[0].constant_mask, a.ALL_CONSTANTS)
+
+    def test_roundtrip_and_record_layout(self):
+        masks = (0, 1 | 1 << 69 | 1 << 255)
+        shaders = tuple(replace(s, constant_mask=m) for s, m in zip(fixtures(), masks))
+        data = a.build_archive(shaders)
+        self.assertEqual(a.RECORD.size, 128)
+        self.assertEqual(a.parse_archive(data), shaders)
+        words = struct.unpack_from("<4Q", data, 64 + a.RECORD.size + 96)
+        self.assertEqual(words, (1, 1 << 5, 0, 1 << 63))
+
+    def test_reject_mask_outside_bank(self):
+        for bad in (-1, a.ALL_CONSTANTS + 1):
+            with self.assertRaises(ValueError): a.build_archive([replace(fixtures()[0], constant_mask=bad)])
+
+
+MASK_VERTEX = """#ifdef __air__
+#define gWorld(INDEX) selectWrapper((INDEX) < 256, (*(reinterpret_cast<device float4*>(g_PushConstants.VertexShaderConstants + (0 + min((uint)(INDEX), (uint)255)) * 16))), 0.0)
+#define gBoneMtx(INDEX) selectWrapper((INDEX) < 192, (*(reinterpret_cast<device float4*>(g_PushConstants.VertexShaderConstants + (64 + min((uint)(INDEX), (uint)191)) * 16))), 0.0)
+#define tint (*(reinterpret_cast<device float4*>(g_PushConstants.VertexShaderConstants + 400)))
+#define tint2 (*(reinterpret_cast<device float4*>(g_PushConstants.VertexShaderConstants + 416)))
+#define fog (*(reinterpret_cast<device float4*>(g_PushConstants.VertexShaderConstants + 656)))
+#define g_Booleans (*(reinterpret_cast<device uint*>(g_PushConstants.SharedConstants + 528)))
+#else
+cbuffer VertexShaderConstants : register(b0, space4)
+{
+\tfloat4 gWorld[3] : packoffset(c0);
+#define gWorld(INDEX) selectWrapper((INDEX) < 256, gWorld[min(INDEX, 255)], 0.0)
+\tfloat4 gBoneMtx[144] : packoffset(c64);
+#define gBoneMtx(INDEX) selectWrapper((INDEX) < 192, gBoneMtx[min(INDEX, 191)], 0.0)
+\tfloat4 tint : packoffset(c25);
+\tfloat4 tint2 : packoffset(c26);
+\tfloat4 fog : packoffset(c41);
+};
+#endif
+Interpolators shaderMain(VertexShaderInput input) {
+\tfloat4 c255 = float4(1.0, 0.0, 0.0, 0.0);
+\tint a0 = 0;
+\tr0 = gWorld(0) + gWorld( 2 ) + c255;
+\ta0 = (int)r0.x;
+\tr1 = gBoneMtx(1 + a0) * tint2.x;
+\treturn output;
+}
+"""
+
+
+def registers(*ranges):
+    mask = 0
+    for r in ranges:
+        for n in (r if isinstance(r, range) else (r,)):
+            mask |= 1 << n
+    return mask
+
+
+class ConstantMaskSourceTests(unittest.TestCase):
+    def test_literal_relative_and_single_reads(self):
+        # gWorld(0), gWorld(2); gBoneMtx(1 + a0) may reach c64..c255; tint2 but not tint
+        # (prefix) nor the unused fog; the local c255 is not a bank read.
+        self.assertEqual(a.constant_mask(MASK_VERTEX, a.VERTEX), registers(0, 2, 26, range(64, 256)))
+
+    def test_stage_bank_only(self):
+        source = MASK_VERTEX.replace("VertexShaderConstants", "PixelShaderConstants")
+        self.assertEqual(a.constant_mask(source, a.PIXEL), registers(0, 2, 26, range(64, 256)))
+        self.assertEqual(a.constant_mask(source, a.VERTEX), a.ALL_CONSTANTS)  # reads the other bank
+
+    def test_no_constants(self):
+        source = "Interpolators shaderMain(VertexShaderInput input) { return output; }"
+        self.assertEqual(a.constant_mask(source, a.VERTEX), 0)
+        empty = "cbuffer VertexShaderConstants : register(b0, space4)\n{\n};\n" + source
+        self.assertEqual(a.constant_mask(empty, a.VERTEX), 0)
+
+    def test_unrecognised_reads_are_every_register(self):
+        raw_code = MASK_VERTEX.replace("return output;", "r2 = *(device float4*)(g_PushConstants.VertexShaderConstants + 512);\n\treturn output;")
+        raw_define = MASK_VERTEX.replace("#define g_Booleans", "#define hidden (*(device float4*)(g_PushConstants.VertexShaderConstants + 512))\n#define g_Booleans")
+        matrix = MASK_VERTEX.replace("float4 fog : packoffset(c41);", "float4x4 fog : packoffset(c41);")
+        bare_array = MASK_VERTEX.replace("return output;", "r3 = gWorld[1];\n\treturn output;")
+        twice = MASK_VERTEX.replace("float4 fog : packoffset(c41);", "float4 fog : packoffset(c41);\n\tfloat4 fog : packoffset(c42);")
+        for source in (raw_code, raw_define, matrix, bare_array, twice):
+            with self.subTest(source=source[-120:]):
+                self.assertEqual(a.constant_mask(source, a.VERTEX), a.ALL_CONSTANTS)
+
+    def test_literal_index_past_the_bank(self):
+        source = MASK_VERTEX.replace("gWorld( 2 )", "gBoneMtx(200)").replace("gBoneMtx(1 + a0)", "gWorld(1)")
+        self.assertEqual(a.constant_mask(source, a.VERTEX), registers(0, 1, 26))  # c264 is no register
 
 
 class SourceTests(unittest.TestCase):
@@ -309,21 +397,51 @@ class CppAgreementTests(unittest.TestCase):
                 data[at:at + 8] = rng.getrandbits(64).to_bytes(8, "little")
             cases.append(repair(data) if index % 2 else bytes(data))
         expected = []
+        for index, data in enumerate(cases):
+            try:
+                shaders = a.parse_archive(data)
+                masks = 0
+                for shader in shaders:
+                    for word, value in enumerate(a.constant_words(shader.constant_mask)):
+                        masks ^= (value * (word * 2 + 1)) & ((1 << 64) - 1)
+                expected.append((1, len(shaders), masks))
+            except ValueError:
+                expected.append((0, 0, 0))
+        actual = [row[:3] for row in self.run_cases(cases)]
+        self.assertEqual(actual, expected)
+
+    def run_cases(self, cases):
         paths = []
         for index, data in enumerate(cases):
             path = self.root / f"case-{index}.bin"
             path.write_bytes(data)
             paths.append(str(path))
-            try:
-                count = len(a.parse_archive(data))
-                expected.append((1, count))
-            except ValueError:
-                expected.append((0, 0))
         completed = subprocess.run([str(self.executable), *paths], capture_output=True, text=True, check=True,
                                    env={**os.environ, "ASAN_OPTIONS": "detect_leaks=" + ("0" if platform.system() == "Darwin" else "1") + ":halt_on_error=1"})
-        actual = [tuple(map(int, row.split("\t")[1:])) for row in completed.stdout.splitlines()]
-        self.assertEqual(actual, expected)
         self.assertNotIn("ERROR", completed.stderr)
+        return [tuple(map(int, row.split("\t")[1:])) for row in completed.stdout.splitlines()]
+
+    def test_constant_masks_read_by_cpp(self):
+        masked = tuple(replace(s, constant_mask=m) for s, m in zip(fixtures(), (1 << 64 | 7, 1 << 255)))
+        (valid, count, masks, _), = self.run_cases([a.build_archive(masked)])
+        self.assertEqual((valid, count), (1, 2))
+        self.assertEqual(masks, 7 ^ (1 * 3) ^ ((1 << 63) * 7 & ((1 << 64) - 1)))
+
+    def test_pipeline_identity_ignores_metadata_only(self):
+        base = fixtures()
+        rows = self.run_cases([
+            a.build_archive(base),
+            a.build_archive(tuple(replace(s, constant_mask=0) for s in base)),  # read masks only
+            a.build_archive((replace(base[0], name="renamed"), base[1])),         # name only
+            a.build_archive((replace(base[0], early=b"MTLBchanged"), base[1])),   # a library
+            a.build_archive((replace(base[0], texture_mask=1), base[1])),         # pipeline metadata
+        ])
+        identities = [row[3] for row in rows]
+        self.assertTrue(all(row[0] == 1 for row in rows))
+        self.assertEqual(identities[0], identities[1])
+        self.assertEqual(identities[0], identities[2])
+        self.assertNotEqual(identities[0], identities[3])
+        self.assertNotEqual(identities[0], identities[4])
 
 
 if __name__ == "__main__":

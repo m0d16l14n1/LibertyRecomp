@@ -143,7 +143,11 @@ bool ShaderCache::InitializeFile(const std::string& path, std::string& error) {
     };
     if (!impl_->index.Open({static_cast<const std::byte*>(bytes.bytes), bytes.length}, digest, error)) return false;
     impl_->file = bytes;
-    impl_->identity = XXH3_64bits(bytes.bytes, bytes.length);
+    // Pipeline-relevant content only: new metadata alone keeps the pipeline binary archive.
+    impl_->identity = impl_->index.PipelineIdentity([](std::span<const std::byte> data, uint64_t seed) {
+      return XXH3_64bits_withSeed(data.data(), data.size(), seed);
+    });
+    if (!impl_->identity) impl_->identity = 1;  // 0 means "no archive loaded" to RecipeBuildable
     return true;
   }
 }
@@ -175,6 +179,7 @@ const ShaderMetadata* ShaderCache::Metadata(uint64_t hash,gta4_native::ShaderSta
   result.hash = record->hash;
   result.stage = stage;
   result.used_texture_mask = record->used_texture_mask;
+  result.float_constant_mask = record->float_constant_mask;
   result.specialization_constants_mask = record->specialization_constants_mask;
   result.color_output_mask = record->output_mask & 15;
   result.writes_depth = (record->output_mask & 16) != 0;
