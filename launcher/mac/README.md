@@ -37,3 +37,23 @@ LIBERTY_DIR="out/build/macos-release/LibertyRecomp/Liberty Recompiled.app/Conten
 
 The launcher's own preferences (what it does when the game starts, extra options for the game) are in its user
 defaults (`OZORDI.LibertyRecomp`), not in `native.toml`.
+
+## Installing a local build
+
+The CMake build stays in `out/build`; rebuilding it does not overwrite an older
+copy already in `/Applications`. Check whether Finder will open the current
+build with:
+
+```bash
+tools/macos/install_app.sh --check
+```
+
+Install the current release bundle with:
+
+```bash
+tools/macos/install_app.sh
+```
+
+The script verifies the arm64 bundle before and after installation, refuses to
+run while the launcher or game is open, and moves the previous app to the Trash
+for rollback. It does not touch game files, saves, settings, or shader caches.
