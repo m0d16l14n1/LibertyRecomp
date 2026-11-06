@@ -4,6 +4,36 @@ Written 2026-11-04, before a reboot, so the work can resume; updated the same ev
 Metal 4 + FG investigation. For the Metal 4 renderer in general see
 `docs/METAL4.md`. For ray tracing see `docs/RAYTRACING.md`.
 
+## Status, 2026-11-06: not a win on a 60 Hz panel yet
+
+Earlier sections call parts of this fixed; measured on the action bench (M5 Air, built-in 60 Hz
+panel, 1440p, MetalFX TAA, route save `career-street`) frame generation still costs more than it
+gives:
+
+| Metal 3, action bench | real fps | shown fps | GPU ms/real frame |
+|---|---|---|---|
+| FG off, vsync | 44 | 44 | 14.3 |
+| FG on, before 9a082d68 | 17 | 28-34 | 25.7 |
+| FG on, after 9a082d68 | 23 | 36-46 | 21.9 |
+
+What 9a082d68 fixed:
+- The publication gate made the producer wait for the previous pair's *real* frame before
+  publishing the next one (38 ms median), so each pair took three refreshes behind the next
+  frame's GPU work. It now waits for the generated frame only; the presenter keeps a started pair's
+  real image itself.
+- `liberty_temporal_framegen_repair` ran its 32-tap ring search per output pixel even with
+  `gta4_metalfx_frame_generation_repair_px = 0`, where it cannot change the result: 8.1 ms of a
+  28.4 ms Metal 4 frame. Metal 4 + FG drive: GPU 28.4 -> 17.8 ms, shown 40 -> 48 fps.
+
+Why it still loses here: `_half_rate` caps real frames at 30 on a 60 Hz panel, so the best case is
+the 60 shown frames the game nearly reaches without generation, at half the input rate. The
+interpolator itself is 5.8-6.6 ms of GPU at 2560x1440 output and the sharpen pass 1.2 ms. Generation
+only makes sense on a 120 Hz panel, or when the real rate is well under 30.
+
+Unrelated to generation but found on the way: with `MetalForceHudEnabled` set for every app (this
+Mac) and `gta4_performance_hud = system`, Apple's HUD hooks every encoder; vsync drive 42.8 fps
+with it, 49.8 with `gta4_performance_hud = off`.
+
 ## Goal
 
 The user asked for these on 2026-11-04:
