@@ -316,7 +316,7 @@ void Renderer::State::EndRender(std::source_location caller) {
     const char* file=caller.file_name(); if(const char* slash=std::strrchr(file,'/')) file=slash+1;
     gpu_pass_timer::Count(fmt::format("end-pass@{}:{}",file,caller.line()));
   }
-  if(render) { FinishScopeProfile(); [render endEncoding]; render=nil; bindings.Reset(cache_encoder_state); }
+  if(render) { FinishScopeProfile(); [render endEncoding]; render=nil; bindings.Reset(cache_encoder_state); ended_targets=active_targets; }
   active_targets={};
 }
 bool Renderer::State::Flush(bool wait,std::string& error) {

@@ -107,7 +107,7 @@ Renderer::State::Pipeline* Renderer::State::DrawPipeline(const Targets& targets,
   add(specialization); add(late); add(targets.samples); add(targets.depth?targets.depth->image.pixelFormat:0);
   add(up); add(fixed.color_write_mask);
   add(uint32_t(targets.temporal_motion)|(uint32_t(targets.temporal_reactive)<<1)|
-      (uint32_t(targets.temporal_ui)<<2)|(uint32_t(targets.temporal_jitter)<<3));
+      (uint32_t(targets.temporal_ui)<<2)|(uint32_t(targets.temporal_jitter)<<3)|(uint32_t(targets.pass_temporal)<<4));
   for(uint32_t i=0;i<kRenderTargetCount;++i) {
     add(targets.colors[i]?targets.colors[i]->image.pixelFormat:0);
     add(targets.colors[i]?fixed.blend_controls[i]:0);
@@ -186,6 +186,19 @@ Renderer::State::Pipeline* Renderer::State::DrawPipeline(const Targets& targets,
       a.destinationRGBBlendFactor=MTLBlendFactorOneMinusSourceAlpha;
     auto t=descriptor.colorAttachments[7];t.pixelFormat=MTLPixelFormatRGBA16Float;t.writeMask=ColorMask(NativeColorWriteMaskForTarget(fixed.color_write_mask,0)&7u);
     t.blendingEnabled=YES;t.sourceRGBBlendFactor=MTLBlendFactorZero;t.destinationRGBBlendFactor=MTLBlendFactorSourceColor;
+  }
+  // The pass's temporal attachments this draw does not write: declared, never written.
+  const auto quiet=[&](NSUInteger index,MTLPixelFormat format){
+    auto a=descriptor.colorAttachments[index];a.pixelFormat=format;a.writeMask=MTLColorWriteMaskNone;a.blendingEnabled=NO;
+  };
+  if((targets.pass_temporal&kPassMotionReactive)&&!(targets.temporal_motion||targets.temporal_reactive)){
+    quiet(4,MTLPixelFormatRG16Float);quiet(5,MTLPixelFormatR8Unorm);
+  }
+  if((targets.pass_temporal&kPassMotionDepth)&&!targets.temporal_motion){
+    quiet(6,MTLPixelFormatR32Float);quiet(7,MTLPixelFormatRG16Float);
+  }
+  if((targets.pass_temporal&kPassUi)&&!targets.temporal_ui){
+    quiet(6,MTLPixelFormatRGBA16Float);quiet(7,MTLPixelFormatRGBA16Float);
   }
   auto layout=[MTLVertexDescriptor vertexDescriptor];
   for(uint32_t index=0;index<vs->attribute_count;++index) {

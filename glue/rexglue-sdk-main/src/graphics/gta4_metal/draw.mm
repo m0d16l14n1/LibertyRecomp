@@ -210,11 +210,27 @@ bool Renderer::State::CaptureTargets(std::span<const uint8_t> guest,uint32_t col
   return true;
 }
 
+void Renderer::State::ChoosePassTemporal(Targets& targets) const {
+  const uint8_t need=TemporalNeed(targets);
+  targets.pass_temporal=need;
+  // Only scene-extent passes carry the temporal images, and only while they exist.
+  if(!temporal_scene.inputs.motion||!temporal_scene.inputs.reactive||!temporal_scene.inputs.previous_depth||
+     !temporal_scene.inputs.rigid_motion||!temporal_scene.ui_add||!temporal_scene.ui_transmit)return;
+  const auto adopt=[&](const Targets& other){
+    if(!other.pass_temporal||!SameAttachments(other,targets))return false;
+    const uint8_t merged=uint8_t(other.pass_temporal|need);
+    if(!ValidPassTemporal(merged))return false;
+    targets.pass_temporal=merged;
+    return true;
+  };
+  if(render&&adopt(active_targets))return;
+  if(!render)adopt(ended_targets);
+}
 bool Renderer::State::PassContinues(const Targets& target) const {
   bool same = bool(render) && active_targets.depth == target.depth &&
       active_targets.width == target.width && active_targets.height == target.height &&
       active_targets.samples == target.samples &&
-      active_targets.temporal_motion==target.temporal_motion&&active_targets.temporal_reactive==target.temporal_reactive&&active_targets.temporal_ui==target.temporal_ui;
+      active_targets.pass_temporal==target.pass_temporal;
   for(size_t i=0;i<target.colors.size();++i) same&=active_targets.colors[i]==target.colors[i];
   return same;
 }
@@ -281,9 +297,9 @@ bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
   const auto extra=[&](NSUInteger index,id<MTLTexture> image){
     pass.colorAttachments[index].texture=image;pass.colorAttachments[index].loadAction=MTLLoadActionLoad;pass.colorAttachments[index].storeAction=MTLStoreActionStore;
   };
-  if(target.temporal_motion||target.temporal_reactive){extra(4,temporal_scene.inputs.motion);extra(5,temporal_scene.inputs.reactive);}
-  if(target.temporal_motion){extra(6,temporal_scene.inputs.previous_depth);extra(7,temporal_scene.inputs.rigid_motion);}
-  if(target.temporal_ui){extra(6,temporal_scene.ui_add);extra(7,temporal_scene.ui_transmit);}
+  if(target.pass_temporal&kPassMotionReactive){extra(4,temporal_scene.inputs.motion);extra(5,temporal_scene.inputs.reactive);}
+  if(target.pass_temporal&kPassMotionDepth){extra(6,temporal_scene.inputs.previous_depth);extra(7,temporal_scene.inputs.rigid_motion);}
+  if(target.pass_temporal&kPassUi){extra(6,temporal_scene.ui_add);extra(7,temporal_scene.ui_transmit);}
   pass.renderTargetWidth=target.width; pass.renderTargetHeight=target.height;
   pass.defaultRasterSampleCount=target.samples;
   if(gpu_pass_timer::enabled()){
@@ -515,6 +531,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       temporal.ui_exact=false;targets.temporal_ui=false;
     }
   }
+  ChoosePassTemporal(targets);
   // Hand the GPU what is encoded so far once the frame is big enough, at a pass break this draw
   // causes anyway, before any of its uploads (they land in the next part's arena).
   if(split_commit_draws&&!frame_split&&draws-part_first_draw>=split_commit_draws&&!PassContinues(targets)&&

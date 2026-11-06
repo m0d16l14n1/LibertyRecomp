@@ -90,6 +90,17 @@ acceleration-structure path is covered by `rex-metal-raytracing-structures-test`
   transient bytes) is about 3% of the thread; the rest is the game's recompiled code and our draw
   translation. Further Metal 4 CPU gains need fewer encoders (merging passes) or fewer draws, not
   proxy work.
+- **Temporal attachment pass merging** (2026-11-06): a scene pass carries extra temporal
+  attachments (motion/reactive at 4-5, previous depth/rigid motion or the UI pair at 6-7). Draws that
+  needed a different set used to end the pass and reopen it on the same targets: 5-13 times a frame
+  (`target-switch mask=00`). Now a pass keeps the union (`Targets::pass_temporal`; motion and UI
+  cannot share 6-7) and a draw needing fewer declares the extras write-off in its pipeline. A pass
+  reopened on the same attachments after a resolve inherits the last pass's set. Career city drive,
+  1440p MetalFX TAA: same-target restarts 5.4 -> 0.2 per frame, scene passes 20 -> 14.7, Metal 4 game
+  passes per command buffer 36 -> 18; Metal 3 submit 10.3 -> 7.9 ms, 59 -> 62 fps; Metal 4 (cooled)
+  61.8 -> 62.3 fps, GPU 11.5 -> 8.9 ms, p95 18.6 -> 18.0 ms (a back-to-back hot run read 46 fps with submit
+  climbing 12 -> 17 ms at flat GPU time: CPU throttling, not the change). The new pipeline
+  variants compile on first sight and are then archived.
 - **Known fault:** on macOS 27.2, `MTL4CompilerTask` (asynchronous builds) with a pipeline data set
   serializer attached faulted in another port; synchronous `MTL4Compiler` calls on a GCD queue worked.
   Any move to `MTL4Compiler` uses synchronous calls on our own queue.

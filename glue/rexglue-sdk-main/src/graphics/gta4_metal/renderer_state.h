@@ -52,7 +52,25 @@ struct Renderer::State {
     uint32_t width=0,height=0,logical_width=0,logical_height=0,samples=1;
     uint32_t color_mask=0;
     bool temporal_motion=false,temporal_reactive=false,temporal_ui=false,temporal_jitter=false;
+    // The temporal attachments the render pass carries (kPass* bits), a superset of what this
+    // draw writes: a draw needing fewer joins the open pass with its extras declared write-off.
+    uint8_t pass_temporal=0;
   };
+  static constexpr uint8_t kPassMotionReactive=1,kPassMotionDepth=2,kPassUi=4;
+  static constexpr uint8_t TemporalNeed(const Targets& t) {
+    return uint8_t((t.temporal_motion||t.temporal_reactive?kPassMotionReactive:0)|
+                   (t.temporal_motion?kPassMotionDepth:0)|(t.temporal_ui?kPassUi:0));
+  }
+  static constexpr bool ValidPassTemporal(uint8_t layout) {
+    return !((layout&kPassMotionDepth)&&(layout&kPassUi));
+  }
+  static bool SameAttachments(const Targets& a,const Targets& b) {
+    if(a.depth!=b.depth||a.width!=b.width||a.height!=b.height||a.samples!=b.samples)return false;
+    for(size_t i=0;i<a.colors.size();++i) if(a.colors[i]!=b.colors[i]) return false;
+    return true;
+  }
+  // Picks targets.pass_temporal before the pipeline lookup (see Targets::pass_temporal).
+  void ChoosePassTemporal(Targets& targets) const;
   struct PipelineBuild {
     std::mutex mutex;
     std::condition_variable wake;
@@ -360,6 +378,9 @@ struct Renderer::State {
   bool CommitPart(std::string& error);
   bool CommitEncoded(std::string& error);
   bool PassContinues(const Targets&) const;
+  // The last pass ended this frame: a pass reopened on the same attachments (after a resolve or
+  // a temporal-layout change) takes over its temporal attachments, so it does not split again.
+  Targets ended_targets;
   uint32_t split_commit_draws=0;
   bool temporal_vertex_texture_history=true,temporal_reactive_weighting=true,temporal_reactive_log=false;
   bool temporal_generation_rigid_deformation=true,temporal_generation_rigid_wheels_only=true;

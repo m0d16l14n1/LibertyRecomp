@@ -525,7 +525,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   }
   frame_draws = frame_resolves = frame_clears = 0;
   frame_resolve_deferrals = frame_resolve_executions = frame_resolve_drops = 0;
-  target_observations = {}; pass_breaks = {};
+  target_observations = {}; pass_breaks = {}; ended_targets = {};
   if (!published && error.empty()) error = "Presenter did not accept the title output";
   return published;
 }
