@@ -22,6 +22,10 @@ REXCVAR_DEFINE_UINT32(gta4_metal4_table_textures, 0, "GPU/Metal",
 REXCVAR_DEFINE_UINT32(gta4_metal4_table_samplers, 0, "GPU/Metal",
     "Metal 4 argument-table sampler slots: 0 = 16, else this many (at least 8; the renderer binds 0-3)");
 
+REXCVAR_DEFINE_BOOL(gta4_metal4_merge_copies, true, "GPU/Metal",
+    "Metal 4: back-to-back blit encoders share one MTL4 compute encoder (copies keep their tracked "
+    "barriers); off: one MTL4 encoder per blit encoder, as before. Pass timing turns it off");
+
 REXCVAR_DEFINE_BOOL(gta4_metal4_lean_tracking, false, "GPU/Metal",
     "Metal 4 with gta4_metal4_residency = persistent: a command buffer does not retain resources the "
     "persistent set already holds (it keeps them far longer than any command buffer is in flight), and "
@@ -170,7 +174,8 @@ class PointerSet {
   RenderBarrier _renderBarrier;
   std::atomic<uint64_t> _commandBuffers, _parts, _encoders, _barriers, _transient, _resident, _hops;
   std::atomic<uint64_t> _binds, _bindHits, _fragmentBarriers, _vertexBarriers, _evicted, _residencyCommits;
-  std::atomic<uint64_t> _copyBarriers, _copyIndependent, _residentBatches;
+  std::atomic<uint64_t> _copyBarriers, _copyIndependent, _residentBatches, _copyMerged;
+  BOOL _mergeCopies;  // gta4_metal4_merge_copies, off with pass timing
   // gta4_metal4_residency = persistent
   BOOL _persistentResidency;
   BOOL _leanTracking;  // gta4_metal4_lean_tracking, only with persistent residency
@@ -204,8 +209,12 @@ class PointerSet {
 - (void)commitPersistent:(BOOL)evict;
 @end
 
+@class LXCopy;
 @interface LXCommandBuffer : NSObject <MTLCommandBuffer> {
  @public
+  // An ended blit encoder whose MTL4 encoder is still open: the next blit encoder continues it.
+  // Anything else that encodes or commits closes it first (closeCopy).
+  LXCopy* _openCopy;
   LXQueue* _q;
   id<MTL4CommandBuffer> _cb;
   id<MTL4CommandAllocator> _allocator;
@@ -249,6 +258,7 @@ class PointerSet {
 - (MTLResourceID)textureID:(id<MTLTexture>)texture;
 - (BOOL)isAttachment:(id<MTLTexture>)texture;
 - (void)trackHeap:(id<MTLHeap>)heap;
+- (void)closeCopy;
 - (uint64_t)bytes:(const void*)bytes length:(NSUInteger)length;
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
 - (BOOL)nativeCompute:(NSArray<id<MTLResource>>*)resources heap:(id<MTLHeap>)heap
@@ -549,7 +559,13 @@ static inline bool CopyTouches(const std::vector<const void*>& keys, const void*
   }
   [invocation invokeWithTarget:_e];
 }
-- (void)endEncoding { LabelStamp(_owner, _stamp, _e.label); [_e endEncoding]; _e = nil; }
+- (void)endEncoding {
+  // Kept open for a following blit encoder. Separate Metal 3 blit encoders are ordered; inside
+  // one MTL4 encoder the copy tracking (beginCopyFrom:to:) barriers every dependent copy, and an
+  // unclassified copy still barriers after anything before it.
+  if (_owner->_q->_mergeCopies && !_owner->_stampHeap) { _owner->_openCopy = self; return; }
+  LabelStamp(_owner, _stamp, _e.label); [_e endEncoding]; _e = nil;
+}
 @end
 
 // ---------------------------------------------------------------------------------------------
@@ -694,6 +710,7 @@ LX_LOG_UNRECOGNIZED
 // gta4_metal4_pass_timing: a timestamp once all earlier work is done; the interval to the next
 // stamp is charged to `label`.
 - (NSInteger)stamp:(NSString*)label {
+  [self closeCopy];
   if (!_stampHeap || _stampLabels.count >= kStampCapacity) return -1;
   const NSUInteger index = _stampLabels.count;
   [_cb writeTimestampIntoHeap:_stampHeap atIndex:index];
@@ -713,6 +730,10 @@ LX_LOG_UNRECOGNIZED
 - (CFTimeInterval)kernelStartTime { return _gpuStart; }
 - (CFTimeInterval)kernelEndTime { return _gpuEnd; }
 
+- (void)closeCopy {
+  if (!_openCopy) return;
+  [_openCopy->_e endEncoding]; _openCopy->_e = nil; _openCopy = nil;
+}
 - (void)track:(id<MTLResource>)resource { [self track:resource kind:Kind::kUnknown]; }
 - (void)track:(id<MTLResource>)resource kind:(Kind)kind {
   if (!resource) return;
@@ -807,6 +828,7 @@ LX_LOG_UNRECOGNIZED
 }
 
 - (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor*)d {
+  [self closeCopy];
   MTL4RenderPassDescriptor* r = [MTL4RenderPassDescriptor new];
   for (NSUInteger i = 0; i < 8; ++i) {
     MTLRenderPassColorAttachmentDescriptor* a = d.colorAttachments[i];
@@ -864,6 +886,11 @@ LX_LOG_UNRECOGNIZED
   return p;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
+  if (LXCopy* open = _openCopy) {
+    _openCopy = nil;
+    ++_q->_copyMerged;
+    return open;
+  }
   const NSInteger stamp = _stampHeap ? [self stamp:@"copy"] : -1;
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   if (!e) return nil;
@@ -876,6 +903,7 @@ LX_LOG_UNRECOGNIZED
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor*)d { return [self blitCommandEncoder]; }
 - (id<MTLComputeCommandEncoder>)computeEncoder:(BOOL)serial {
+  [self closeCopy];
   const NSInteger stamp = _stampHeap ? [self stamp:@"compute"] : -1;
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   if (!e) return nil;
@@ -895,8 +923,8 @@ LX_LOG_UNRECOGNIZED
 - (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDescriptor:(MTLComputePassDescriptor*)d {
   return [self computeEncoder:d.dispatchType == MTLDispatchTypeSerial];
 }
-- (void)pushDebugGroup:(NSString*)s { [_cb pushDebugGroup:s]; }
-- (void)popDebugGroup { [_cb popDebugGroup]; }
+- (void)pushDebugGroup:(NSString*)s { [self closeCopy]; [_cb pushDebugGroup:s]; }
+- (void)popDebugGroup { [self closeCopy]; [_cb popDebugGroup]; }
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block { [_completed addObject:[block copy]]; }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block { [_scheduled addObject:[block copy]]; }
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
@@ -931,6 +959,7 @@ LX_LOG_UNRECOGNIZED
 
 // Ends the open MTL4 command buffer and commits it; the last part carries the feedback.
 - (void)finishPart:(BOOL)last {
+  [self closeCopy];
   if (_q->_persistentResidency) {
     // The queue-level set (added to the queue once) holds everything; commit what changed.
     [_q commitPersistent:last];
@@ -1078,6 +1107,7 @@ LX_LOG_UNRECOGNIZED
 }
 - (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body
          label:(NSString*)label {
+  [self closeCopy];
   for (id<MTLResource> r in resources) [self track:r];
   _nonRenderSinceRender = YES;
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
@@ -1093,6 +1123,7 @@ LX_LOG_UNRECOGNIZED
 // so it waits for all earlier work; later proxy encoders wait for it the same way.
 - (BOOL)nativeCompute:(NSArray<id<MTLResource>>*)resources heap:(id<MTLHeap>)heap
                  body:(void (^)(id<MTL4ComputeCommandEncoder>))body label:(NSString*)label {
+  [self closeCopy];
   const NSInteger stamp = _stampHeap ? [self stamp:@"compute (native)"] : -1;
   id<MTL4ComputeCommandEncoder> e = [_cb computeCommandEncoder];
   if (!e) return NO;
@@ -1325,6 +1356,7 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       q->_persistBudget = std::min<uint64_t>(kPersistentBudgetCap, device.recommendedMaxWorkingSetSize / 8);
       q->_leanTracking = REXCVAR_GET(gta4_metal4_lean_tracking);
     }
+    q->_mergeCopies = REXCVAR_GET(gta4_metal4_merge_copies) && !REXCVAR_GET(gta4_metal4_pass_timing);
     if (REXCVAR_GET(gta4_metal4_pass_timing)) {
       const uint64_t hz = [device queryTimestampFrequency];
       q->_tickNs = hz ? 1e9 / double(hz) : 1.0;
@@ -1383,7 +1415,7 @@ Metal4Statistics Metal4StatisticsOf(id<MTLCommandQueue> queue) {
   s.barriers = q->_barriers; s.transient_bytes = q->_transient; s.resident = q->_resident; s.metal3_hops = q->_hops;
   s.binds = q->_binds; s.bind_hits = q->_bindHits; s.fragment_barriers = q->_fragmentBarriers;
   s.vertex_barriers = q->_vertexBarriers; s.evicted = q->_evicted; s.residency_commits = q->_residencyCommits;
-  s.copy_barriers = q->_copyBarriers; s.copy_independent = q->_copyIndependent;
+  s.copy_barriers = q->_copyBarriers; s.copy_independent = q->_copyIndependent; s.copy_merged = q->_copyMerged;
   s.resident_batches = q->_residentBatches;
   s.resident_bytes = q->_persistBytes; s.resident_budget = q->_persistBudget;
   return s;

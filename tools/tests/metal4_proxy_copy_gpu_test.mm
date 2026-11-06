@@ -117,6 +117,23 @@ void Run() {
   after = rex::ui::metal::Metal4StatisticsOf(queue);
   Check(after.copy_barriers - before.copy_barriers == 3, "write/read chain barriers");
   Check(after.copy_independent - before.copy_independent == 1, "first copy of the chain is free");
+  Check(after.copy_merged - before.copy_merged == 1, "the second blit encoder continues the first");
+  Check(after.encoders == before.encoders, "a merged blit encoder opens no MTL4 encoder");
+
+  // Across blit encoders: the second reads what the first wrote, so the shared MTL4 encoder
+  // still barriers between them (Metal 3 orders separate encoders).
+  id<MTLBuffer> hop_a = [device newBufferWithLength:pattern.size() options:MTLResourceStorageModeShared];
+  id<MTLBuffer> hop_b = [device newBufferWithLength:pattern.size() options:MTLResourceStorageModeShared];
+  before = rex::ui::metal::Metal4StatisticsOf(queue);
+  id<MTLBlitCommandEncoder> write = [copies blitCommandEncoder];
+  [write copyFromBuffer:source sourceOffset:0 toBuffer:hop_a destinationOffset:0 size:pattern.size()];
+  [write endEncoding];
+  id<MTLBlitCommandEncoder> read = [copies blitCommandEncoder];
+  [read copyFromBuffer:hop_a sourceOffset:0 toBuffer:hop_b destinationOffset:0 size:pattern.size()];
+  [read endEncoding];
+  after = rex::ui::metal::Metal4StatisticsOf(queue);
+  Check(after.copy_merged - before.copy_merged == 2, "consecutive blit encoders merge");
+  Check(after.copy_barriers - before.copy_barriers == 1, "a dependency across merged encoders barriers");
   [copies commit];
   [copies waitUntilCompleted];
   Check(copies.status == MTLCommandBufferStatusCompleted, "copy command buffer completed");
@@ -131,6 +148,8 @@ void Run() {
     Check(read_first[i] == pattern[i], "read after write through a texture");
     Check(read_second[i] == second_pattern[i], "read after the second write through a texture");
   }
+  const auto* hop = static_cast<const uint8_t*>(hop_b.contents);
+  for (NSUInteger i = 0; i < pattern.size(); ++i) Check(hop[i] == pattern[i], "copy chain across merged encoders");
 }
 }  // namespace
 int main() {

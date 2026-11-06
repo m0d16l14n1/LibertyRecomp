@@ -101,6 +101,14 @@ acceleration-structure path is covered by `rex-metal-raytracing-structures-test`
   61.8 -> 62.3 fps, GPU 11.5 -> 8.9 ms, p95 18.6 -> 18.0 ms (a back-to-back hot run read 46 fps with submit
   climbing 12 -> 17 ms at flat GPU time: CPU throttling, not the change). The new pipeline
   variants compile on first sight and are then archived.
+- **Copy encoder merging** (`gta4_metal4_merge_copies`, default on, 2026-11-06): each Metal 3 blit
+  encoder was its own MTL4 compute encoder with a queue barrier. An ended blit encoder now stays
+  open, and the next blit encoder continues it when nothing else was encoded in between. Separate
+  Metal 3 blit encoders are ordered, and inside one MTL4 encoder the copy tracking barriers every
+  dependent copy, so that order holds; anything else (render/compute encoders, MetalFX, hops,
+  timestamps, debug groups, commit) closes it first. Pass timing turns it off (one stamp per
+  encoder). Career city drive: ~3 merged blit encoders per frame (`copy-merged=`), 62 fps at 8.9 ms
+  submit, image unchanged. `rex-metal4-proxy-copy-test` checks a dependency across merged encoders.
 - **Known fault:** on macOS 27.2, `MTL4CompilerTask` (asynchronous builds) with a pipeline data set
   serializer attached faulted in another port; synchronous `MTL4Compiler` calls on a GCD queue worked.
   Any move to `MTL4Compiler` uses synchronous calls on our own queue.

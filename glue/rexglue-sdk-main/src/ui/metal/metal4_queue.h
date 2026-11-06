@@ -65,6 +65,7 @@ struct Metal4Statistics {
   uint64_t resident_bytes = 0, resident_budget = 0;     // persistent set: held bytes and its cap
   uint64_t binds = 0, bind_hits = 0;                    // buffer/texture binds, and those the bind cache served
   uint64_t fragment_barriers = 0, vertex_barriers = 0;  // render barriers before fragment only; in-pass vertex waits
+  uint64_t copy_merged = 0;  // blit encoders that continued the previous one (gta4_metal4_merge_copies)
   uint64_t copy_barriers = 0, copy_independent = 0;     // copy encoder barriers, and copies that needed none
   uint64_t evicted = 0, residency_commits = 0;          // gta4_metal4_residency
 };
