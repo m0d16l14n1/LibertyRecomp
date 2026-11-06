@@ -51,7 +51,9 @@ class SDLAudioDriver : public AudioDriver {
   static const uint32_t channel_samples_ = 256;
   static const uint32_t frame_samples_ = frame_channels_ * channel_samples_;
   static const uint32_t frame_size_ = sizeof(float) * frame_samples_;
-  static const uint32_t silent_frame_duration_microseconds_ = 5333;
+  // std::chrono::microseconds takes this value by reference in debug builds,
+  // so make it an inline variable instead of requiring an out-of-line symbol.
+  static constexpr uint32_t silent_frame_duration_microseconds_ = 5333;
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
