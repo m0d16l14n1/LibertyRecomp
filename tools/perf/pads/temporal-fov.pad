@@ -1,0 +1,24 @@
+# Focused MetalFX history-continuity check. Aiming and releasing the trigger
+# smoothly animates GTA IV's projection; that motion must not discard temporal
+# history every frame. Camera rotation keeps distant geometry, lights, and
+# reflections moving while diagnostics record the continuity decision.
+await 5m
+wait 10s
+nowanted
+invincible
+clock 21 0
+weather 1
+road 1040 150 20
+wait 5s
+
+mark fov_settled
+trigger lt 1
+stick rx 0.25 5s
+release all
+wait 2s
+mark fov_aimed
+stick rx -0.25 5s
+release all
+wait 2s
+mark fov_released
+quit

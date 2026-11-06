@@ -3,7 +3,7 @@
 
 usage: bench_windows.py <bench folder>   (frames.csv, frames.csv.origin, marks.csv)
 """
-import csv, statistics, sys
+import csv, math, statistics, sys
 from pathlib import Path
 
 
@@ -39,6 +39,43 @@ def main():
               f"{statistics.mean(sub):6.2f} {statistics.mean(int(f['draws']) for f in rows):5.0f} "
               f"{sum(int(f['pipelines_built']) for f in rows):5d} "
               f"{sum(float(f['pipeline_wait_ms']) for f in rows):6.1f}")
+
+    # Scripted action benches must exercise the scene, not merely render it. Earlier broken pads
+    # produced plausible FPS tables while the car sat still. New route files carry the same steady
+    # clock as marks.csv, so validate each locomotion window without a fragile load-time offset.
+    route_path = folder / "route.csv"
+    if route_path.exists():
+        route = list(csv.DictReader(open(route_path)))
+        if route and "steady_ns" in route[0]:
+            expected = {"drive", "night", "heli", "boat"}
+            checked = []
+            failed = []
+            for name in expected:
+                if name not in marks or name + "_end" not in marks:
+                    continue
+                start_ns = origin + int(marks[name] * 1e6)
+                end_ns = origin + int(marks[name + "_end"] * 1e6)
+                points = [(float(r["x"]), float(r["y"]), float(r["z"])) for r in route
+                          if start_ns <= int(r["steady_ns"]) < end_ns]
+                if len(points) < 2:
+                    checked.append((name, 0.0, 0.0, 0.0, "NO DATA"))
+                    failed.append(name)
+                    continue
+                path_m = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
+                net_m = math.dist(points[0], points[-1])
+                z_span = max(p[2] for p in points) - min(p[2] for p in points)
+                status = "ok" if path_m >= 10.0 else "STALLED"
+                checked.append((name, path_m, net_m, z_span, status))
+                if status != "ok":
+                    failed.append(name)
+            if checked:
+                print("movement   path_m  net_m  z_span  status")
+                for name, path_m, net_m, z_span, status in sorted(checked):
+                    print(f"{name:<10} {path_m:7.1f} {net_m:6.1f} {z_span:7.1f}  {status}")
+                if failed:
+                    print("movement-check: FAILED " + ", ".join(sorted(failed)))
+                    raise SystemExit(1)
+                print("movement-check: passed")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,71 @@
+# Reproducible MetalFX stability scene. The player starts in the same street,
+# at a fixed simulation step, clock and weather. A frozen chase camera measures
+# distant detail plus independently moving peds/cars/lights; then a fixed
+# throttle/steering arc measures camera and reflection motion. The runner uses
+# this exact pad for native, native-size MetalFX TAA, and MetalFX upscaling.
+await 5m
+wait 10s
+nowanted
+invincible
+set gta4_debug_fixed_step_hz 60
+clock 21 0
+weather 1
+road 1040 150 20
+car sultan
+wait 5s
+peds 10 0 14
+# Teleporting and spawning can display title help text. Let both that HUD and
+# the temporal history settle before measuring the scene.
+wait 10s
+
+# Arm bounded pre-HUD input/output capture at the measurement boundary. Eight
+# consecutive frames expose the actual jitter cycle instead of consuming the
+# budget during scene setup.
+set gta4_temporal_snapshot {out}/temporal
+set gta4_temporal_snapshot_every 1
+set gta4_temporal_snapshot_max 8
+
+mark static
+shot {out}/shots/static-0.png
+wait 120ms
+shot {out}/shots/static-1.png
+wait 120ms
+shot {out}/shots/static-2.png
+wait 120ms
+shot {out}/shots/static-3.png
+wait 120ms
+shot {out}/shots/static-4.png
+wait 120ms
+shot {out}/shots/static-5.png
+wait 120ms
+shot {out}/shots/static-6.png
+wait 120ms
+shot {out}/shots/static-7.png
+wait 120ms
+mark static_end
+
+# The car stays parked until this point. The route's AI driving task is
+# deterministic and proven by city-drive.pad.
+drive 16 0
+wait 500ms
+mark motion
+shot {out}/shots/motion-0.png
+wait 120ms
+shot {out}/shots/motion-1.png
+wait 120ms
+shot {out}/shots/motion-2.png
+wait 120ms
+shot {out}/shots/motion-3.png
+wait 120ms
+shot {out}/shots/motion-4.png
+wait 120ms
+shot {out}/shots/motion-5.png
+wait 120ms
+shot {out}/shots/motion-6.png
+wait 120ms
+shot {out}/shots/motion-7.png
+wait 120ms
+mark motion_end
+set gta4_debug_fixed_step_hz 0
+wait 1s
+quit

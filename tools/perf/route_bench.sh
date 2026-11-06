@@ -72,10 +72,31 @@ run_game() {  # <out folder> <flags...>
     *" --background_window=true "*) ;;
     *) ( sleep 4; osascript -e 'tell application "Liberty Recompiled" to activate' >/dev/null 2>&1 ) & ;;
   esac
+  # Sample the live process instead of relying only on time(1)'s final peak. This catches the
+  # gradual unified-memory growth that can otherwise make a long MetalFX session exhaust RAM.
+  (
+    echo "elapsed_s,rss_mb,vsz_mb,cpu_pct" > "$out/samples.csv"
+    local pid=""
+    for _ in $(seq 1 100); do
+      pid="$(pgrep -x "Liberty Recompiled" | head -1 || true)"
+      [ -n "$pid" ] && break
+      sleep 0.1
+    done
+    [ -n "$pid" ] || exit 0
+    local sample_start
+    sample_start="$(date +%s)"
+    while kill -0 "$pid" 2>/dev/null; do
+      ps -o rss=,vsz=,%cpu= -p "$pid" | awk -v t="$(($(date +%s)-sample_start))" \
+        '{printf "%d,%.1f,%.1f,%s\n", t, $1/1024, $2/1024, $3}' >> "$out/samples.csv"
+      sleep 2
+    done
+  ) &
+  local sample_job=$!
   HOME="$throwaway" caffeinate -dimsu /usr/bin/time -l "$app" --diagnostics=true \
     --diagnostics_categories="${DIAG_CATEGORIES:-logging}" --log_file="$out/game.log" \
     --gta4_metal_frame_log="$out/frames.csv" --gta4_pad_marks="$out/marks.csv" \
     --gta4_input_shots="$out/shots" "$@" > "$out/stdout.log" 2>&1 || true
+  wait "$sample_job" || true
   cp "$throwaway/Library/Application Support/LibertyRecomp/native.toml" "$out/native.toml" 2>/dev/null || true
 }
 
@@ -87,6 +108,9 @@ summarize() {  # <out folder>
   grep -o 'input replay: done.*' "$out/game.log" | sed 's/^input replay: /drift: /' >> "$out/summary.txt" || true
   awk '/real/ && /user/ && /sys/ {printf "process: %s s wall, %s s user, %s s sys\n", $1, $3, $5}' \
     "$out/stdout.log" >> "$out/summary.txt"
+  awk -F, 'NR>1 && $2>0 {if (!samples) {first=$2; peak=$2}; if ($2>peak) peak=$2; end=$2; samples++}
+    END {if (samples) printf "memory: RSS %.1f MB start, %.1f MB peak, %.1f MB end, %+.1f MB growth (%d samples)\n", first,peak,end,end-first,samples}' \
+    "$out/samples.csv" >> "$out/summary.txt" 2>/dev/null || true
   cat "$out/summary.txt"
 }
 

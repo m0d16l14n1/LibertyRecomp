@@ -714,7 +714,7 @@ class InputTimeline {
     }
     if (std::string path = REXCVAR_GET(gta4_input_route); !path.empty() && mode_ == Mode::kReplay) {
       route_ = std::fopen(path.c_str(), "w");
-      if (route_) std::fprintf(route_, "t_s,x,y,z,recorded_x,recorded_y,recorded_z,distance_m\n");
+      if (route_) std::fprintf(route_, "steady_ns,t_s,x,y,z,recorded_x,recorded_y,recorded_z,distance_m\n");
     }
   }
 
@@ -823,8 +823,11 @@ class InputTimeline {
       drift_max_ = std::max(drift_max_, distance);
       drift_last_ = distance;
       if (route_ && t_us - last_route_us_ >= 500000) {
-        std::fprintf(route_, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", t_us / 1e6, current.x,
-                     current.y, current.z, latest.x, latest.y, latest.z, distance);
+        const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   now.time_since_epoch()).count();
+        std::fprintf(route_, "%lld,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                     static_cast<long long>(steady_ns), t_us / 1e6, current.x, current.y,
+                     current.z, latest.x, latest.y, latest.z, distance);
         last_route_us_ = t_us;
       }
     }
@@ -952,7 +955,7 @@ void OnInputPoll(const PollContext& context, bool& native_valid,
     if (!route) {
       if (const std::string path = REXCVAR_GET(gta4_input_route); !path.empty()) {
         route = std::fopen(path.c_str(), "w");
-        if (route) std::fprintf(route, "t_s,x,y,z\n");
+        if (route) std::fprintf(route, "steady_ns,t_s,x,y,z\n");
         route_start = route_last = now;
       }
     }
@@ -960,7 +963,9 @@ void OnInputPoll(const PollContext& context, bool& native_valid,
     if (route && now - route_last >= std::chrono::milliseconds(500) &&
         ReadPedPosition(context.base, context.player_ped, x, y, z)) {
       route_last = now;
-      std::fprintf(route, "%.3f,%.3f,%.3f,%.3f\n",
+      const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 now.time_since_epoch()).count();
+      std::fprintf(route, "%lld,%.3f,%.3f,%.3f,%.3f\n", static_cast<long long>(steady_ns),
                    std::chrono::duration<double>(now - route_start).count(), x, y, z);
       std::fflush(route);
     }

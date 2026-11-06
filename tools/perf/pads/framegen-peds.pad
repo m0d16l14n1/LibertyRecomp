@@ -1,0 +1,25 @@
+# Focused MetalFX pedestrian interpolation scene. Hostile pedestrians animate and cross the
+# rotating third-person camera while generated/real neighbour triplets and motion/depth are dumped.
+await 5m
+wait 10s
+nowanted
+invincible
+clock 13 0
+weather 1
+road 1040 150 20
+wait 3s
+weapon 14 9999
+peds 12 1 10
+wait 3s
+
+set gta4_metalfx_frame_generation_dump {out}/framegen
+set gta4_metalfx_frame_generation_dump_every 8
+set gta4_metalfx_frame_generation_dump_max 30
+mark framegen
+trigger lt 1
+stick rx 0.35 8s
+release all
+mark framegen_end
+shot {out}/shots/framegen-peds-end.png 0.5
+wait 1s
+quit
