@@ -360,15 +360,25 @@ bool Renderer::State::ExecuteResolve(const PendingResolve& r, std::string& error
 bool Renderer::State::SettlePendingResolves(id<MTLTexture> image, bool writing, std::string& error,
                                             std::source_location caller) {
   if (pending_resolves.empty() || !image) return true;
+  // Most calls (every sampled texture of every draw) match no record. Selection below starts only
+  // from a record whose target is `image` or, for a write, whose source is `image`, so without one
+  // nothing is selected: return before allocating the sets (and retaining their textures).
+  {
+    bool direct = false;
+    for (const auto& r : pending_resolves)
+      if (r.target == image || (writing && r.source_image == image)) { direct = true; break; }
+    if (!direct) return true;
+  }
   settle_point = caller;
   // Select every record the access depends on, then every earlier record a selected one depends
   // on: a record depends on an earlier writer of its source or target, and on an earlier reader of
   // its target. Two readers of one source are independent, so a read of one destination does not
   // drag in every other resolve from the same (often EDRAM-aliased) source image.
-  std::vector<id<MTLTexture>> written, read{image};
+  // Identity sets only: the records and the caller hold the textures for this call.
+  std::vector<__unsafe_unretained id<MTLTexture>> written, read{image};
   if (writing) written.push_back(image);
   std::vector<bool> selected(pending_resolves.size(), false);
-  const auto in = [](const std::vector<id<MTLTexture>>& set, id<MTLTexture> i) {
+  const auto in = [](const std::vector<__unsafe_unretained id<MTLTexture>>& set, id<MTLTexture> i) {
     return std::find(set.begin(), set.end(), i) != set.end();
   };
   bool any = false;

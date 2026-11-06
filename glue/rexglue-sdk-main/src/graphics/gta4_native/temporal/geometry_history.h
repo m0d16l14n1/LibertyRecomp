@@ -34,34 +34,44 @@ struct GeometryKey {
   uint32_t occurrence = 0;
   bool operator==(const GeometryKey&) const = default;
 };
+// One word into a key hash (splitmix64 finalizer, then an FNV-style multiply).
+inline uint64_t GeometryKeyMix(uint64_t h, uint64_t v) {
+  v ^= v >> 30;
+  v *= 0xbf58476d1ce4e5b9ull;
+  v ^= v >> 27;
+  v *= 0x94d049bb133111ebull;
+  h ^= v ^ (v >> 31);
+  return h * 0x100000001b3ull;
+}
+// Every field except the owner (instance, pose) and occurrence: the part Shape and Siblings
+// keep. GeometryHistory hashes it once per Record; the three it changes cost three words.
+inline uint64_t GeometryKeyBodyHash(const GeometryKey& k) {
+  uint64_t h = 0xcbf29ce484222325ull;
+  for (uint64_t v : {k.drawable, k.vertex_shader, k.layout, k.geometry_generation, k.range})
+    h = GeometryKeyMix(h, v);
+  // Most of the 17 streams are unused (all zero): skip those, and tag the rest with their
+  // slot so equal streams in different slots still hash apart.
+  for (uint64_t slot = 0; slot < k.streams.size(); ++slot) {
+    const auto& stream = k.streams[slot];
+    const uint64_t layout = uint64_t(stream.offset) | uint64_t(stream.stride) << 32;
+    if (!stream.generation && !layout) continue;
+    h = GeometryKeyMix(h, stream.generation ^ slot << 59);
+    h = GeometryKeyMix(h, layout ^ slot << 59);
+  }
+  h = GeometryKeyMix(h, k.pixel_shader);
+  h = GeometryKeyMix(h, k.index_generation);
+  h = GeometryKeyMix(h, uint64_t(uint32_t(k.base_vertex)) | uint64_t(k.primitive) << 32);
+  h = GeometryKeyMix(h, uint64_t(k.restart_index) | uint64_t(k.indexed) << 32 | uint64_t(k.restart) << 33);
+  return h;
+}
+inline size_t GeometryKeyHashOf(uint64_t body, const GeometryKey& k) {
+  uint64_t h = GeometryKeyMix(body, k.instance);
+  h = GeometryKeyMix(h, k.pose);
+  return size_t(GeometryKeyMix(h, k.occurrence));
+}
 struct GeometryKeyHash {
   size_t operator()(const GeometryKey& k) const noexcept {
-    uint64_t h = 0xcbf29ce484222325ull;
-    const auto add = [&](uint64_t v) {
-      v ^= v >> 30;
-      v *= 0xbf58476d1ce4e5b9ull;
-      v ^= v >> 27;
-      v *= 0x94d049bb133111ebull;
-      h ^= v ^ (v >> 31);
-      h *= 0x100000001b3ull;
-    };
-    for (uint64_t v : {k.instance, k.drawable, k.pose, k.vertex_shader, k.layout,
-                       k.geometry_generation, k.range}) add(v);
-    // Most of the 17 streams are unused (all zero): skip those, and tag the rest with their
-    // slot so equal streams in different slots still hash apart. Hashed on every lookup
-    // (several per draw in Record), so the word count matters.
-    for (uint64_t slot = 0; slot < k.streams.size(); ++slot) {
-      const auto& stream = k.streams[slot];
-      const uint64_t layout = uint64_t(stream.offset) | uint64_t(stream.stride) << 32;
-      if (!stream.generation && !layout) continue;
-      add(stream.generation ^ slot << 59);
-      add(layout ^ slot << 59);
-    }
-    add(k.pixel_shader); add(k.index_generation);
-    add(uint64_t(uint32_t(k.base_vertex)) | uint64_t(k.primitive) << 32);
-    add(uint64_t(k.restart_index) | uint64_t(k.occurrence) << 32);
-    add(uint64_t(k.indexed) | uint64_t(k.restart) << 1);
-    return size_t(h);
+    return GeometryKeyHashOf(GeometryKeyBodyHash(k), k);
   }
 };
 // Float constants a shader may read: bit n of word n/64 is register cN (shader_archive.h).
@@ -104,6 +114,11 @@ struct GeometryMatchStatistics {
   // candidate past kMaximumConstantStep (the largest change of that candidate).
   std::array<uint32_t, 256> far_register{};
   uint64_t far_world = 0;  // candidates refused by the world-transform step instead
+  // Diagnostic: key matches whose world transform moved and whose shader reads constants past
+  // c63 (bones, matWheelTransform); of those, the ones whose c64+ reads are bit-identical to the
+  // previous frame: the object moved but its animation did not update this frame (an animation
+  // or wheel update slower than the frame rate gives its pixels no motion, then a jump).
+  uint64_t moved_skinned = 0, stale_skinned = 0;
 };
 class GeometryHistory {
  public:
@@ -146,14 +161,63 @@ class GeometryHistory {
   GeometryLookup Record(GeometryKey key, std::span<const uint8_t> vertex,
                         std::span<const uint8_t> shared, std::array<float, 2> jitter,
                         const ConstantMask& reads = kAllConstants) {
-    if (!sequence_ || !key.instance || !key.vertex_shader || !key.geometry_generation ||
+    return RecordInto(key, vertex, shared, jitter, reads, nullptr);
+  }
+  // A 4 KB vertex-bank buffer for the caller to capture into, then pass to the Record below:
+  // a new entry adopts it instead of copying the bank a second time.
+  std::shared_ptr<GeometrySnapshot> TakeScratch() {
+    std::shared_ptr<GeometrySnapshot> scratch;
+    if (!pool_.empty()) {
+      scratch = std::move(pool_.back());
+      pool_.pop_back();
+    } else {
+      scratch = std::make_shared<GeometrySnapshot>();
+    }
+    scratch->vertex.resize(4096);
+    return scratch;
+  }
+  // `scratch` (from TakeScratch, filled) becomes the new entry's snapshot, or returns to the pool.
+  GeometryLookup Record(GeometryKey key, std::shared_ptr<GeometrySnapshot>& scratch,
+                        std::span<const uint8_t> shared, std::array<float, 2> jitter,
+                        const ConstantMask& reads = kAllConstants) {
+    if (!scratch) return {};
+    const auto lookup = RecordInto(key, scratch->vertex, shared, jitter, reads, &scratch);
+    if (scratch && scratch.use_count() == 1 && pool_.size() < kMaximumPooledSnapshots)
+      pool_.push_back(std::move(scratch));
+    scratch.reset();
+    return lookup;
+  }
+
+ private:
+  // A key with its hash: Record hashes the body once, and every map lookup after that (the
+  // occurrence probe, shape, siblings, previous frame, each Nearest candidate) reuses it.
+  struct HashedKey {
+    GeometryKey key;
+    uint64_t body = 0;
+    size_t hash = 0;
+    bool operator==(const HashedKey& other) const { return hash == other.hash && key == other.key; }
+  };
+  struct HashedKeyHash {
+    size_t operator()(const HashedKey& k) const noexcept { return k.hash; }
+  };
+  static HashedKey Rehashed(HashedKey k) {
+    k.hash = GeometryKeyHashOf(k.body, k.key);
+    return k;
+  }
+  GeometryLookup RecordInto(const GeometryKey& raw, std::span<const uint8_t> vertex,
+                            std::span<const uint8_t> shared, std::array<float, 2> jitter,
+                            const ConstantMask& reads, std::shared_ptr<GeometrySnapshot>* adopt) {
+    if (!sequence_ || !raw.instance || !raw.vertex_shader || !raw.geometry_generation ||
         vertex.size() != 4096 || shared.empty() || shared.size() > 2048)
       return {};
     reads_ = reads;
     world_ = WorldRegisters(reads);
     // Draws that share a key but not their constants are siblings (one car's wheels: the tire
     // shader reads matWheelTransform at c64, while the key's c0-c3 is the shared body gWorld).
-    key.occurrence = 0;
+    HashedKey key{raw};
+    key.key.occurrence = 0;
+    key.body = GeometryKeyBodyHash(key.key);
+    key = Rehashed(key);
     for (auto existing = current_.find(key); existing != current_.end();
          existing = current_.find(key)) {
       const auto& stored = *existing->second.snapshot;
@@ -161,8 +225,9 @@ class GeometryHistory {
                         stored.shared.size() == shared.size() && stored.jitter_clip == jitter &&
                         !std::memcmp(stored.vertex.data(), vertex.data(), vertex.size()) &&
                         !std::memcmp(stored.shared.data(), shared.data(), shared.size());
-      if (!same && key.occurrence + 1 < kMaximumSiblings) {
-        ++key.occurrence;
+      if (!same && key.key.occurrence + 1 < kMaximumSiblings) {
+        ++key.key.occurrence;
+        key = Rehashed(key);
         continue;
       }
       existing->second.ambiguous |= !same;
@@ -175,13 +240,17 @@ class GeometryHistory {
                  used = budget_->used.load(std::memory_order_relaxed);
     if (used > budget_->limit || bytes > budget_->limit - used) return {};
     std::shared_ptr<GeometrySnapshot> snapshot;
-    if (!pool_.empty()) {
-      snapshot = std::move(pool_.back());
-      pool_.pop_back();
+    if (adopt && *adopt) {
+      snapshot = std::move(*adopt);  // `vertex` already is its bank (it stays valid)
     } else {
-      snapshot = std::make_shared<GeometrySnapshot>();
+      if (!pool_.empty()) {
+        snapshot = std::move(pool_.back());
+        pool_.pop_back();
+      } else {
+        snapshot = std::make_shared<GeometrySnapshot>();
+      }
+      snapshot->vertex.assign(vertex.begin(), vertex.end());
     }
-    snapshot->vertex.assign(vertex.begin(), vertex.end());
     snapshot->shared.assign(shared.begin(), shared.end());
     snapshot->sequence = sequence_;
     snapshot->jitter_clip = jitter;
@@ -190,7 +259,7 @@ class GeometryHistory {
     auto& entry = current_.emplace(key, Entry{snapshot, false, nullptr}).first->second;
     auto& shape = current_shapes_[Shape(key)];
     if (shape.size() < kMaximumShapeCandidates) shape.push_back({key, snapshot});
-    if (key.occurrence) {
+    if (key.key.occurrence) {
       // A sibling group exists only for keys drawn more than once with different constants;
       // the first sibling joins it now (almost every key has one draw and no group).
       auto [group, created] = current_siblings_.try_emplace(Siblings(key));
@@ -207,6 +276,7 @@ class GeometryHistory {
     } remember{entry, lookup};
     bool sibling_unclear = false;
     lookup.previous = PreviousSibling(key, vertex, sibling_unclear);
+    if (lookup.previous && !sibling_unclear) CountStaleSkinning(lookup.previous->vertex, vertex);
     if (sibling_unclear) {
       // Siblings existed but none is clearly this draw: keep the old ambiguous outcome. Only
       // this frame's lookup is ambiguous; the entry stays matchable for the next frame.
@@ -221,7 +291,7 @@ class GeometryHistory {
     if (lookup.previous) {
       // The key holds the guest address of the transform. Retail renders moving entities from
       // per-frame copies of their matrices, so an address can name another object next frame.
-      if (Distance(lookup.previous->vertex, vertex, false).max_world <= kMaximumWorldStep) {
+      if (Near(Distance(lookup.previous->vertex, vertex, false))) {
         ++statistics_.key;
         claimed_.insert(lookup.previous.get());
         return lookup;
@@ -236,7 +306,15 @@ class GeometryHistory {
     lookup.matched_by_transform = bool(lookup.previous);
     return lookup;
   }
+
+ public:
   void set_transform_fallback(bool enabled) { transform_fallback_ = enabled; }
+  // Largest change of a rotation element of the world transform c0-c2 (.xyz in either matrix
+  // layout) a match may have: 0 off. The world step bounds translation only, and rotation
+  // elements change by at most 2, so a previous pose with another heading (a spawned car turned
+  // into place, another object of the same model) was always accepted and gave its pixels a
+  // rigid rotation in motion. 2*sin(angle/2): 0.35 is about 20 degrees per frame.
+  void set_rotation_limit(float limit) { rotation_limit_ = limit; }
   GeometryMatchStatistics TakeStatistics() {
     auto taken = statistics_;
     statistics_ = {};
@@ -269,7 +347,7 @@ class GeometryHistory {
   // storage: Record then copies into existing capacity instead of three allocations per draw.
   // A snapshot someone still holds (a lookup, an upload map, a newer entry's `matched`) is
   // simply released as before. The pool is not charged to the budget.
-  void Recycle(std::unordered_map<GeometryKey, Entry, GeometryKeyHash>& entries) {
+  void Recycle(std::unordered_map<HashedKey, Entry, HashedKeyHash>& entries) {
     for (auto& [key, entry] : entries) {
       entry.matched.reset();
       auto& snapshot = entry.snapshot;
@@ -281,30 +359,30 @@ class GeometryHistory {
     }
     entries.clear();
   }
-  std::shared_ptr<const GeometrySnapshot> Previous(const GeometryKey& key) const {
+  std::shared_ptr<const GeometrySnapshot> Previous(const HashedKey& key) const {
     const auto old = previous_.find(key);
     return old == previous_.end() || old->second.ambiguous ? nullptr : old->second.snapshot;
   }
-  bool PreviousAmbiguous(const GeometryKey& key) const {
+  bool PreviousAmbiguous(const HashedKey& key) const {
     const auto old = previous_.find(key);
     return old != previous_.end() && old->second.ambiguous;
   }
   // The same model and geometry without the owner: instance and pose name guest storage.
-  static GeometryKey Shape(GeometryKey key) {
-    key.instance = 0;
-    key.pose = 0;
-    key.occurrence = 0;
-    return key;
+  static HashedKey Shape(HashedKey key) {
+    key.key.instance = 0;
+    key.key.pose = 0;
+    key.key.occurrence = 0;
+    return Rehashed(key);
   }
   // Every sibling of one key, whatever its occurrence.
-  static GeometryKey Siblings(GeometryKey key) {
-    key.occurrence = 0;
-    return key;
+  static HashedKey Siblings(HashedKey key) {
+    key.key.occurrence = 0;
+    return Rehashed(key);
   }
   // The previous frame's draw this one continues. With one draw under the key that is the
   // exact key. With several, it is the sibling nearest in the constants that told them apart
   // last frame (draw order may change; camera terms shared by all siblings are left out).
-  std::shared_ptr<const GeometrySnapshot> PreviousSibling(const GeometryKey& key,
+  std::shared_ptr<const GeometrySnapshot> PreviousSibling(const HashedKey& key,
                                                           std::span<const uint8_t> vertex,
                                                           bool& unclear) {
     unclear = false;
@@ -338,7 +416,7 @@ class GeometryHistory {
     for (const auto& sibling : siblings) {
       const auto& old = sibling.snapshot->vertex;
       if (old.size() != vertex.size() || claimed_.count(sibling.snapshot.get())) continue;
-      if (Distance(old, vertex, false).max_world > kMaximumWorldStep) continue;
+      if (!Near(Distance(old, vertex, false))) continue;
       double sum = 0;
       bool finite = true;
       for (const uint32_t i : distinct) {
@@ -380,10 +458,25 @@ class GeometryHistory {
   // registers are not compared.
   struct Difference {
     float max_world = 0;  // largest change of a world-transform element (metres for translation)
+    float max_rotation = 0;  // largest change of a c0-c2 .xyz element (world transform at c0-c3 only)
     float max_any = 0;    // largest change of any finite read constant
     double sum = 0;       // squared change of every finite read constant
     uint32_t max_index = 0;  // float index of the largest change of any read constant
   };
+  void CountStaleSkinning(std::span<const uint8_t> previous, std::span<const uint8_t> vertex) {
+    const ConstantMask late{0, reads_[1], reads_[2], reads_[3]};
+    if (!(late[1] | late[2] | late[3]) || (world_[1] & late[1])) return;  // c64 is the world: skip
+    if (Distance(previous, vertex, false).max_world <= 1.0e-4f) return;
+    ++statistics_.moved_skinned;
+    const size_t registers = std::min<size_t>(std::min(previous.size(), vertex.size()) / 16, 256);
+    for (size_t word = 1; word < 4; ++word)
+      for (uint64_t bits = late[word]; bits; bits &= bits - 1) {
+        const size_t reg = word * 64 + size_t(std::countr_zero(bits));
+        if (reg >= registers) break;
+        if (std::memcmp(previous.data() + reg * 16, vertex.data() + reg * 16, 16)) return;
+      }
+    ++statistics_.stale_skinned;
+  }
   Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all) const {
     Difference d;
     const size_t registers = std::min<size_t>(std::min(a.size(), b.size()) / 16, 256);
@@ -401,6 +494,7 @@ class GeometryHistory {
         if (!std::isfinite(x) || !std::isfinite(y)) continue;
         const float change = std::abs(x - y);
         if (world) d.max_world = std::max(d.max_world, change);
+        if (world && reg < 3 && i % 4 < 3) d.max_rotation = std::max(d.max_rotation, change);
         if (change > d.max_any && !Reads(kCameraRegisters, reg)) {
           d.max_any = change;
           d.max_index = uint32_t(i);
@@ -413,7 +507,7 @@ class GeometryHistory {
   }
   // The previous frame's draw of the same shape whose constants moved least, if it is clearly
   // nearer than any other and moved no further than an object can in one frame.
-  std::shared_ptr<const GeometrySnapshot> Nearest(const GeometryKey& key,
+  std::shared_ptr<const GeometrySnapshot> Nearest(const HashedKey& key,
                                                   std::span<const uint8_t> vertex) {
     const auto shape = previous_shapes_.find(Shape(key));
     if (shape == previous_shapes_.end()) { ++statistics_.none; return nullptr; }
@@ -428,7 +522,7 @@ class GeometryHistory {
         continue;
       // One pass gives both the world step and the full difference (all includes world_).
       const auto d = Distance(candidate.snapshot->vertex, vertex, true);
-      if (d.max_world > kMaximumWorldStep) {
+      if (!Near(d)) {
         ++statistics_.far_world;
         continue;
       }
@@ -458,15 +552,20 @@ class GeometryHistory {
       }
     return nullptr;
   }
+  // A candidate within one frame's movement: translation, and rotation when limited.
+  bool Near(const Difference& d) const {
+    return d.max_world <= kMaximumWorldStep && (rotation_limit_ <= 0 || d.max_rotation <= rotation_limit_);
+  }
+  float rotation_limit_ = 0;
   static constexpr size_t kMaximumShapeCandidates = 32;
   static constexpr uint32_t kMaximumSiblings = 64;  // past this, the last one is ambiguous (a street of one tree model)
   static constexpr float kMaximumWorldStep = 6.0f;      // ~650 km/h at 30 fps
   static constexpr float kMaximumConstantStep = 12.0f;  // bones included, camera not
   struct Candidate {
-    GeometryKey key;
+    HashedKey key;
     std::shared_ptr<GeometrySnapshot> snapshot;
   };
-  std::unordered_map<GeometryKey, std::vector<Candidate>, GeometryKeyHash> previous_shapes_,
+  std::unordered_map<HashedKey, std::vector<Candidate>, HashedKeyHash> previous_shapes_,
       current_shapes_, previous_siblings_, current_siblings_;
   // Per previous sibling group: the vertex constants (float index) that told its draws apart.
   std::unordered_map<const std::vector<Candidate>*, std::vector<uint32_t>> distinct_;
@@ -474,7 +573,7 @@ class GeometryHistory {
   GeometryMatchStatistics statistics_{};
   ConstantMask reads_ = kAllConstants, world_ = WorldRegisters(kAllConstants);  // this Record's draw
   bool transform_fallback_ = false;
-  std::unordered_map<GeometryKey, Entry, GeometryKeyHash> previous_, current_;
+  std::unordered_map<HashedKey, Entry, HashedKeyHash> previous_, current_;
   std::shared_ptr<GeometryBudget> budget_;
   std::vector<std::shared_ptr<GeometrySnapshot>> pool_;
   static constexpr size_t kMaximumPooledSnapshots = 4096;

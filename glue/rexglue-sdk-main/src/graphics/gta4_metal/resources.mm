@@ -322,7 +322,7 @@ void ResourceStore::RegisterReflection(const gta4_native::RegisterReflectionTarg
 void ResourceStore::Invalidate(uint32_t handle) {
   state_->InvalidateBindings();
   state_->preparation.Invalidate(handle);
-  state_->dirty.insert(handle);
+  state_->MarkDirty(handle);
   if(state_->virtuals.MarkGuestWrite(handle)) {
     ++state_->surface_epoch;
     state_->EraseTexture(handle);

@@ -61,10 +61,10 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
   using namespace gta4_native;
   const auto header = memory.Read(handle,32);
   if (header.empty()) { error="Unmapped guest buffer header"; return nullptr; }
-  auto& memo=buffer_memo[(handle ^ handle >> 8 ^ handle >> 16) & (buffer_memo.size() - 1)];
+  auto& memo=BufferMemoSlot(handle);
   if (!buffer_validation_per_use && memo.handle==handle && memo.epoch==buffer_epoch &&
       memo.buffer->validated_frame==frame && !std::memcmp(memo.header.data(),header.data(),memo.header.size()) &&
-      !dirty.contains(handle)) {
+      (memo.dirty_serial==dirty_serial || !dirty.contains(handle))) {
     // Same header as when this capture passed its slice this frame: same metadata, not locked.
     ++buffer_validation_skips; ++buffer_memo_hits; TouchBuffer(*memo.buffer); return memo.buffer;
   }
@@ -82,7 +82,7 @@ ResourceStore::State::Buffer* ResourceStore::State::CaptureBuffer(uint32_t handl
     // contract. One slice per buffer per frame keeps the sweep (payload/64 per frame) at
     // a fixed cost; a buffer drawn 30 times a frame no longer compares 30 slices.
     const auto remember = [&] {
-      memo.handle = handle; memo.epoch = buffer_epoch; memo.buffer = &cached;
+      memo.handle = handle; memo.epoch = buffer_epoch; memo.dirty_serial = dirty_serial; memo.buffer = &cached;
       std::memcpy(memo.header.data(), header.data(), memo.header.size());
     };
     if (!buffer_validation_per_use && cached.validated_frame == frame) {

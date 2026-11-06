@@ -623,27 +623,55 @@ std::string WorldCommand(const std::vector<std::string>& args) {
     const int count = f.empty() ? 6 : int(f[0]);
     const bool hostile = f.size() > 1 ? f[1] != 0.0f : true;
     const float radius = f.size() > 2 ? f[2] : 12.0f;
-    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+    // CREATE_RANDOM_CHAR picks from the ped models streamed in around the player and makes nothing
+    // while none are (just after a teleport, on water, or when streaming is behind: it failed on a
+    // Metal 4 run). So: retry the missing peds each frame, after 2 s also with CREATE_CHAR of a fixed
+    // model that is requested here, and give up after 10 s with an ok reply, so the pad goes on.
+    constexpr const char* kFallbackModel = "M_Y_THIEF";
+    const uint32_t fallback = Hash(kFallbackModel);
+    constexpr int kFallbackAfterFrames = 60, kGiveUpAfterFrames = 300;
+    int frames = 0, made = 0, random_made = 0;
+    return RunOnScriptThread([=](Invoker& n) mutable -> std::optional<std::string> {
       const Player p = GetPlayer(n);
       if (!p.ok) return "err no player";
       const auto pos = Position(n, p.ped);
       if (!pos) return "err cannot read the player position";
-      int made = 0;
-      for (int i = 0; i < count; ++i) {
+      ++frames;
+      if (frames == kFallbackAfterFrames) n.Call("REQUEST_MODEL", {{fallback}});
+      bool fallback_loaded = false;
+      if (frames >= kFallbackAfterFrames) {
+        const Result loaded = n.Call("HAS_MODEL_LOADED", {{fallback}});
+        fallback_loaded = loaded.called && loaded.value;
+      }
+      for (int i = made; i < count; ++i) {
         const float a = 6.2831853f * float(i) / float(std::max(1, count));
-        const Result ped = n.Call("CREATE_RANDOM_CHAR", {{F(pos->x + radius * std::cos(a))},
-                                                         {F(pos->y + radius * std::sin(a))},
-                                                         {F(pos->z)}, {0, true}});
-        if (ped.outs.empty() || !ped.outs[0]) continue;
+        const float x = pos->x + radius * std::cos(a), y = pos->y + radius * std::sin(a);
+        uint32_t ped = 0;
+        const Result random = n.Call("CREATE_RANDOM_CHAR", {{F(x)}, {F(y)}, {F(pos->z)}, {0, true}});
+        if (!random.outs.empty() && random.outs[0]) {
+          ped = random.outs[0];
+          ++random_made;
+        } else if (fallback_loaded) {
+          // CREATE_CHAR(type, model, x, y, z, &ped, network): 26 is a mission ped.
+          const Result fixed = n.Call("CREATE_CHAR", {{26}, {fallback}, {F(x)}, {F(y)}, {F(pos->z)}, {0, true}, {1}});
+          if (!fixed.outs.empty() && fixed.outs[0]) ped = fixed.outs[0];
+        }
+        if (!ped) break;  // nothing streamed in yet: try the rest next frame
         ++made;
         if (hostile) {
-          n.Call("GIVE_WEAPON_TO_CHAR", {{ped.outs[0]}, {7}, {500}, {0}});
-          n.Call("SET_CURRENT_CHAR_WEAPON", {{ped.outs[0]}, {7}, {1}});
-          n.Call("TASK_COMBAT", {{ped.outs[0]}, {p.ped}});
+          n.Call("GIVE_WEAPON_TO_CHAR", {{ped}, {7}, {500}, {0}});
+          n.Call("SET_CURRENT_CHAR_WEAPON", {{ped}, {7}, {1}});
+          n.Call("TASK_COMBAT", {{ped}, {p.ped}});
         }
       }
-      REXLOG_INFO("dev world: peds made {} of {} hostile={}", made, count, hostile);
-      return made ? "ok " + std::to_string(made) : std::string("err CREATE_RANDOM_CHAR made no ped");
+      if (made < count && frames < kGiveUpAfterFrames) return std::nullopt;
+      if (frames >= kFallbackAfterFrames) n.Call("MARK_MODEL_AS_NO_LONGER_NEEDED", {{fallback}});
+      if (made < count)
+        REXLOG_WARN("dev world: peds made only {} of {} after {} frames (random {}, {} {})", made, count, frames,
+                    random_made, kFallbackModel, made - random_made);
+      REXLOG_INFO("dev world: peds made {} of {} hostile={} frames={} random={} fallback={}", made, count, hostile,
+                  frames, random_made, made - random_made);
+      return "ok " + std::to_string(made);
     });
   }
 

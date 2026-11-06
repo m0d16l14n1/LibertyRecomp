@@ -132,6 +132,7 @@ if(APPLE AND LIBERTY_RECOMP_TARGET_PLATFORM STREQUAL "desktop")
         src/gta4_motion_vehicle_hooks.cpp
         src/gta4_audio_lifetime_trace.cpp
         src/gta4_audio_ramped_mix.cpp
+        src/gta4_audio_filter.cpp
         src/gta4_lzx_hooks.cpp
         src/gta4_multiplayer_64_hooks.cpp
         src/gta4_online_hooks.cpp

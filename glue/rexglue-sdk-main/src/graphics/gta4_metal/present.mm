@@ -21,6 +21,10 @@ REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_half_rate, true, "GPU",
 REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_dump, "", "GPU/Diagnostics",
                       "Folder for MetalFX frame generation checks: every 120th generated frame and the real "
                       "frame after it, as PPM, at most 6 pairs (empty = off)");
+REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_every, 120, "GPU/Diagnostics",
+                      "Frame generation dump: every Nth generated frame (at least 2)");
+REXCVAR_DEFINE_UINT32(gta4_metalfx_frame_generation_dump_max, 6, "GPU/Diagnostics",
+                      "Frame generation dump: at most this many generated frames per run");
 
 namespace rex::graphics::gta4_metal {
 namespace {
@@ -191,10 +195,12 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       const auto folder=rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_dump");
       ++generated_count;
       temporal.snapshot_reactive=!folder.empty();
+      const uint64_t every=std::max<uint32_t>(2,REXCVAR_GET(gta4_metalfx_frame_generation_dump_every));
+      const uint64_t most=REXCVAR_GET(gta4_metalfx_frame_generation_dump_max);
       // The real frame before the generated one, so each check has both neighbours.
-      if(!folder.empty()&&generated_count%120==119&&dumped<6)
+      if(!folder.empty()&&generated_count%every==every-1&&dumped<most)
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_before.ppm",folder,present.submitted_frame+1));
-      if(!folder.empty()&&generated_count%120==0&&dumped<6){
+      if(!folder.empty()&&generated_count%every==0&&dumped<most){
         ++dumped;
         DumpFrameImage(commands,generated_pair.generated,fmt::format("{}/framegen_{}_generated.ppm",folder,present.submitted_frame));
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_real.ppm",folder,present.submitted_frame));
@@ -286,16 +292,16 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     }
   }
   if(temporal.active&&(present.submitted_frame<=6||present.submitted_frame%60==0))
-    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} camera-filled={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={}",
+    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} camera-filled={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={} slow-skips={}",
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
       temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
-      temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason);
+      temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason,temporal.slow_generation_skips);
   if(temporal.active&&present.submitted_frame%60==0){
     const auto m=temporal.geometry.TakeStatistics();
     REXLOG_INFO("gta4-metal-temporal-history frame={} by-key={} by-transform={} transform-ambiguous={} transform-far={} key-far={} none={} "
-                "sibling={} sibling-ambiguous={} far-world={} pooled={} far-registers={} (60 frames)",
+                "sibling={} sibling-ambiguous={} far-world={} stale-skinned={}/{} pooled={} far-registers={} (60 frames)",
         present.submitted_frame,m.key,m.transform,m.transform_ambiguous,m.transform_far,m.key_far,m.none,m.sibling,m.sibling_ambiguous,
-        m.far_world,temporal.geometry.pooled_snapshots(),[&]{
+        m.far_world,m.stale_skinned,m.moved_skinned,temporal.geometry.pooled_snapshots(),[&]{
           // The three registers that most often refused a transform match by their change.
           std::array<uint32_t,256> order{};for(uint32_t i=0;i<order.size();++i)order[i]=i;
           std::partial_sort(order.begin(),order.begin()+3,order.end(),[&](uint32_t a,uint32_t b){return m.far_register[a]>m.far_register[b];});

@@ -7,6 +7,7 @@
 //                   texture; rejects by depth; keeps a per-pixel history length
 //   rtao_atrous     edge-aware a-trous filter (depth + normal), run with step 1 and 2
 //   rtao_upsample   depth-aware 2x2 upsample to input resolution
+//   rtao_trace_full, rt_denoise_guides: the raw AO and guides for MetalFX's denoised scaler
 //   rtao_apply_*    full-screen pass over the lighting output: multiply, or show the AO
 //   rtshadow_*      sun shadows: trace towards the sun, then rtao_temporal, rtao_atrous
 //                   (step 1) and rtshadow_upsample (see the end of this file)
@@ -121,25 +122,20 @@ static float origin_offset(float distance) {
 // ---- trace ---------------------------------------------------------------------------
 // out: r = visibility (1 open, 0 occluded), g = view distance (0 for sky)
 
-kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
-                       instance_acceleration_structure scene [[buffer(1)]],
-                       texture2d<float, access::read> depth [[texture(0)]],
-                       texture2d<float, access::read> gbufferNormal [[texture(1)]],
-                       texture2d<float, access::write> raw [[texture(2)]],
-                       uint2 id [[thread_position_in_grid]]) {
-    if (any(id >= p.traceSize)) return;
-    // Each AO pixel traces from one of its four input pixels, rotating over frames.
-    const uint2 jitter = uint2(p.frame & 1u, (p.frame >> 1) & 1u);
-    const uint2 pixel = min(id * 2u + jitter, p.inputSize - 1u);
+// One cosine-weighted AO ray from input pixel `pixel`. Returns the visibility; `distance`
+// is the view distance, 0 for sky.
+static float trace_visibility(constant RtaoParams& p, instance_acceleration_structure scene,
+                              texture2d<float, access::read> depth, texture2d<float, access::read> gbufferNormal,
+                              uint2 pixel, uint2 seed, thread float& distance) {
     const float d = depth_at(depth, pixel);
-    if (is_sky(d, p)) { raw.write(float4(1, 0, 0, 0), id); return; }
+    if (is_sky(d, p)) { distance = 0.0f; return 1.0f; }
     const float3 position = world_at(pixel, p.inputSize, d, p);
     const float3 n = normal_at(depth, gbufferNormal, pixel, position, p, p.normalMode);
-    const float distance = view_depth(position, p);
+    distance = view_depth(position, p);
 
     ray r;
     r.origin = position + n * origin_offset(distance);
-    r.direction = cosine_direction(n, random2(id, p.frame));
+    r.direction = cosine_direction(n, random2(seed, p.frame));
     r.min_distance = 0.0f;
     r.max_distance = p.radius;
     intersector<instancing> query;
@@ -153,7 +149,61 @@ kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
         const float t = saturate(hit.distance / p.radius);
         visibility = 1.0f - p.strength * (1.0f - t * t);
     }
+    return visibility;
+}
+
+kernel void rtao_trace(constant RtaoParams& p [[buffer(0)]],
+                       instance_acceleration_structure scene [[buffer(1)]],
+                       texture2d<float, access::read> depth [[texture(0)]],
+                       texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                       texture2d<float, access::write> raw [[texture(2)]],
+                       uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.traceSize)) return;
+    // Each AO pixel traces from one of its four input pixels, rotating over frames.
+    const uint2 jitter = uint2(p.frame & 1u, (p.frame >> 1) & 1u);
+    const uint2 pixel = min(id * 2u + jitter, p.inputSize - 1u);
+    float distance;
+    const float visibility = trace_visibility(p, scene, depth, gbufferNormal, pixel, id, distance);
     raw.write(float4(visibility, distance, 0, 0), id);
+}
+
+// The raw signal for MetalFX's denoised scaler (gta4_metal_raytracing_denoiser = metalfx): one
+// ray per input pixel, no temporal or spatial filtering. ao: input size, 1 = open.
+kernel void rtao_trace_full(constant RtaoParams& p [[buffer(0)]],
+                            instance_acceleration_structure scene [[buffer(1)]],
+                            texture2d<float, access::read> depth [[texture(0)]],
+                            texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                            texture2d<float, access::write> ao [[texture(2)]],
+                            uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.inputSize)) return;
+    float distance;
+    ao.write(float4(trace_visibility(p, scene, depth, gbufferNormal, id, id, distance)), id);
+}
+
+// Guides for MTLFXTemporalDenoisedScaler, from the lighting draw's G-buffer (docs/RAYTRACING.md):
+// t0 albedo (the title reads .zyx), t1 world normal * 0.5 + 0.5 (normalMode as the AO trace),
+// t2 r specular intensity, g specular power. Roughness: the lighting PS (7B14CAC2A31D4199) takes
+// the Blinn-Phong exponent as n = 512 g^2 (c248.z); alpha^2 = 2 / (n + 2), perceptual = alpha^0.5.
+kernel void rt_denoise_guides(constant RtaoParams& p [[buffer(0)]],
+                              texture2d<float, access::read> gbufferAlbedo [[texture(0)]],
+                              texture2d<float, access::read> gbufferNormal [[texture(1)]],
+                              texture2d<float, access::read> gbufferSpecular [[texture(2)]],
+                              texture2d<float, access::write> diffuseAlbedo [[texture(3)]],
+                              texture2d<float, access::write> specularAlbedo [[texture(4)]],
+                              texture2d<float, access::write> normal [[texture(5)]],
+                              texture2d<float, access::write> roughness [[texture(6)]],
+                              uint2 id [[thread_position_in_grid]]) {
+    if (any(id >= p.inputSize)) return;
+    const float3 albedo = gbufferAlbedo.read(id).zyx;
+    float3 n = gbuffer_normal(gbufferNormal, id, max(p.normalMode, 1u));
+    n = all(isfinite(n)) && length_squared(n) > 1.0e-8f ? normalize(n) : float3(0, 0, 1);
+    const float2 specular = gbufferSpecular.read(id).rg;
+    const float power = 512.0f * specular.g * specular.g;
+    const float alpha2 = 2.0f / (power + 2.0f);
+    diffuseAlbedo.write(float4(albedo, 1.0f), id);
+    specularAlbedo.write(float4(float3(specular.r), 1.0f), id);
+    normal.write(float4(n, 0.0f), id);
+    roughness.write(float4(saturate(sqrt(sqrt(alpha2)))), id);
 }
 
 // ---- temporal ------------------------------------------------------------------------
@@ -278,6 +328,23 @@ fragment float4 rtao_apply_show(RtaoApplyVertex in [[stage_in]],
     return float4(float3(ao.read(pixel).r), 1.0f);
 }
 
+// gta4_metal_raytracing_ao_view = guides: the MetalFX denoiser's guides, each at half size.
+// Top left diffuse albedo, top right normal * 0.5 + 0.5, bottom left specular albedo, bottom right roughness.
+fragment float4 rtao_apply_guides(RtaoApplyVertex in [[stage_in]],
+                                  texture2d<float, access::read> diffuse [[texture(0)]],
+                                  texture2d<float, access::read> specular [[texture(1)]],
+                                  texture2d<float, access::read> normal [[texture(2)]],
+                                  texture2d<float, access::read> roughness [[texture(3)]]) {
+    const uint2 size = uint2(diffuse.get_width(), diffuse.get_height());
+    const uint2 half_size = max(size / 2u, uint2(1));
+    const uint2 position = uint2(in.position.xy);
+    const bool right = position.x >= half_size.x, bottom = position.y >= half_size.y;
+    const uint2 pixel = min((position - uint2(right ? half_size.x : 0u, bottom ? half_size.y : 0u)) * 2u, size - 1u);
+    if (!right && !bottom) return float4(diffuse.read(pixel).rgb, 1.0f);
+    if (right && !bottom) return float4(normal.read(pixel).rgb * 0.5f + 0.5f, 1.0f);
+    if (!right) return float4(specular.read(pixel).rgb, 1.0f);
+    return float4(float3(roughness.read(pixel).r), 1.0f);
+}
 
 // ---- diagnostics ---------------------------------------------------------------------
 // gta4_metal_raytracing_ao_view = debug, and a statistics pass every 300 traced frames.

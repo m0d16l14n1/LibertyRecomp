@@ -17,6 +17,9 @@ struct Configuration {
   uint32_t input_width = 0, input_height = 0, output_width = 0, output_height = 0;
   Method method = Method::kTaa;
   bool depth_reversed = false;
+  // kMetalFx on a Metal 4 queue only: MTL4FXTemporalDenoisedScaler in place of the temporal
+  // scaler (gta4_metal_raytracing_denoiser = metalfx).
+  bool denoised = false;
   bool operator==(const Configuration&) const = default;
 };
 struct Frame {
@@ -37,7 +40,7 @@ inline bool ValidConfiguration(const Configuration& c) {
   return c.input_width && c.input_height && c.output_width && c.output_height &&
          c.input_width <= 16384 && c.input_height <= 16384 && c.output_width <= 16384 &&
          c.output_height <= 16384 && c.input_width <= c.output_width &&
-         c.input_height <= c.output_height &&
+         c.input_height <= c.output_height && (!c.denoised || c.method == Method::kMetalFx) &&
          (c.method == Method::kMetalFx ||
           (c.method == Method::kTaa && c.input_width == c.output_width &&
            c.input_height == c.output_height));

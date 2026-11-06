@@ -46,6 +46,11 @@ class FramePacer {
     if(!minimum_interval_ns_&&!fps_){next_ns_=0;fraction_=0;}
   }
   uint64_t minimum_interval() const noexcept {return minimum_interval_ns_;}
+  // One-shot, display-driven only: the next Queued() places the following slot this long after
+  // the queued opportunity's display target instead of after its planned slot. A frame-generation
+  // pair uses it so a late generated image does not pull its real image closer (the timeline
+  // catching up inside one pair is a short interval right after a long one).
+  void SetNextFromDisplayTarget(uint64_t ns) noexcept {next_from_target_ns_=ns;}
   uint64_t period() const noexcept {
     return std::max(fps_?kSecond/fps_:uint64_t{0},minimum_interval_ns_);
   }
@@ -108,6 +113,9 @@ class FramePacer {
     const uint64_t slot=attempt_.slot_ns?attempt_.slot_ns:
         display_driven_?attempt_.display_target_ns:queue_end_ns;
     next_ns_ = Add(slot, period);
+    if (next_from_target_ns_ && display_driven_ && attempt_.display_target_ns)
+      next_ns_ = Add(attempt_.display_target_ns, next_from_target_ns_);
+    next_from_target_ns_ = 0;
     // Long stalls do not grant a burst of overdue frame slots.
     if (queue_end_ns >= next_ns_ && queue_end_ns - next_ns_ >= whole) {
       next_ns_ = Add(queue_end_ns, whole);
@@ -140,6 +148,7 @@ class FramePacer {
   uint32_t fps_ = 0;
   uint32_t fraction_ = 0;
   uint64_t minimum_interval_ns_=0;
+  uint64_t next_from_target_ns_ = 0;
   uint64_t next_ns_ = 0;
   uint64_t last_observed_ns_ = 0;
   uint64_t last_queued_display_target_ns_ = 0;

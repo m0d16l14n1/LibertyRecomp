@@ -28,8 +28,16 @@ IDs, a per-command-buffer transient buffer instead of `set*Bytes`, a per-command
 blits on `MTL4ComputeCommandEncoder`, a queue barrier at each encoder start plus encoder barriers
 between copies and between serial dispatches, commit feedback for completion handlers, and
 queue waits/signals for events and drawables (the layer's residency set joins the queue).
-MetalFX still takes a Metal 3 command buffer: `EncodeMetal3` commits the Metal 4 work so far and
-runs it on a side Metal 3 queue, ordered by an `MTLEvent` (one hop per frame; `MTL4FX` next).
+MetalFX runs natively: the temporal scaler, the frame interpolator and (with
+`gta4_metal_raytracing_denoiser = metalfx`) the denoised scaler are their `MTL4FX` objects, made from
+the queue's `MTL4Compiler` and encoded into the open `MTL4CommandBuffer` by `EncodeMetal4`. An empty
+encoder waits for earlier queue work and updates the object's own fence, and the next encoder's queue
+barrier orders what reads the output. Each object has its own fence. If the device has no `MTL4FX`
+interpolation, frame generation falls back to the Metal 3 hop (`EncodeMetal3`: commit, side Metal 3
+queue, `MTLEvent`). Ray-tracing acceleration-structure builds still hop, so `metal3-hops` on the
+`gta4-metal4` line is 0 only with ray tracing off. `gta4-metal-framegen frame= native-mtl4fx= metal3-hop=`
+counts frame-generation encodes by path. The present thread's display queue (frame generation) is a
+plain Metal 3 queue that only presents, so it adds no hops.
 Without Metal 4 (macOS < 26 or the GPU family) the game logs it and stays on metal3.
 First drive (2026-11-04): the city route renders identically to metal3, no unrecognised selectors.
 
@@ -66,8 +74,9 @@ First drive (2026-11-04): the city route renders identically to metal3, no unrec
    placement for the resolve chain (28 resolves a frame, deferred resolves, BACKLOG 17): every
    writer-then-reader pair across passes needs a barrier, and a missing one is a race that shows as
    flicker. Validate with `MTL_DEBUG_LAYER=1` and shader validation on the bench routes.
-4. **MetalFX on Metal 4** (`MTL4FXTemporalScaler`, `MTL4FXFrameInterpolator`) once 3 has Metal 4
-   command buffers at the end of the frame.
+4. **MetalFX on Metal 4** (`MTL4FXTemporalScaler`, `MTL4FXFrameInterpolator`,
+   `MTL4FXTemporalDenoisedScaler`): done, see Switching. The denoised scaler is Metal 4 only
+   (docs/RAYTRACING.md).
 5. **Pipelines** last, and only if first-sight compiles come back: `MTL4Compiler` (synchronous, GCD),
    flexible pipelines for the colour-format variants, `MTL4Archive`.
 

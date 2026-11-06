@@ -3,7 +3,12 @@
 #include <rex/logging.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <simd/simd.h>
 #include "projection.h"
+#include "../raytracing/ambient_occlusion.h"
+#include "../raytracing/raytracing.h"
+#include "../../../ui/metal/metal4_queue.h"
 #include "pass_tags.h"
 // Sign convention of the jitter handed to MetalFX (diagnostic, hot reload): "++" (verified,
 // BACKLOG 86) passes it unchanged; "--", "-+", "+-" negate x and/or y.
@@ -13,9 +18,34 @@
 REXCVAR_DEFINE_BOOL(gta4_temporal_history_transform_match, true, "GPU",
                     "Continue a moving object's motion history by its nearest transform when its "
                     "owner address changed since the previous frame");
+REXCVAR_DEFINE_DOUBLE(gta4_temporal_history_rotation_limit, 0.0, "GPU",
+                      "Refuse an object's motion history when its world rotation changed more than this "
+                      "per frame (largest change of a rotation matrix element; 0.35 is about 20 degrees, "
+                      "0 off). The pixels then count as untracked");
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_neighbour_motion, true, "GPU",
                     "Frame generation: a pixel without object history takes the motion of nearby "
                     "pixels at its depth that have it (the rest of its object) before the camera's");
+// What a frame-generation pixel gets when its draw has no history and no neighbour at its depth
+// has any. The camera's motion is right for static world drawn without history and wrong for
+// whatever moves with the camera (the player's car, Niko), which then tears in the midpoint.
+REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_untracked_motion, "camera", "GPU",
+                      "Frame generation, world pixels without object history or a tracked neighbour: "
+                      "camera (the camera's motion), zero (no screen motion: moves with the camera) or "
+                      "near-zero (zero nearer than gta4_metalfx_frame_generation_untracked_near metres, "
+                      "camera motion beyond)");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_untracked_near, 15.0, "GPU",
+                      "near-zero: view distance in metres within which untracked pixels get zero motion");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_camera_matrices, true, "GPU",
+                    "Frame generation: give MetalFX the camera's world-to-view and projection matrices "
+                    "(macOS 27), from which it derives camera-only motion");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_max_real_ms, 0.0, "GPU",
+                      "Frame generation: present real frames only while the smoothed real frame interval "
+                      "is above this many milliseconds (resumes below 85% of it; 0 off). Large real-frame "
+                      "motion is where the midpoint tears");
+REXCVAR_DEFINE_DOUBLE(gta4_metalfx_frame_generation_repair_px, 0.0, "GPU",
+                      "Frame generation: where nearby pixels at another depth move this many output "
+                      "pixels differently, blend the generated pixel toward a half-step warp of the "
+                      "real scene (fully at twice this; 0 off). Targets smears at the player's car");
 REXCVAR_DEFINE_BOOL(gta4_temporal_reactive_sky, true, "GPU",
                     "The sky, given the camera's motion, is accumulated by the temporal scaler (not reactive)");
 REXCVAR_DEFINE_DOUBLE(gta4_temporal_scaler_neighbour_motion, -1.0, "GPU",
@@ -122,6 +152,12 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
     config.output_width = config.input_width;
     config.output_height = config.input_height;
   }
+  // MetalFX's denoised scaler in place of the temporal scaler: ray tracing on, Metal 4, asked for,
+  // and supported. The ray-tracing hook then hands it the raw signal (draw.mm).
+  config.denoised = method == Method::kMetalFx && raytracing::MetalFxDenoiserRequested() &&
+                    raytracing::CurrentMode() != raytracing::Mode::kOff && ui::metal::IsMetal4(cb) &&
+                    MetalFxDenoiserUsable(context_->device, config.input_width, config.input_height,
+                                          config.output_width, config.output_height);
   metadata = {};
   metadata.sequence = c.sequence;
   metadata.epoch = c.epoch;
@@ -138,6 +174,7 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
   metadata.jitter_applied = c.flags & gta4_native::kTemporalJitterApplied;
   metadata.camera_cut = c.flags & gta4_native::kTemporalCameraCut;
   geometry.set_transform_fallback(REXCVAR_GET(gta4_temporal_history_transform_match));
+  geometry.set_rotation_limit(float(REXCVAR_GET(gta4_temporal_history_rotation_limit)));
   if (!ValidConfiguration(config) ||
       !geometry.Begin(c.epoch, c.view, c.sequence, metadata.camera_cut)) {
     error = "temporal scene identity or dimensions invalid";
@@ -261,6 +298,15 @@ bool Live::FillCameraMotion(id<MTLCommandBuffer> cb, std::string& error, float s
   [e setTexture:inputs.motion atIndex:1];
   [e setTexture:inputs.previous_depth atIndex:2];
   [e setBytes:&p length:sizeof(p) atIndex:0];
+  // x: 0 camera, 1 zero, 2 zero nearer than y metres (frame generation only; the scaler fill
+  // never writes camera motion).
+  std::array<float,2> untracked{0.0f,0.0f};
+  if(!scaler){
+    const std::string mode=REXCVAR_GET(gta4_metalfx_frame_generation_untracked_motion);
+    untracked={mode=="zero"?1.0f:mode=="near-zero"?2.0f:0.0f,
+               float(REXCVAR_GET(gta4_metalfx_frame_generation_untracked_near))};
+  }
+  [e setBytes:untracked.data() length:sizeof(untracked) atIndex:2];
   Dispatch(e,camera_motion_fill_,config.input_width,config.input_height);
   [e endEncoding];
   return true;
@@ -342,8 +388,23 @@ id<MTLTexture> Live::Resolve(id<MTLCommandBuffer> cb, id<MTLTexture> scene, std:
       [copy copyFromTexture:inputs.reactive toTexture:reactive_snapshot];
       [copy endEncoding];
     }
-    if (aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
-        aa_.Encode(cb, inputs, metadata, resolved_, error)) {
+    if (config.denoised ||
+        (frame_generation && REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices))) {
+      // Row-vector (D3D) matrices are the transposes of column-vector ones, so their 16 floats read
+      // as simd columns directly. actual_inverse is camera-to-world; world-to-view is its inverse.
+      simd_float4x4 camera_to_world, projection;
+      std::memcpy(&camera_to_world, actual_inverse.data(), sizeof(camera_to_world));
+      std::memcpy(&projection, actual_projection.data(), sizeof(projection));
+      const simd_float4x4 world_to_view = simd_inverse(camera_to_world);
+      std::memcpy(inputs.world_to_view.data(), &world_to_view, sizeof(world_to_view));
+      std::memcpy(inputs.view_to_clip.data(), &projection, sizeof(projection));
+      camera_matrices_sequence_ = metadata.sequence;
+    }
+    const bool anti_aliased =
+        aa_.Configure(context_->device, library_, config, OwnedTextureBudget(context_->device), error) &&
+        aa_.Encode(cb, inputs, metadata, resolved_, error);
+    if (std::string notice = aa_.TakeNotice(); !notice.empty()) REXLOG_INFO("{}", notice);
+    if (anti_aliased) {
       KeepUntilCompleted(cb, resolved_.lease);
       resolved = true;
       return resolved_.color;
@@ -531,6 +592,22 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
     interpolation_.Reset();
     return true;
   }
+  // Too slow a real frame rate: the midpoint has to bridge large motion, where it tears (the
+  // road dragged under the player's car at 14 fps). The smoothed interval (8-frame average) with
+  // a 15% band keeps it from toggling every frame; an unknown interval keeps the last state.
+  if (const double max_ms = REXCVAR_GET(gta4_metalfx_frame_generation_max_real_ms); max_ms <= 0) {
+    slow_generation_ = false;
+  } else if (smoothed_interval_ns_) {
+    const double ms = double(smoothed_interval_ns_) * 1.0e-6;
+    if (ms > max_ms) slow_generation_ = true;
+    else if (ms < 0.85 * max_ms) slow_generation_ = false;
+  }
+  if (slow_generation_) {
+    generation_skip_reason = "real frame interval is above gta4_metalfx_frame_generation_max_real_ms";
+    ++slow_generation_skips;
+    interpolation_.Reset();
+    return true;
+  }
   bool camera_filled = false;
   const bool camera_fill = rex::cvar::Query<bool>("gta4_metalfx_frame_generation_camera_motion");
   if (camera_fill && world_draws && camera_transform_valid_ && !metadata.camera_cut) {
@@ -561,6 +638,9 @@ bool Live::Generate(id<MTLCommandBuffer> cb, InterpolationOutput& output, std::s
   f.color_domain = ColorDomain::kDisplayPerceptual;
   Inputs in = inputs;
   in.color = final_scene;
+  in.repair_motion_px = float(REXCVAR_GET(gta4_metalfx_frame_generation_repair_px));
+  in.camera_matrices = REXCVAR_GET(gta4_metalfx_frame_generation_camera_matrices) &&
+                       camera_matrices_sequence_ == metadata.sequence;
   // present.mm composes the HUD over the scene into the real image (Compose writes every texel).
   UiInput ui{};
   ui.caller_writes_real = true;
@@ -650,6 +730,7 @@ void Live::End() {
   motion_coverage_complete = true;
   jitter_decided = jitter_eligible = false;
   inputs.exposure = nil;
+  inputs.diffuse_albedo = inputs.specular_albedo = inputs.normal = inputs.roughness = nil;
   ui_exact = true;
   main_view = false;
   execution_scene_geometry = execution_screen_space = execution_attributed = false;

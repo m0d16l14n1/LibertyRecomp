@@ -179,6 +179,16 @@ Capabilities QueryCapabilities(id<MTLDevice> device) {
           [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:device],
           [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:device]};
 }
+std::atomic<bool> g_denoiser_failed{false};
+bool MetalFxDenoiserUsable(id<MTLDevice> device, uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh) {
+  if (!device || !iw || !ih || g_denoiser_failed.load(std::memory_order_relaxed) ||
+      ![MTLFXTemporalDenoisedScalerDescriptor supportsMetal4FX:device])
+    return false;
+  const float minimum = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMinScaleForDevice:device],
+              maximum = [MTLFXTemporalDenoisedScalerDescriptor supportedInputContentMaxScaleForDevice:device];
+  const float sx = float(ow) / iw, sy = float(oh) / ih;
+  return sx >= minimum && sy >= minimum && sx <= maximum && sy <= maximum;
+}
 struct AntiAliasing::State {
   struct Slot {
     id<MTLTexture> color = nil, depth = nil, exposure = nil;
@@ -194,6 +204,14 @@ struct AntiAliasing::State {
   MTLFXTemporalScalerDescriptor* scaler_descriptor = nil;
   id<MTL4FXTemporalScaler> scaler4 = nil;
   id<MTLFence> scaler_fence = nil;
+  // Configuration::denoised: made at the first (Metal 4) encode, with neutral guides for frames
+  // that bring none.
+  MTLFXTemporalDenoisedScalerDescriptor* denoiser_descriptor = nil;
+  id<MTL4FXTemporalDenoisedScaler> denoiser4 = nil;
+  id<MTLFence> denoiser_fence = nil;
+  id<MTLTexture> neutral_diffuse = nil, neutral_specular = nil, neutral_normal = nil, neutral_roughness = nil;
+  bool neutral_cleared = false;
+  uint64_t denoised_frames = 0, neutral_guide_frames = 0;
   id<MTLComputePipelineState> taa = nil;
   std::array<Slot, 3> slots{};
   size_t cursor = 0, previous = 0, owned = 0, limit = 0;
@@ -210,6 +228,7 @@ void AntiAliasing::Reset() {
   if (state_) state_->history.Reset();
 }
 size_t AntiAliasing::owned_bytes() const { return state_ ? state_->owned : 0; }
+std::string AntiAliasing::TakeNotice() { return std::exchange(notice_, std::string()); }
 bool AntiAliasing::Configure(id<MTLDevice> device, id<MTLLibrary> library, Configuration c,
                              size_t budget, std::string& error) {
   @autoreleasepool {
@@ -236,7 +255,44 @@ bool AntiAliasing::Configure(id<MTLDevice> device, id<MTLLibrary> library, Confi
     next->config = c;
     next->limit = budget;
     MTLTextureUsage output_usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    if (c.method == Method::kMetalFx) {
+    if (c.denoised) {
+      if (!MetalFxDenoiserUsable(device, c.input_width, c.input_height, c.output_width, c.output_height)) {
+        permanent_rejection = true;
+        error = "MetalFX Metal 4 denoised scaler is unsupported for this device or scale";
+        return false;
+      }
+      auto descriptor = [MTLFXTemporalDenoisedScalerDescriptor new];
+      descriptor.inputWidth = c.input_width;
+      descriptor.inputHeight = c.input_height;
+      descriptor.outputWidth = c.output_width;
+      descriptor.outputHeight = c.output_height;
+      descriptor.colorTextureFormat = MTLPixelFormatRGBA16Float;
+      descriptor.depthTextureFormat = MTLPixelFormatR32Float;
+      descriptor.motionTextureFormat = MTLPixelFormatRG16Float;
+      descriptor.diffuseAlbedoTextureFormat = MTLPixelFormatRGBA8Unorm;
+      descriptor.specularAlbedoTextureFormat = MTLPixelFormatRGBA8Unorm;
+      descriptor.normalTextureFormat = MTLPixelFormatRGBA16Float;
+      descriptor.roughnessTextureFormat = MTLPixelFormatR16Float;
+      descriptor.outputTextureFormat = MTLPixelFormatRGBA16Float;
+      descriptor.reactiveMaskTextureEnabled = YES;
+      descriptor.reactiveMaskTextureFormat = MTLPixelFormatR8Unorm;
+      descriptor.autoExposureEnabled = NO;
+      descriptor.requiresSynchronousInitialization = YES;
+      next->denoiser_descriptor = descriptor;
+      // The scaler's own usage is known only once it exists (first encode): cover what MetalFX
+      // outputs need, and check at encode.
+      output_usage |= MTLTextureUsageRenderTarget;
+      const MTLTextureUsage guide_usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+      next->neutral_diffuse = Allocate(device, MTLPixelFormatRGBA8Unorm, c.input_width, c.input_height, guide_usage,
+                                       @"Liberty denoise neutral albedo", budget, next->owned, error);
+      next->neutral_specular = next->neutral_diffuse ? Allocate(device, MTLPixelFormatRGBA8Unorm, c.input_width,
+          c.input_height, guide_usage, @"Liberty denoise neutral specular", budget, next->owned, error) : nil;
+      next->neutral_normal = next->neutral_specular ? Allocate(device, MTLPixelFormatRGBA16Float, c.input_width,
+          c.input_height, guide_usage, @"Liberty denoise neutral normal", budget, next->owned, error) : nil;
+      next->neutral_roughness = next->neutral_normal ? Allocate(device, MTLPixelFormatR16Float, c.input_width,
+          c.input_height, guide_usage, @"Liberty denoise neutral roughness", budget, next->owned, error) : nil;
+      if (!next->neutral_roughness) return false;
+    } else if (c.method == Method::kMetalFx) {
       const auto caps = QueryCapabilities(device);
       const float sx = float(c.output_width) / c.input_width,
                   sy = float(c.output_height) / c.input_height;
@@ -389,18 +445,31 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
         return false;
       }
     }
-    if (s.scaler) {
-      id<MTLFXTemporalScalerBase> scaler = metal4 ? s.scaler4 : s.scaler;
-      if ((in.color.usage & scaler.colorTextureUsage) != scaler.colorTextureUsage ||
-          (in.depth.usage & scaler.depthTextureUsage) != scaler.depthTextureUsage ||
-          (in.motion.usage & scaler.motionTextureUsage) != scaler.motionTextureUsage ||
-          (in.reactive.usage & scaler.reactiveTextureUsage) != scaler.reactiveTextureUsage) {
-        error = "MetalFX temporal input usage contract is unmet";
+    if (s.denoiser_descriptor && !metal4) {
+      error = "MetalFX denoised scaler needs a Metal 4 queue";
+      return false;
+    }
+    if (s.denoiser_descriptor && !s.denoiser4) {
+      if (auto compiler = rex::ui::metal::Metal4Compiler(commands.commandQueue)) {
+        s.denoiser4 = [s.denoiser_descriptor newTemporalDenoisedScalerWithDevice:s.device compiler:compiler];
+        s.denoiser_fence = [s.device newFence];
+        s.denoiser4.fence = s.denoiser_fence;
+      }
+      if (!s.denoiser4) {
+        g_denoiser_failed.store(true, std::memory_order_relaxed);  // Live configures the plain scaler next
+        notice_ = "gta4-metal-denoiser: MTL4FX temporal denoised scaler creation failed; using the "
+                  "MetalFX temporal scaler and the native ray-tracing filters";
+        error = "MetalFX Metal 4 denoised scaler creation failed";
         return false;
       }
-      if (in.exposure) {
-        scaler.exposureTexture = in.exposure;
-      } else {
+      notice_ = "gta4-metal-denoiser: MTL4FX temporal denoised scaler " + std::to_string(s.config.input_width) +
+                "x" + std::to_string(s.config.input_height) + " -> " + std::to_string(s.config.output_width) + "x" +
+                std::to_string(s.config.output_height);
+    }
+    if (s.scaler || s.denoiser4) {
+      // Both scalers take the same exposure: the title's GPU hint, or the scalar uploaded here.
+      id<MTLTexture> exposure_texture = in.exposure;
+      if (!exposure_texture) {
       // MetalFX requires a 1x1 R16Float exposure texture. Store a half-float
       // value, not the low bytes of the float used by the title's tone mapper.
       const _Float16 exposure_value = _Float16(frame.exposure);
@@ -430,8 +499,102 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
               destinationLevel:0
              destinationOrigin:MTLOriginMake(0, 0, 0)];
       [transfer endEncoding];
-      scaler.exposureTexture = slot.exposure;
+      exposure_texture = slot.exposure;
       }
+      const auto jitter = MetalFxJitter(frame.jitter);
+      if (s.denoiser4) {
+        id<MTL4FXTemporalDenoisedScaler> denoiser = s.denoiser4;
+        if (!s.neutral_cleared) {
+          // Neutral guides: grey albedo, no specular, +Z normal, fully rough.
+          const auto clear = [&](id<MTLTexture> target, MTLClearColor color) {
+            auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = target;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = color;
+            id<MTLRenderCommandEncoder> e = [commands renderCommandEncoderWithDescriptor:pass];
+            if (!e) return false;
+            e.label = @"Liberty denoise neutral guide";
+            [e endEncoding];
+            return true;
+          };
+          if (!clear(s.neutral_diffuse, MTLClearColorMake(0.5, 0.5, 0.5, 1)) ||
+              !clear(s.neutral_specular, MTLClearColorMake(0, 0, 0, 1)) ||
+              !clear(s.neutral_normal, MTLClearColorMake(0, 0, 1, 0)) ||
+              !clear(s.neutral_roughness, MTLClearColorMake(1, 1, 1, 1))) {
+            error = "denoiser neutral guide clear failed";
+            return false;
+          }
+          s.neutral_cleared = true;
+        }
+        const auto guide = [&](id<MTLTexture> given, id<MTLTexture> neutral, MTLPixelFormat format) {
+          return TextureMatches(given, s.device, format, s.config.input_width, s.config.input_height,
+                                MTLTextureUsageShaderRead) ? given : neutral;
+        };
+        id<MTLTexture> diffuse = guide(in.diffuse_albedo, s.neutral_diffuse, MTLPixelFormatRGBA8Unorm);
+        id<MTLTexture> specular = guide(in.specular_albedo, s.neutral_specular, MTLPixelFormatRGBA8Unorm);
+        id<MTLTexture> normal = guide(in.normal, s.neutral_normal, MTLPixelFormatRGBA16Float);
+        id<MTLTexture> roughness = guide(in.roughness, s.neutral_roughness, MTLPixelFormatR16Float);
+        if (diffuse == s.neutral_diffuse) ++s.neutral_guide_frames;
+        if ((in.color.usage & denoiser.colorTextureUsage) != denoiser.colorTextureUsage ||
+            (in.depth.usage & denoiser.depthTextureUsage) != denoiser.depthTextureUsage ||
+            (in.motion.usage & denoiser.motionTextureUsage) != denoiser.motionTextureUsage ||
+            (in.reactive.usage & denoiser.reactiveTextureUsage) != denoiser.reactiveTextureUsage ||
+            (diffuse.usage & denoiser.diffuseAlbedoTextureUsage) != denoiser.diffuseAlbedoTextureUsage ||
+            (specular.usage & denoiser.specularAlbedoTextureUsage) != denoiser.specularAlbedoTextureUsage ||
+            (normal.usage & denoiser.normalTextureUsage) != denoiser.normalTextureUsage ||
+            (roughness.usage & denoiser.roughnessTextureUsage) != denoiser.roughnessTextureUsage ||
+            (slot.color.usage & denoiser.outputTextureUsage) != denoiser.outputTextureUsage) {
+          error = "MetalFX denoised scaler usage contract is unmet";
+          return false;
+        }
+        denoiser.exposureTexture = exposure_texture;
+        denoiser.colorTexture = in.color;
+        denoiser.depthTexture = in.depth;
+        denoiser.motionTexture = in.motion;
+        denoiser.reactiveMaskTexture = in.reactive;
+        denoiser.diffuseAlbedoTexture = diffuse;
+        denoiser.specularAlbedoTexture = specular;
+        denoiser.normalTexture = normal;
+        denoiser.roughnessTexture = roughness;
+        denoiser.outputTexture = slot.color;
+        denoiser.jitterOffsetX = jitter[0];
+        denoiser.jitterOffsetY = jitter[1];
+        denoiser.motionVectorScaleX = 1;
+        denoiser.motionVectorScaleY = 1;
+        denoiser.preExposure = frame.pre_exposure;
+        denoiser.depthReversed = s.config.depth_reversed;
+        denoiser.shouldResetHistory = decision.reset;
+        simd_float4x4 world_to_view, view_to_clip;
+        static_assert(sizeof(world_to_view) == sizeof(in.world_to_view));
+        std::memcpy(&world_to_view, in.world_to_view.data(), sizeof(world_to_view));
+        std::memcpy(&view_to_clip, in.view_to_clip.data(), sizeof(view_to_clip));
+        denoiser.worldToViewMatrix = world_to_view;
+        denoiser.viewToClipMatrix = view_to_clip;
+        NSMutableArray<id<MTLResource>>* used = [NSMutableArray
+            arrayWithObjects:in.color, in.depth, in.motion, slot.color, diffuse, specular, normal, roughness, nil];
+        if (in.reactive) [used addObject:in.reactive];
+        if (exposure_texture) [used addObject:exposure_texture];
+        if (!rex::ui::metal::EncodeMetal4(commands, s.denoiser_fence, used,
+                                          ^(id<MTL4CommandBuffer> cb) { [denoiser encodeToCommandBuffer:cb]; })) {
+          error = "MetalFX denoised scaler encode failed";
+          return false;
+        }
+        ++s.denoised_frames;
+        if (s.denoised_frames <= 2 || s.denoised_frames % 300 == 0)
+          notice_ = "gta4-metal-denoiser frames=" + std::to_string(s.denoised_frames) +
+                    " neutral-guide-frames=" + std::to_string(s.neutral_guide_frames) +
+                    " reset=" + (decision.reset ? "true" : "false");
+      } else {
+      id<MTLFXTemporalScalerBase> scaler = metal4 ? s.scaler4 : s.scaler;
+      if ((in.color.usage & scaler.colorTextureUsage) != scaler.colorTextureUsage ||
+          (in.depth.usage & scaler.depthTextureUsage) != scaler.depthTextureUsage ||
+          (in.motion.usage & scaler.motionTextureUsage) != scaler.motionTextureUsage ||
+          (in.reactive.usage & scaler.reactiveTextureUsage) != scaler.reactiveTextureUsage) {
+        error = "MetalFX temporal input usage contract is unmet";
+        return false;
+      }
+      scaler.exposureTexture = exposure_texture;
       scaler.inputContentWidth = s.config.input_width;
       scaler.inputContentHeight = s.config.input_height;
       scaler.colorTexture = in.color;
@@ -439,7 +602,6 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
       scaler.motionTexture = in.motion;
       scaler.reactiveMaskTexture = in.reactive;
       scaler.outputTexture = slot.color;
-      const auto jitter = MetalFxJitter(frame.jitter);
       scaler.jitterOffsetX = jitter[0];
       scaler.jitterOffsetY = jitter[1];
       scaler.motionVectorScaleX = 1;
@@ -457,6 +619,7 @@ bool AntiAliasing::Encode(id<MTLCommandBuffer> commands, const Inputs& in, const
                                      ^(id<MTL4CommandBuffer> cb) { [scaler4 encodeToCommandBuffer:cb]; });
       } else {
         [s.scaler encodeToCommandBuffer:commands];
+      }
       }
     } else {
       TaaConstants c;
@@ -533,7 +696,10 @@ struct FrameInterpolation::State {
   uint64_t native_encodes = 0, hop_encodes = 0;
   bool native4_unavailable = false;
   id<MTLComputePipelineState> composite = nil, overlay = nil;
-  std::array<Slot, 2> slots{};
+  id<MTLComputePipelineState> repair = nil;  // optional: nil skips the discontinuity repair
+  // Three: a slot is reused three frames later. With two, the frame that last wrote it was
+  // often still scheduled on the GPU (2-3 frames in flight), and every other frame was skipped.
+  std::array<Slot, 3> slots{};
   size_t cursor = 0, previous = 0, owned = 0, limit = 0;
   bool encoded = false, restart_instance = false;
   std::shared_ptr<FailureState> failures = std::make_shared<FailureState>();
@@ -616,6 +782,9 @@ bool FrameInterpolation::Configure(id<MTLDevice> device, id<MTLLibrary> library,
       error = native_error.localizedDescription.UTF8String;
       return false;
     }
+    // Optional (an older metallib may lack it): without it the repair is skipped.
+    if (auto repair_function = [library newFunctionWithName:@"liberty_temporal_framegen_repair"])
+      next->repair = [device newComputePipelineStateWithFunction:repair_function error:nil];
     next->interpolator = next->CreateInterpolator();
     if (!next->interpolator) {
       error = "MetalFX frame interpolator creation failed";
@@ -707,7 +876,12 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     }
     auto& slot = s.slots[s.cursor];
     if (!Available(slot.owner) || !slot.lease.expired()) {
-      error = "interpolated pair is still in flight or leased";
+      // Which one holds the slot: the GPU (owner status 0-3: not enqueued .. scheduled) or the
+      // presenter's lease on the generated and real images.
+      id<MTLCommandBuffer> owner = slot.owner;
+      error = "interpolated pair is still in flight or leased: owner-status=" +
+              (owner ? std::to_string(int(owner.status)) : std::string("none")) +
+              " leased=" + (slot.lease.expired() ? "no" : "yes");
       return false;
     }
     if (s.restart_instance || (decision.reset && s.encoded)) {
@@ -796,6 +970,17 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     fx.aspectRatio = frame.aspect;
     fx.depthReversed = s.config.depth_reversed;
     fx.shouldResetHistory = decision.reset;
+    if (@available(macOS 27.0, *)) {
+      // The interpolator derives camera-only motion from this pair; two identity matrices mean
+      // "not supplied" (the default, and what it gets with camera_matrices off).
+      simd_float4x4 world_to_view = matrix_identity_float4x4, view_to_clip = matrix_identity_float4x4;
+      if (in.camera_matrices) {
+        std::memcpy(&world_to_view, in.world_to_view.data(), sizeof(world_to_view));
+        std::memcpy(&view_to_clip, in.view_to_clip.data(), sizeof(view_to_clip));
+      }
+      fx.worldToViewMatrix = world_to_view;
+      fx.viewToClipMatrix = view_to_clip;
+    }
     if (native4) {
       // Native Metal 4: into the open MTL4 command buffer. The snapshot blit and the UI
       // composition above are earlier proxy encoders; EncodeMetal4's empty encoder waits for
@@ -817,6 +1002,41 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       id<MTLFXFrameInterpolator> fx3 = s.interpolator;
       rex::ui::metal::EncodeMetal3(commands, ^(id<MTLCommandBuffer> m3) { [fx3 encodeToCommandBuffer:m3]; });
       ++s.hop_encodes;
+    }
+    // Both paths join here: the native MTL4FX encode updates fence4, which the next proxy
+    // encoder waits on (as the UI pass below), and the Metal 3 hop encodes into this command
+    // buffer. Same slot, same command buffer: no new lifetime; slot.owner is set below.
+    if (in.repair_motion_px > 0 && s.repair && !decision.reset) {
+      auto encoder = ComputeEncoder(commands, "framegen/repair");
+      if (!encoder) {
+        s.history.Reset();
+        error = "frame-generation repair encoder failed";
+        return false;
+      }
+      encoder.label = @"Liberty frame-generation discontinuity repair";
+      struct {
+        float motion_scale[2], input_texel[2], output_texel[2];
+        float threshold, near_plane, far_plane;
+        uint32_t reversed;
+        float depth_step, padding;
+      } c{{float(s.config.output_width) / s.config.input_width,
+           float(s.config.output_height) / s.config.input_height},
+          {1.0f / s.config.input_width, 1.0f / s.config.input_height},
+          {1.0f / s.config.output_width, 1.0f / s.config.output_height},
+          in.repair_motion_px, frame.near_plane, frame.far_plane,
+          uint32_t(s.config.depth_reversed), 0.10f, 0};
+      [encoder setComputePipelineState:s.repair];
+      [encoder setTexture:slot.generated atIndex:0];
+      [encoder setTexture:slot.scene atIndex:1];
+      [encoder setTexture:in.motion atIndex:2];
+      [encoder setTexture:in.depth atIndex:3];
+      [encoder setBytes:&c length:sizeof(c) atIndex:0];
+      const NSUInteger w = s.repair.threadExecutionWidth,
+                       h = std::max<NSUInteger>(
+                           1, std::min<NSUInteger>(8, s.repair.maxTotalThreadsPerThreadgroup / w));
+      [encoder dispatchThreads:MTLSizeMake(s.config.output_width, s.config.output_height, 1)
+          threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+      [encoder endEncoding];
     }
     if (overlay && !decision.reset) {
       auto encoder = ComputeEncoder(commands, "framegen/ui-after");

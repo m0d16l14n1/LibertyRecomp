@@ -833,7 +833,9 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
   raytracing::DrawGeometry capture_geometry;  // identity 0: this draw is not captured
   if(targets.temporal_motion){
-    std::array<uint8_t,4096> captured_vertex;  // every byte written below: no 4 KB zero fill first
+    // Captured straight into a history snapshot buffer, which Record adopts for a new entry.
+    auto captured_snapshot=temporal.geometry.TakeScratch();
+    const std::span<uint8_t,4096> captured_vertex(captured_snapshot->vertex.data(),4096);
     core::CopyGuestWordsToHost(captured_vertex.data(),guest.data()+0x780,captured_vertex.size());
     std::array<uint64_t,kVertexStreamCount+3> identities{};
     for(size_t i=0;i<vertices.size();++i)identities[i]=vertices[i]?resources.CapturedBufferGeneration(GuestWord(guest,12452+i*sizeof(uint32_t))):0;
@@ -870,7 +872,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       capture_geometry.identity=raytracing::GeometryIdentityOf(key);
       capture_geometry.placement=raytracing::PlacementOf(constant_reads,captured_vertex);
     }
-    auto history=temporal.geometry.Record(key,captured_vertex,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
+    auto history=temporal.geometry.Record(key,captured_snapshot,Bytes(shared),temporal_parameters.jitter_clip,constant_reads);
     // A vertex shader reading a texture recomputes the previous position with this frame's
     // texture: exact while that texture is unchanged (vehicle damage changes rarely).
     const bool vertex_texture_history=!pipeline->vertex.used_texture_mask||temporal_vertex_texture_history;
@@ -882,7 +884,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       std::memcpy(&prior_shared,history.previous->shared.data(),sizeof(prior_shared));
       standard_motion_depth&=temporal::StandardDepthViewport(prior_shared);
       // The variant runs the same vertex function on this bank, so it reads the current shader's range.
-      if(range_constants_enabled){
+      if(range_constants_enabled||previous_bank_range){
         const auto previous=UploadRange(SIZE_MAX,history.previous->vertex,RangeOf(pipeline->vertex.float_constant_mask,256),false,error);
         previous_vertex=previous.slice;previous_vertex_address=previous.address;
         previous_shared=Upload(history.previous->shared,false,error);
@@ -1084,7 +1086,19 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         f.captured_positions=raytracing_capture.positions(f.captured_vertices);
         if(ao_lighting){
           raytracing_ao_settings=raytracing::CurrentAoSettings();
+          // MetalFX's denoised scaler is this frame's upscaler: the raw AO, and its guides.
+          raytracing_ao_settings.raw=temporal.active&&temporal.config.denoised;
           raytracing_ao_texture=raytracing_ao.Encode(commands,f,raytracing_ao_settings,rt_error);
+          raytracing::DenoiseGuides guides;
+          // Also for the guides view (gta4_metal_raytracing_ao_view = guides), denoiser on or off.
+          if((raytracing_ao_settings.raw||raytracing_ao_settings.view==raytracing::AoView::kGuides)&&rt_error.empty()&&
+             raytracing_ao.EncodeGuides(commands,sampled_images[0],sampled_images[1],sampled_images[2],
+                                        raytracing_ao_settings,guides,rt_error)){
+            if(raytracing_ao_settings.raw){
+            temporal.inputs.diffuse_albedo=guides.diffuse_albedo; temporal.inputs.specular_albedo=guides.specular_albedo;
+            temporal.inputs.normal=guides.normal; temporal.inputs.roughness=guides.roughness;
+            }
+          }
         }
         if(shadow_lighting&&rt_error.empty()){
           // gDirectionalLight is pixel c17 of this draw (lightShadowDirectional); lightNoDirectional

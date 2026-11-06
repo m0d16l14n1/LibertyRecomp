@@ -1,6 +1,7 @@
 #import "metal4_queue.h"
 
 #include <rex/cvar.h>
+#include <rex/logging.h>
 
 REXCVAR_DEFINE_STRING(gta4_metal4_render_barrier, "full", "GPU/Metal",
     "Metal 4 queue barrier before each render pass: full (wait for all earlier work before vertex and "
@@ -11,8 +12,26 @@ REXCVAR_DEFINE_STRING(gta4_metal4_residency, "frame", "GPU/Metal",
     "Metal 4 residency: frame (each command buffer rebuilds its own residency set) or persistent "
     "(one queue-level set; resources join once and leave after about 1000 command buffers unused)");
 
+REXCVAR_DEFINE_UINT32(gta4_metal4_table_textures, 0, "GPU/Metal",
+    "Metal 4 argument-table texture slots: 0 = the largest the device accepts (128 on Apple GPUs), else "
+    "this many (at least 16; the renderer binds textures at indices 0-8). Measurement: smaller tables "
+    "may make the per-draw table snapshot cheaper");
+REXCVAR_DEFINE_UINT32(gta4_metal4_table_samplers, 0, "GPU/Metal",
+    "Metal 4 argument-table sampler slots: 0 = 16, else this many (at least 8; the renderer binds 0-3)");
+
+REXCVAR_DEFINE_BOOL(gta4_metal4_lean_tracking, false, "GPU/Metal",
+    "Metal 4 with gta4_metal4_residency = persistent: a command buffer does not retain resources the "
+    "persistent set already holds (it keeps them far longer than any command buffer is in flight), and "
+    "indexed draws take the index buffer's address from the bind cache");
+
+REXCVAR_DEFINE_UINT32(gta4_metal4_residency_idle, 1000, "GPU/Metal",
+    "Metal 4 persistent residency: command buffers an allocation may go unused before it leaves the "
+    "queue set and is released (at least 64; checked every 16 below 1000). Lower frees streamed-out "
+    "textures sooner (less resident memory) at the cost of re-adding ones that come back");
+
 #import <objc/runtime.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -50,8 +69,9 @@ bool Conforms(id object, Protocol* protocol) {
 }
 enum class Kind { kUnknown, kTexture, kBuffer };
 enum class RenderBarrier { kFull, kFragment, kTracked };
-// Persistent residency: an allocation leaves the queue set after this many command buffers unused.
-constexpr uint64_t kPersistentIdleCommandBuffers = 1000;
+// Persistent residency: an allocation leaves the queue set after this many command buffers unused
+// (gta4_metal4_residency_idle). The floor keeps it far past any command buffer still in flight.
+constexpr uint64_t kPersistentIdleCommandBuffers = 1000, kPersistentIdleFloor = 64;
 struct Persisted {
   __strong id<MTLAllocation> allocation;  // keeps the address from being reused while it is in the set
   uint64_t last = 0;
@@ -82,7 +102,7 @@ inline size_t BindCacheIndex(const void* p) {
   NSMutableArray<id<MTLResidencySet>>* _sets;
   NSMutableArray<id<MTLBuffer>>* _chunks;
   NSMutableArray<id<MTL4ArgumentTable>>* _tables;
-  NSUInteger _tableTextures;
+  NSUInteger _tableTextures, _tableSamplers;
   NSString* _label;
   id<MTL4Compiler> _compiler;
   MTLStages _renderBefore;
@@ -91,10 +111,12 @@ inline size_t BindCacheIndex(const void* p) {
   std::atomic<uint64_t> _binds, _bindHits, _fragmentBarriers, _vertexBarriers, _evicted, _residencyCommits;
   // gta4_metal4_residency = persistent
   BOOL _persistentResidency;
+  BOOL _leanTracking;  // gta4_metal4_lean_tracking, only with persistent residency
   std::mutex _persistLock;
   id<MTLResidencySet> _persistent;
   std::unordered_map<const void*, Persisted> _persisted;
   uint64_t _commandBufferIndex;
+  uint64_t _persistIdle;  // gta4_metal4_residency_idle, set with persistent residency
   bool _persistDirty;
 }
 - (id<MTL4CommandAllocator>)takeAllocator;
@@ -131,6 +153,7 @@ inline size_t BindCacheIndex(const void* p) {
   std::vector<uint64_t> _signalValues;
   NSMutableArray<id<MTLDrawable>>* _drawables;
   std::atomic<int> _status;
+  uint64_t _partEncoders;  // encoders in the open part (encodeWaitForEvent splits after them)
   NSError* _error;
   CFTimeInterval _gpuStart, _gpuEnd;
   std::atomic<uint64_t> _earlierGpuNs;  // GPU time of the parts before the last one
@@ -142,6 +165,7 @@ inline size_t BindCacheIndex(const void* p) {
 - (void)track:(id<MTLResource>)resource;
 - (void)track:(id<MTLResource>)resource kind:(Kind)kind;
 - (uint64_t)bufferAddress:(id<MTLBuffer>)buffer;
+- (uint64_t)indexAddress:(id<MTLBuffer>)buffer;
 - (MTLResourceID)textureID:(id<MTLTexture>)texture;
 - (BOOL)isAttachment:(id<MTLTexture>)texture;
 - (void)trackHeap:(id<MTLHeap>)heap;
@@ -149,6 +173,14 @@ inline size_t BindCacheIndex(const void* p) {
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body;
 - (void)native:(id<MTLFence>)fence resources:(NSArray<id<MTLResource>>*)resources body:(void (^)(id<MTL4CommandBuffer>))body;
 @end
+
+// A selector no proxy implements and (for LXRender/LXCompute/LXCopy) the MTL4 encoder does not
+// answer: name it before the runtime aborts with a bare "unrecognized selector".
+static void LogUnrecognized(id object, SEL selector) {
+  REXLOG_ERROR("gta4-metal4: {} does not implement -{}", class_getName(object_getClass(object)), sel_getName(selector));
+}
+#define LX_LOG_UNRECOGNIZED \
+  - (void)doesNotRecognizeSelector:(SEL)selector { LogUnrecognized(self, selector); [super doesNotRecognizeSelector:selector]; }
 
 static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
   [e barrierAfterQueueStages:MTLStageAll beforeStages:before visibilityOptions:MTL4VisibilityOptionDevice];
@@ -166,7 +198,8 @@ static void Barrier(LXQueue* q, id<MTL4CommandEncoder> e, MTLStages before) {
 @end
 
 @implementation LXRender
-- (id)forwardingTargetForSelector:(SEL)selector { return _e; }
+LX_LOG_UNRECOGNIZED
+- (id)forwardingTargetForSelector:(SEL)selector { return [_e respondsToSelector:selector] ? _e : nil; }
 - (id<MTLDevice>)device { return _owner->_q->_device; }
 - (NSString*)label { return _e.label; }
 - (void)setLabel:(NSString*)label { _e.label = label; }
@@ -258,14 +291,12 @@ static void BindSampler(id<MTL4ArgumentTable> t, id<MTLSamplerState> sampler, NS
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)c indexType:(MTLIndexType)it
                   indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o {
-  [_owner track:b];
-  [_e drawIndexedPrimitives:t indexCount:c indexType:it indexBuffer:b.gpuAddress + o indexBufferLength:b.length - o];
+  [_e drawIndexedPrimitives:t indexCount:c indexType:it indexBuffer:[_owner indexAddress:b] + o indexBufferLength:b.length - o];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)t indexCount:(NSUInteger)c indexType:(MTLIndexType)it
                   indexBuffer:(id<MTLBuffer>)b indexBufferOffset:(NSUInteger)o instanceCount:(NSUInteger)n
                    baseVertex:(NSInteger)v baseInstance:(NSUInteger)bi {
-  [_owner track:b];
-  [_e drawIndexedPrimitives:t indexCount:c indexType:it indexBuffer:b.gpuAddress + o indexBufferLength:b.length - o
+  [_e drawIndexedPrimitives:t indexCount:c indexType:it indexBuffer:[_owner indexAddress:b] + o indexBufferLength:b.length - o
               instanceCount:n baseVertex:v baseInstance:bi];
 }
 - (void)endEncoding {
@@ -299,6 +330,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 }
 
 @implementation LXCopy
+LX_LOG_UNRECOGNIZED
 - (id<MTLDevice>)device { return _owner->_q->_device; }
 - (NSString*)label { return _e.label; }
 - (void)setLabel:(NSString*)label { _e.label = label; }
@@ -332,7 +364,8 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 @end
 
 @implementation LXCompute
-- (id)forwardingTargetForSelector:(SEL)selector { return _e; }
+LX_LOG_UNRECOGNIZED
+- (id)forwardingTargetForSelector:(SEL)selector { return [_e respondsToSelector:selector] ? _e : nil; }
 - (id<MTLDevice>)device { return _owner->_q->_device; }
 - (NSString*)label { return _e.label; }
 - (void)setLabel:(NSString*)label { _e.label = label; }
@@ -352,6 +385,14 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (void)setSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i { BindSampler(_t, s, i); }
 - (void)setSamplerStates:(id<MTLSamplerState> const[])s withRange:(NSRange)r {
   for (NSUInteger i = 0; i < r.length; ++i) BindSampler(_t, s[i], r.location + i);
+}
+// Ray tracing (gta4_metal_raytracing): MTL4ComputeCommandEncoder has no setAccelerationStructure,
+// so forwarding it threw (unrecognized selector). Metal 4 binds the structure in the argument
+// table by its resource ID; it must also be resident (the instanced structures it names come in
+// through useHeap).
+- (void)setAccelerationStructure:(id<MTLAccelerationStructure>)a atBufferIndex:(NSUInteger)i {
+  if (a) [_owner track:a];
+  [_t setResource:a ? a.gpuResourceID : MTLResourceID{} atBufferIndex:i];
 }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u { [_owner track:r]; }
 - (void)useResources:(const id<MTLResource> __unsafe_unretained[])r count:(NSUInteger)n usage:(MTLResourceUsage)u {
@@ -390,6 +431,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 
 // ---------------------------------------------------------------------------------------------
 @implementation LXCommandBuffer
+LX_LOG_UNRECOGNIZED
 - (instancetype)initWithQueue:(LXQueue*)q {
   if (!(self = [super init])) return nil;
   _q = q;
@@ -418,6 +460,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   _cb = [_q takeBuffer];
   [_cb beginCommandBufferWithAllocator:_allocator];
   if (_label) _cb.label = _label;
+  _partEncoders = 0;
   ++_q->_parts;
 }
 - (id<MTLDevice>)device { return _q->_device; }
@@ -437,20 +480,28 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (void)track:(id<MTLResource>)resource kind:(Kind)kind {
   if (!resource) return;
   if (!_seen.insert((__bridge const void*)resource).second) return;
-  [_retained addObject:resource];
+  // Lean tracking: the persistent set holds `allocation` strongly until it has been unused for
+  // kPersistentIdleCommandBuffers command buffers, far past this one's completion, so only a resource that is
+  // not its own allocation (heap-placed, a view, a buffer-backed texture) needs retaining here.
+  const BOOL lean = _q->_leanTracking;
   id<MTLAllocation> allocation = resource;
   if (id<MTLHeap> heap = resource.heap) {
+    [_retained addObject:resource];
     if (!_seen.insert((__bridge const void*)heap).second) return;
-    [_retained addObject:heap];
     allocation = heap;
   } else if (kind == Kind::kTexture ||
              (kind == Kind::kUnknown && Conforms(resource, @protocol(MTLTexture)))) {
     id<MTLTexture> texture = (id<MTLTexture>)resource;
     // Drawables are resident through their layer's residency set (AddLayerResidency).
-    if (texture.isFramebufferOnly) return;
-    if (id<MTLTexture> parent = texture.parentTexture) { [self track:parent kind:Kind::kTexture]; return; }
-    if (id<MTLBuffer> buffer = texture.buffer) { [self track:buffer kind:Kind::kBuffer]; return; }
+    if (texture.isFramebufferOnly) { [_retained addObject:resource]; return; }
+    if (id<MTLTexture> parent = texture.parentTexture) {
+      [_retained addObject:resource]; [self track:parent kind:Kind::kTexture]; return;
+    }
+    if (id<MTLBuffer> buffer = texture.buffer) {
+      [_retained addObject:resource]; [self track:buffer kind:Kind::kBuffer]; return;
+    }
   }
+  if (!lean) [_retained addObject:allocation];
   if (_q->_persistentResidency) { [_q persist:allocation]; return; }
   [_set addAllocation:allocation];
   ++_q->_resident;
@@ -469,6 +520,16 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   ++_q->_binds;
   BindCacheEntry& e = _bindCache[BindCacheIndex((__bridge const void*)buffer)];
   if (e.key == (__bridge const void*)buffer) { ++_q->_bindHits; return e.value; }
+  [self track:buffer kind:Kind::kBuffer];
+  e.key = (__bridge const void*)buffer;
+  e.value = buffer.gpuAddress;
+  return e.value;
+}
+// Indexed draws: the bind cache without the bind counters (lean tracking), else as before.
+- (uint64_t)indexAddress:(id<MTLBuffer>)buffer {
+  if (!_q->_leanTracking) { [self track:buffer kind:Kind::kBuffer]; return buffer.gpuAddress; }
+  BindCacheEntry& e = _bindCache[BindCacheIndex((__bridge const void*)buffer)];
+  if (e.key == (__bridge const void*)buffer) return e.value;
   [self track:buffer kind:Kind::kBuffer];
   e.key = (__bridge const void*)buffer;
   e.value = buffer.gpuAddress;
@@ -557,7 +618,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   p->_vt = [_q takeTable]; p->_ft = [_q takeTable];
   [e setArgumentTable:p->_vt atStages:MTLRenderStageVertex];
   [e setArgumentTable:p->_ft atStages:MTLRenderStageFragment];
-  ++_q->_encoders;
+  ++_q->_encoders; ++_partEncoders;
   return p;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoder {
@@ -567,7 +628,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   Barrier(_q, e, kComputeStages);
   LXCopy* p = [LXCopy new];
   p->_owner = self; p->_e = e; p->_first = YES;
-  ++_q->_encoders;
+  ++_q->_encoders; ++_partEncoders;
   return p;
 }
 - (id<MTLBlitCommandEncoder>)blitCommandEncoderWithDescriptor:(MTLBlitPassDescriptor*)d { return [self blitCommandEncoder]; }
@@ -580,7 +641,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   p->_owner = self; p->_e = e; p->_serial = serial;
   p->_t = [_q takeTable];
   [e setArgumentTable:p->_t];
-  ++_q->_encoders;
+  ++_q->_encoders; ++_partEncoders;
   return p;
 }
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder { return [self computeEncoder:YES]; }
@@ -595,6 +656,16 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 - (void)addCompletedHandler:(MTLCommandBufferHandler)block { [_completed addObject:[block copy]]; }
 - (void)addScheduledHandler:(MTLCommandBufferHandler)block { [_scheduled addObject:[block copy]]; }
 - (void)encodeWaitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
+  // Metal 3 makes only the work encoded after the wait wait. A MTL4 queue wait applies to whole
+  // committed command buffers, and finishPart issues it before committing the open part, so the
+  // work already encoded here would wait too. For the frame-generation mailbox (present.mm
+  // BeginWrite) that is the interpolator, composes and the scene tail, held until the display
+  // queue has painted the previous image. Commit that work first; the wait then gates only what
+  // follows.
+  if (_partEncoders) {
+    [self finishPart:NO];
+    [self beginPart];
+  }
   [_waitEvents addObject:event]; _waitValues.push_back(value);
 }
 - (void)encodeSignalEvent:(id<MTLEvent>)event value:(uint64_t)value {
@@ -697,7 +768,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   Barrier(_q, e, kComputeStages);
   if (fence) [e updateFence:fence afterEncoderStages:kComputeStages];
   [e endEncoding];
-  ++_q->_encoders;
+  ++_q->_encoders; ++_partEncoders;
   body(_cb);
 }
 - (void)hop:(void (^)(id<MTLCommandBuffer>))body {
@@ -720,6 +791,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 
 // ---------------------------------------------------------------------------------------------
 @implementation LXQueue
+LX_LOG_UNRECOGNIZED
 - (id<MTLDevice>)device { return _device; }
 - (NSString*)label { return _label; }
 - (void)setLabel:(NSString*)label { _label = [label copy]; }
@@ -772,7 +844,7 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
   MTL4ArgumentTableDescriptor* d = [MTL4ArgumentTableDescriptor new];
   d.maxBufferBindCount = 31;
   d.maxTextureBindCount = _tableTextures;
-  d.maxSamplerStateBindCount = 16;
+  d.maxSamplerStateBindCount = _tableSamplers;
   d.initializeBindings = YES;
   return [_device newArgumentTableWithDescriptor:d error:nil];
 }
@@ -793,10 +865,11 @@ static void TrackInvocationResources(LXCommandBuffer* owner, NSInvocation* invoc
 }
 - (void)commitPersistent:(BOOL)evict {
   std::lock_guard<std::mutex> lock(_persistLock);
-  // Every 64 command buffers: drop what has not been bound for a long time. It is far past
-  // any command buffer in flight, and a later bind adds it again.
-  if (evict && _commandBufferIndex % 64 == 0 && _commandBufferIndex > kPersistentIdleCommandBuffers) {
-    const uint64_t oldest = _commandBufferIndex - kPersistentIdleCommandBuffers;
+  // Every 64 command buffers (16 for a short idle window): drop what has not been bound for a
+  // long time. It is far past any command buffer in flight, and a later bind adds it again.
+  const uint64_t every = _persistIdle < kPersistentIdleCommandBuffers ? 16 : 64;
+  if (evict && _commandBufferIndex % every == 0 && _commandBufferIndex > _persistIdle) {
+    const uint64_t oldest = _commandBufferIndex - _persistIdle;
     for (auto it = _persisted.begin(); it != _persisted.end();) {
       if (it->second.last < oldest) {
         [_persistent removeAllocation:it->second.allocation];
@@ -847,6 +920,10 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       if ([device newArgumentTableWithDescriptor:d error:nil]) { q->_tableTextures = count; break; }
     }
     if (!q->_tableTextures) { error = "Metal 4 argument table creation failed."; return nil; }
+    if (const uint32_t textures = REXCVAR_GET(gta4_metal4_table_textures))
+      q->_tableTextures = std::min<NSUInteger>(q->_tableTextures, std::max<uint32_t>(textures, 16));
+    const uint32_t samplers = REXCVAR_GET(gta4_metal4_table_samplers);
+    q->_tableSamplers = samplers ? std::min<uint32_t>(std::max<uint32_t>(samplers, 8), 16) : 16;
     if (REXCVAR_GET(gta4_metal4_residency) == "persistent") {
       MTLResidencySetDescriptor* d = [MTLResidencySetDescriptor new];
       d.initialCapacity = 8192;
@@ -855,6 +932,8 @@ id<MTLCommandQueue> NewMetal4Queue(id<MTLDevice> device, std::string& error) {
       if (!q->_persistent) { error = "Metal 4 persistent residency set creation failed."; return nil; }
       [q->_queue4 addResidencySet:q->_persistent];
       q->_persistentResidency = YES;
+      q->_persistIdle = std::max<uint64_t>(REXCVAR_GET(gta4_metal4_residency_idle), kPersistentIdleFloor);
+      q->_leanTracking = REXCVAR_GET(gta4_metal4_lean_tracking);
     }
     return q;
   }
