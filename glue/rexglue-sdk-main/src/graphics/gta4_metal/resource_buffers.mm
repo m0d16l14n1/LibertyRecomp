@@ -37,7 +37,21 @@ memory::BaseHeap* ReadableHeap(memory::Memory* memory, uint32_t address, size_t 
 }
 }
 
+namespace {
+thread_local std::span<const GuestSnapshotRange> g_guest_snapshots;
+}
+ScopedGuestSnapshots::ScopedGuestSnapshots(std::span<const GuestSnapshotRange> ranges)
+    : previous_(g_guest_snapshots) { g_guest_snapshots = ranges; }
+ScopedGuestSnapshots::~ScopedGuestSnapshots() { g_guest_snapshots = previous_; }
+
 std::span<const uint8_t> GuestMemory::Read(uint32_t address, size_t size, bool physical) const {
+  if (!physical) {
+    for (const auto& range : g_guest_snapshots) {
+      if (range.data && address >= range.address && size <= range.size &&
+          address - range.address <= range.size - size)
+        return {range.data + (address - range.address), size};
+    }
+  }
   if (!ReadableHeap(memory_,address,size,physical,false)) return {};
   return {physical ? memory_->TranslatePhysical<const uint8_t*>(address)
                    : memory_->TranslateVirtual<const uint8_t*>(address),size};

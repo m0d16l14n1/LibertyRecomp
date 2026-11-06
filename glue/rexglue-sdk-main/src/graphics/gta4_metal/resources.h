@@ -21,6 +21,24 @@ namespace rex::memory { class Memory; }
 namespace rex::ui::metal { struct MetalContext; }
 namespace rex::graphics::gta4_metal {
 
+// Asynchronous title submission (gta4_metal_async_submit): the submitting thread copies the guest
+// ranges a command reads later (the D3D device block, a DrawPrimitiveUP payload) and the renderer
+// worker installs those copies for the duration of that command. Thread-local: texture-preparation
+// workers reading other guest memory at the same time are unaffected.
+struct GuestSnapshotRange {
+  uint32_t address = 0;
+  const uint8_t* data = nullptr;
+  size_t size = 0;
+};
+class ScopedGuestSnapshots {
+ public:
+  explicit ScopedGuestSnapshots(std::span<const GuestSnapshotRange> ranges);
+  ~ScopedGuestSnapshots();
+  ScopedGuestSnapshots(const ScopedGuestSnapshots&) = delete;
+  ScopedGuestSnapshots& operator=(const ScopedGuestSnapshots&) = delete;
+ private:
+  std::span<const GuestSnapshotRange> previous_;
+};
 class GuestMemory {
  public:
   explicit GuestMemory(memory::Memory* memory) : memory_(memory) {}
