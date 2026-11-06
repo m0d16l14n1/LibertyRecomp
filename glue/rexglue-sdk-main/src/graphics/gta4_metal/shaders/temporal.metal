@@ -359,8 +359,11 @@ kernel void liberty_temporal_framegen_repair_weight(texture2d<float,access::writ
  // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
  // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
  float weight=max(wheel,smoothstep(0.5f,0.7f,reactive.read(id).r));
+ // The ring growth only matters next to a tyre (the wheel test above handles the tyre itself):
+ // tiles with none in reach skip its 16 taps (most of the screen; the pass was ~0.9 ms at 1440p).
+ const bool tyre_near=wheel_tiles.read(min(id/16u,uint2(wheel_tiles.get_width(),wheel_tiles.get_height())-1u)).z>0.5f;
  const float rings[2]={3,7};
- for(uint ring=0;ring<2&&weight<1;++ring)for(uint k=0;k<8;++k){
+ for(uint ring=0;ring<2&&weight<1&&tyre_near;++ring)for(uint k=0;k<8;++k){
   const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
   weight=max(weight,smoothstep(0.5f,0.7f,reactive.read(liberty_repair_tap(id,float2(cos(angle),sin(angle))*rings[ring],last)).r));
  }
@@ -497,10 +500,12 @@ kernel void liberty_temporal_framegen_sharpen(texture2d<float,access::read> sour
   constexpr sampler linear(coord::pixel,address::clamp_to_edge,filter::linear);
   const float2 q=float2(id)+0.5f,from_previous=q+0.5f*m,from_current=q-0.5f*m;
   float3 range_low=float3(INFINITY),range_high=float3(-INFINITY);
-  for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
-   const float2 o=float2(x,y);
-   const float3 p=temporal_finite(previous_scene.sample(linear,from_previous+o)).rgb;
-   const float3 r=temporal_finite(current_scene.sample(linear,from_current+o)).rgb;
+  // A plus of five bilinear taps per image (was a 3x3 box: 18 samples a pixel, ~1.5 ms at 1440p).
+  // Without the corners the range is a little tighter, which only clamps foreign colours harder.
+  const float2 offsets[5]={float2(0),float2(-1,0),float2(1,0),float2(0,-1),float2(0,1)};
+  for(uint t=0;t<5;++t){
+   const float3 p=temporal_finite(previous_scene.sample(linear,from_previous+offsets[t])).rgb;
+   const float3 r=temporal_finite(current_scene.sample(linear,from_current+offsets[t])).rgb;
    range_low=min(range_low,min(p,r));range_high=max(range_high,max(p,r));
   }
   result=clamp(result,range_low,range_high);
