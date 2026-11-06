@@ -102,7 +102,8 @@ run_game() {  # <out folder> <flags...>
 
 summarize() {  # <out folder>
   local out="$1"
-  python3 "$here/bench_windows.py" "$out" > "$out/summary.txt" 2>&1 || true
+  local analysis_status=0
+  python3 "$here/bench_windows.py" "$out" > "$out/summary.txt" 2>&1 || analysis_status=$?
   grep -o 'gta4-metal-display shown-fps.*' "$out/game.log" | sed 's/^gta4-metal-display /display: /' \
     >> "$out/summary.txt" || true
   grep -o 'input replay: done.*' "$out/game.log" | sed 's/^input replay: /drift: /' >> "$out/summary.txt" || true
@@ -112,6 +113,7 @@ summarize() {  # <out folder>
     END {if (samples) printf "memory: RSS %.1f MB start, %.1f MB peak, %.1f MB end, %+.1f MB growth (%d samples)\n", first,peak,end,end-first,samples}' \
     "$out/samples.csv" >> "$out/summary.txt" 2>/dev/null || true
   cat "$out/summary.txt"
+  return "$analysis_status"
 }
 
 case "$mode" in

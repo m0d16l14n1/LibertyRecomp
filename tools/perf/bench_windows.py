@@ -20,8 +20,15 @@ def main():
         if len(row) == 2:
             marks[row[0]] = (int(row[1]) - origin) / 1e6
     frames = list(csv.DictReader(open(folder / "frames.csv")))
+    action_windows = ("drive", "night", "heli", "boat", "combat", "boom")
+    action_bench = "all" in marks and any(name in marks for name in action_windows)
+    action_failures = []
     print(f"{'window':<10} {'s':>5} {'fps':>6} {'p50ms':>6} {'p95ms':>6} {'p99ms':>6} {'>25ms':>6} "
           f"{'gpu':>5} {'gpu95':>6} {'submit':>6} {'draws':>5} {'pipes':>5} {'pwait':>6}")
+    if action_bench:
+        for name in action_windows:
+            if name not in marks or name + "_end" not in marks:
+                action_failures.append(f"{name}: missing marks")
     for name, start in marks.items():
         end = marks.get(name + "_end")
         if end is None:
@@ -29,6 +36,8 @@ def main():
         rows = [f for f in frames if start <= float(f["at_ms"]) < end]
         if len(rows) < 2:
             print(f"{name:<10} no frames")
+            if action_bench and name in action_windows:
+                action_failures.append(f"{name}: no frames")
             continue
         iv = [float(f["interval_ms"]) for f in rows]
         gpu = [float(f["gpu_ms"]) for f in rows]
@@ -47,10 +56,15 @@ def main():
     if route_path.exists():
         route = list(csv.DictReader(open(route_path)))
         if route and "steady_ns" in route[0]:
-            expected = {"drive", "night", "heli", "boat"}
+            expected = {
+                "drive": (25.0, 0.0),
+                "night": (25.0, 0.0),
+                "heli": (25.0, 5.0),
+                "boat": (25.0, 0.0),
+            }
             checked = []
             failed = []
-            for name in expected:
+            for name, (minimum_path, minimum_z_span) in expected.items():
                 if name not in marks or name + "_end" not in marks:
                     continue
                 start_ns = origin + int(marks[name] * 1e6)
@@ -64,7 +78,12 @@ def main():
                 path_m = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
                 net_m = math.dist(points[0], points[-1])
                 z_span = max(p[2] for p in points) - min(p[2] for p in points)
-                status = "ok" if path_m >= 10.0 else "STALLED"
+                if path_m < minimum_path:
+                    status = "STALLED"
+                elif z_span < minimum_z_span:
+                    status = "NO FLIGHT"
+                else:
+                    status = "ok"
                 checked.append((name, path_m, net_m, z_span, status))
                 if status != "ok":
                     failed.append(name)
@@ -76,6 +95,11 @@ def main():
                     print("movement-check: FAILED " + ", ".join(sorted(failed)))
                     raise SystemExit(1)
                 print("movement-check: passed")
+    if action_failures:
+        print("action-window-check: FAILED " + ", ".join(action_failures))
+        raise SystemExit(1)
+    if action_bench:
+        print("action-window-check: passed")
 
 
 if __name__ == "__main__":
