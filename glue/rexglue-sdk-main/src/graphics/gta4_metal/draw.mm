@@ -627,7 +627,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       if(!vertices[i]) return false;
     }
   }
-  std::array<std::array<uint64_t,kTextureStageCount>,5> heaps{};
+  std::array<std::array<uint64_t,kTextureStageCount>,5> heaps;  // every entry filled below
   for(size_t heap=0;heap<4;++heap) heaps[heap].fill(fallback_textures[heap].gpuResourceID._impl);
   heaps[4].fill(fallback_sampler.gpuResourceID._impl);
   // Borrowed: every entry is owned for the whole draw by fallback_textures, sampled_images or

@@ -381,6 +381,25 @@ bool Renderer::State::CompletePipeline(Pipeline& pipeline, std::string& error, b
 }
 
 id<MTLDepthStencilState> Renderer::State::DepthState(const FixedState& fixed,bool attachment,std::string& error) {
+  // Most draws repeat the previous draw's depth/stencil state. Its 16 words are compared directly;
+  // the cache key is 512 bytes (zero-filled, hashed and compared on every draw before).
+  std::array<uint64_t,16> words{};
+  words[0]=attachment&&fixed.depth_enable;
+  words[1]=words[0]?fixed.depth_function:7;
+  words[2]=words[0]&&fixed.depth_write_enable;
+  words[3]=attachment&&fixed.stencil_enable;
+  if(words[3]) {
+    words[4]=fixed.stencil_function; words[5]=fixed.stencil_fail;
+    words[6]=fixed.stencil_depth_fail; words[7]=fixed.stencil_pass;
+    words[8]=fixed.stencil_mask; words[9]=fixed.stencil_write_mask;
+    words[10]=fixed.two_sided_stencil?fixed.ccw_stencil_function:fixed.stencil_function;
+    words[11]=fixed.two_sided_stencil?fixed.ccw_stencil_fail:fixed.stencil_fail;
+    words[12]=fixed.two_sided_stencil?fixed.ccw_stencil_depth_fail:fixed.stencil_depth_fail;
+    words[13]=fixed.two_sided_stencil?fixed.ccw_stencil_pass:fixed.stencil_pass;
+    words[14]=fixed.two_sided_stencil?fixed.back_stencil_mask:fixed.stencil_mask;
+    words[15]=fixed.two_sided_stencil?fixed.back_stencil_write_mask:fixed.stencil_write_mask;
+  }
+  if(depth_memo_state&&words==depth_memo_words) return depth_memo_state;
   Key key{};
   key.words[0]=attachment&&fixed.depth_enable;
   key.words[1]=key.words[0]?fixed.depth_function:7;
@@ -397,7 +416,9 @@ id<MTLDepthStencilState> Renderer::State::DepthState(const FixedState& fixed,boo
     key.words[14]=fixed.two_sided_stencil?fixed.back_stencil_mask:fixed.stencil_mask;
     key.words[15]=fixed.two_sided_stencil?fixed.back_stencil_write_mask:fixed.stencil_write_mask;
   }
-  if(auto found=depth_states.find(key);found!=depth_states.end()) return found->second;
+  if(auto found=depth_states.find(key);found!=depth_states.end()) {
+    depth_memo_words=words; depth_memo_state=found->second; return found->second;
+  }
   auto descriptor=[MTLDepthStencilDescriptor new];
   descriptor.depthCompareFunction=MTLCompareFunction(key.words[1]);
   descriptor.depthWriteEnabled=key.words[2];
@@ -416,6 +437,7 @@ id<MTLDepthStencilState> Renderer::State::DepthState(const FixedState& fixed,boo
   auto state=[context->device newDepthStencilStateWithDescriptor:descriptor];
   if(!state) {error="Metal depth/stencil state creation failed"; return nil;}
   if(depth_states.size()>=1024) depth_states.erase(depth_states.begin());
-  depth_states.emplace(key,state); return state;
+  depth_states.emplace(key,state);
+  depth_memo_words=words; depth_memo_state=state; return state;
 }
 }  // namespace rex::graphics::gta4_metal

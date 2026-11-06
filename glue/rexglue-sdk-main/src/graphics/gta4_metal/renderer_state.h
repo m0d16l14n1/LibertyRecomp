@@ -196,6 +196,8 @@ struct Renderer::State {
   bool cache_pipeline_lookup = true;
   uint64_t pipeline_lookups = 0, pipeline_lookup_hits = 0;
   std::unordered_map<Key,id<MTLDepthStencilState>,KeyHash> depth_states;
+  std::array<uint64_t,16> depth_memo_words{};   // DepthState: the previous draw's state words
+  id<MTLDepthStencilState> depth_memo_state=nil;
   std::unordered_map<std::string,id<MTLRenderPipelineState>> utility_pipelines;
   ConstantUploadCache<ui::metal::UploadSlice> constants;
   std::unordered_map<uint32_t,ShaderMetadata> shaders;

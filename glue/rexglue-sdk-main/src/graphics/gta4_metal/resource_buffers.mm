@@ -1,5 +1,6 @@
 #include "vertex_conversion_plan.h"
 #include <xxhash.h>
+#include <atomic>
 #include "resource_state.h"
 #include "guest_state.h"
 #include "guest_access_cache.h"
@@ -39,13 +40,19 @@ memory::BaseHeap* ReadableHeap(memory::Memory* memory, uint32_t address, size_t 
 
 namespace {
 thread_local std::span<const GuestSnapshotRange> g_guest_snapshots;
+// Set once any thread installs snapshots (asynchronous submission): until then Read skips the
+// thread-local lookup, which costs a TLV call on every guest read from a dylib.
+std::atomic<bool> g_guest_snapshots_used{false};
 }
 ScopedGuestSnapshots::ScopedGuestSnapshots(std::span<const GuestSnapshotRange> ranges)
-    : previous_(g_guest_snapshots) { g_guest_snapshots = ranges; }
+    : previous_(g_guest_snapshots) {
+  g_guest_snapshots_used.store(true, std::memory_order_relaxed);
+  g_guest_snapshots = ranges;
+}
 ScopedGuestSnapshots::~ScopedGuestSnapshots() { g_guest_snapshots = previous_; }
 
 std::span<const uint8_t> GuestMemory::Read(uint32_t address, size_t size, bool physical) const {
-  if (!physical) {
+  if (!physical && g_guest_snapshots_used.load(std::memory_order_relaxed)) {
     for (const auto& range : g_guest_snapshots) {
       if (range.data && address >= range.address && size <= range.size &&
           address - range.address <= range.size - size)

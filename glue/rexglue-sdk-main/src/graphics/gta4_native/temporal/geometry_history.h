@@ -589,7 +589,10 @@ class GeometryHistory {
     out.frames = snapshot.late_frames;
     out.changes = snapshot.late_changes;
   }
-  Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all) const {
+  // `any_limit`/`sum_limit`: stop as soon as max_any or sum exceeds them (the caller rejects the
+  // candidate either way; max_index is then the first register past the limit, not the largest).
+  Difference Distance(std::span<const uint8_t> a, std::span<const uint8_t> b, bool all,
+                      float any_limit = INFINITY, double sum_limit = INFINITY) const {
     Difference d;
     const size_t registers = std::min<size_t>(std::min(a.size(), b.size()) / 16, 256);
     // Only the compared registers, in ascending order (as a scan of all 256 would visit them,
@@ -613,6 +616,7 @@ class GeometryHistory {
         }
         d.sum += double(change) * change;
       }
+      if (d.max_any > any_limit || d.sum > sum_limit) return d;
      }
     }
     return d;
@@ -639,7 +643,11 @@ class GeometryHistory {
         ++statistics_.far_world;
         continue;
       }
-      const auto d = Distance(candidate.snapshot->vertex, vertex, true);
+      // A candidate past the step limit is refused, and one whose sum is beyond 2.25x the best so
+      // far can neither win nor make the result ambiguous (the ambiguity bound only tightens as the
+      // best improves), so its comparison stops there. The outcome is unchanged.
+      const auto d = Distance(candidate.snapshot->vertex, vertex, true, kMaximumConstantStep,
+                              best ? 2.25 * best_sum + 1e-6 : INFINITY);
       if (d.max_any > kMaximumConstantStep) {
         ++statistics_.far_register[(d.max_index / 4) % statistics_.far_register.size()];
         continue;
