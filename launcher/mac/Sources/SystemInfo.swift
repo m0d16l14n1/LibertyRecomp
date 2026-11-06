@@ -145,8 +145,31 @@ struct Suggestion {
     let airCap: Bool          // gta4_native_air_resolution_cap
     let fps: Int              // gta4_frame_limit
     let why: String
+    /// Set with the above by "Use These" (nil = the game's default). Measured on the 15-inch M5 Air,
+    /// 2026-11-06, action bench at 1440p MetalFX: 60-62 fps in every window with the world at 1x, 1080p
+    /// reflections and Ultra shadows. Frame generation is off on a 60 Hz screen: the game would render 30
+    /// and show 60, no faster than rendering 60 and with interpolation artifacts.
+    var extras: [(String, TomlValue?)] = []
+
+    /// What goes with every suggestion: the world at the console's scale, sharper reflections and shadows,
+    /// frame generation only where the screen is faster than the game's 60.
+    static func extras(screen: ScreenInfo?) -> [(String, TomlValue?)] {
+        var e: [(String, TomlValue?)] = [
+            ("gta4_draw_distance_scale", nil), ("gta4_shadow_distance_scale", nil),
+            ("gta4_ped_density_scale", nil), ("gta4_traffic_density_scale", nil), ("gta4_parked_car_density_scale", nil),
+            ("gta4_reflection_resolution", .string("1080p")), ("gta4_shadow_map_base_size", .int(1024)),
+        ]
+        if let screen, screen.refresh > 0, screen.refresh <= 60 { e.append(("gta4_metalfx_frame_generation", nil)) }
+        return e
+    }
 
     static func make(mac: MacInfo, screen: ScreenInfo?) -> Suggestion {
+        var s = base(mac: mac, screen: screen)
+        s.extras = extras(screen: screen)
+        return s
+    }
+
+    private static func base(mac: MacInfo, screen: ScreenInfo?) -> Suggestion {
         if mac.tier == .base && mac.generation > 0 && mac.generation < 3 {
             return Suggestion(upscaler: "metalfx", quality: "performance", airCap: true, fps: 60,
                               why: "An \(mac.chip) has a small GPU: MetalFX Performance draws a quarter of the pixels "

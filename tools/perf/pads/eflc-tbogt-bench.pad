@@ -1,0 +1,55 @@
+# Episodes from Liberty City from a fresh profile (no episode save): the episode picker,
+# then a day and a night-rain drive inside the episode's opening mission. The action bench's
+# teleports fail the opening mission (the episode's flow restarts it at once, even after
+# TERMINATE_ALL_SCRIPTS_WITH_THIS_NAME), so this stays where the mission allows. The picker needs a
+# held button (400 ms): the default 150 ms press is missed while it loads.
+# Run: tools/perf/route_bench.sh pad career-street tools/perf/pads/eflc-tbogt-bench.pad <label> --gta4_edition=eflc
+awaitframe
+# The Rockstar logo runs ~15 s after the first frame; the picker is up well before 30 s.
+wait 30s
+hold right 400ms
+wait 2s
+hold a 400ms
+wait 8s
+# Again in case the first was early; the new-game loading screen ignores it.
+hold a 400ms
+await 6m
+wait 10s
+# Skip the opening cutscene (A); harmless once it is over.
+hold a 400ms
+wait 4s
+hold a 400ms
+wait 4s
+hold a 400ms
+wait 4s
+hold a 400ms
+wait 4s
+hold a 400ms
+wait 4s
+hold a 400ms
+wait 4s
+# I Luv L.C.: Luis gets into Tony's car (Y) and the game's AI drives it around Algonquin with Tony
+# aboard (leaving Tony fails the mission; driving anywhere does not).
+nowanted
+invincible
+clock 13 0
+weather 1
+hold y 600ms
+wait 7s
+where
+drive 15
+mark all
+mark drive
+wait 35s
+mark drive_end
+shot {out}/shots/1-drive.png 0.5
+clock 21 30
+weather 4
+mark night
+wait 30s
+mark night_end
+shot {out}/shots/2-night.png 0.5
+mark all_end
+where
+wait 1s
+quit

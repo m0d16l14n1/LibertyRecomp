@@ -13,6 +13,8 @@
 //   teleport <x> <y> <z> [heading]  the player on foot to x y z
 //   car <model>                     a car at the player (model name: sultan, comet, ...), player inside
 //   drive <speed m/s> [style]       the game's AI drives the player's car around the city (wander)
+//   goto <x> <y> <z> [speed m/s]    the game's AI drives the player's car to x y z
+//   blips                           every map blip and its coordinates (a mission's destination)
 //   clock <hour> <minute>   weather <0..7>   invincible   nowanted
 //   heli <model> [lift m]           a helicopter lift metres above the player (blades at full
 //                                   speed), player inside; fly it with the pad (rt climbs, ly pitches)
@@ -37,6 +39,8 @@
 // safehouse ~ 892 -500, Downtown Broker ~ 1040 150). Early in the story Algonquin is closed and
 // entering it gives six stars; `nowanted` keeps the police off anyway.
 
+#include <array>
+#include <fmt/format.h>
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -127,6 +131,7 @@ struct Result {
   bool called = false;
   uint32_t value = 0;
   std::vector<uint32_t> outs;
+  std::vector<std::array<uint32_t, 3>> vectors;  // the first three words of each out slot (a Vector3 out)
 };
 
 class Invoker {
@@ -198,7 +203,11 @@ class Invoker {
     function(call, base_);
     result.called = true;
     result.value = Read(base_, ret);
-    for (uint32_t o = 0; o < out_count; ++o) result.outs.push_back(Read(base_, outs + 16 * o));
+    for (uint32_t o = 0; o < out_count; ++o) {
+      result.outs.push_back(Read(base_, outs + 16 * o));
+      result.vectors.push_back({Read(base_, outs + 16 * o), Read(base_, outs + 16 * o + 4),
+                                Read(base_, outs + 16 * o + 8)});
+    }
     return result;
   }
 
@@ -591,6 +600,40 @@ std::string WorldCommand(const std::vector<std::string>& args) {
       const Result car = n.Call("GET_CAR_CHAR_IS_USING", {{p.ped}, {0, true}});
       if (car.outs.empty() || !car.outs[0]) return "err the player is not in a car";
       n.Call("TASK_CAR_DRIVE_WANDER", {{p.ped}, {car.outs[0]}, {F(speed)}, {style}});
+      return "ok";
+    });
+  }
+
+  if (cmd == "blips") {
+    // Every map blip (types 1-8) with its coordinates, e.g. to read a mission's destination.
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      std::string reply = "ok";
+      for (uint32_t type = 1; type <= 8; ++type) {
+        uint32_t blip = n.Call("GET_FIRST_BLIP_INFO_ID", {{type}}).value;
+        for (int guard = 0; blip && guard < 64; ++guard) {
+          const Result c = n.Call("GET_BLIP_COORDS", {{blip}, {0, true}});
+          if (!c.vectors.empty())
+            reply += fmt::format(" | type={} {:.1f} {:.1f} {:.1f}", type, AsFloat(c.vectors[0][0]),
+                                 AsFloat(c.vectors[0][1]), AsFloat(c.vectors[0][2]));
+          blip = n.Call("GET_NEXT_BLIP_INFO_ID", {{type}}).value;
+        }
+      }
+      return reply;
+    });
+  }
+
+  if (cmd == "goto") {
+    // goto <x> <y> <z> [speed m/s]: the game's AI drives the player's car there (as a mission's
+    // TASK_CAR_DRIVE_TO_COORD: obey roads, stop within 5 m).
+    if (f.size() < 3) return "err goto needs x y z";
+    const float x = f[0], y = f[1], z = f[2], speed = f.size() > 3 ? f[3] : 15.0f;
+    return RunOnScriptThread([=](Invoker& n) -> std::optional<std::string> {
+      const Player p = GetPlayer(n);
+      if (!p.ok) return "err no player";
+      const Result car = n.Call("GET_CAR_CHAR_IS_USING", {{p.ped}, {0, true}});
+      if (car.outs.empty() || !car.outs[0]) return "err the player is not in a car";
+      n.Call("TASK_CAR_DRIVE_TO_COORD", {{p.ped}, {car.outs[0]}, {F(x)}, {F(y)}, {F(z)}, {F(speed)},
+                                         {1}, {0}, {2}, {F(5.0f)}, {uint32_t(-1)}});
       return "ok";
     });
   }

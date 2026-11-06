@@ -55,7 +55,7 @@ prepare_home() {  # <saves source> <native.toml source>
   local root="$throwaway/Library/Application Support/LibertyRecomp"
   rm -rf "$throwaway"
   mkdir -p "$root/logs"
-  for linked in game dlc shader_cache "User Music"; do
+  for linked in game game-eflc dlc shader_cache "User Music"; do
     [ -e "$support/$linked" ] && ln -s "$support/$linked" "$root/$linked"
   done
   cp -R "$1" "$root/saves"

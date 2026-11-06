@@ -47,12 +47,14 @@ struct GraphicsView: View {
         let up = Upscaling(upscaler: s.upscaler, quality: s.quality)
         let matches = metal && Upscaling.current(launcher) == up
             && Int(launcher.value("gta4_frame_limit")?.asDouble ?? 60) == s.fps
+            && s.extras.allSatisfy { launcher.value($0.0) == $0.1 }
         return Card(title: "For this Mac") {
             HStack(alignment: .top) {
                 Image(systemName: mac.isAir ? "laptopcomputer" : "desktopcomputer").font(.title).foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(mac.chip)\(mac.gpuCores.map { ", \($0)-core GPU" } ?? ""), \(mac.memoryGB) GB").font(.headline)
-                    Text("Suggested: Metal, \(up.label(output: output)), \(s.fps) FPS limit.")
+                    Text("Suggested: Metal, \(up.label(output: output)), \(s.fps) FPS limit, the world at 1x, "
+                         + "1080p reflections, Ultra shadows\(s.extras.contains { $0.0 == "gta4_metalfx_frame_generation" } ? ", no frame generation on this 60 Hz screen" : "").")
                     Text(s.why).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -60,6 +62,7 @@ struct GraphicsView: View {
                     launcher.set("gpu_plugin", nil)
                     up.apply(launcher)
                     launcher.set("gta4_frame_limit", s.fps == 60 ? nil : .int(s.fps))
+                    launcher.setMany(s.extras)
                 }
                 .disabled(matches)
             }

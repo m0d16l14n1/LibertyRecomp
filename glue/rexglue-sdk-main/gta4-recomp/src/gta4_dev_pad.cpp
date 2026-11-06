@@ -11,8 +11,8 @@
 //   release [all|<button>]   trigger lt|rt <0..1> [duration]
 //   stick lx|ly|rx|ry <-1..1> [duration]   wait <duration>
 //   shot <file.png> [scale]   log <text>   set <cvar> <value>   get <cvar>
-//   include <script>   mark <name>   time   quit   await [timeout]
-//   teleport road car drive clock weather invincible nowanted cutscene native
+//   include <script>   mark <name>   time   quit   await [timeout]   awaitframe [timeout]
+//   teleport road car drive goto blips clock weather invincible nowanted cutscene native
 //   (gta4_dev_world.cpp)
 //
 // Buttons: a b x y lb rb back start ls rs up down left right (d-pad).
@@ -359,6 +359,23 @@ std::string Execute(const std::string& line) {
     }
     return "ok";
   }
+  if (cmd == "awaitframe") {
+    // Until the game has drawn a frame (a menu counts): boot can spend minutes rebuilding the
+    // pipeline archive behind its loading screen, so a fixed wait before the first menu press
+    // is either too short or wasteful.
+    std::chrono::milliseconds timeout = std::chrono::minutes(10);
+    if (args.size() > 1 && !ParseDuration(args[1], timeout)) return "err bad timeout";
+    const auto until = Clock::now() + timeout;
+    for (;;) {
+      auto* runtime = rex::Runtime::instance();
+      auto* graphics = runtime ? runtime->graphics_system() : nullptr;
+      rex::ui::Presenter* presenter = graphics ? graphics->presenter() : nullptr;
+      rex::ui::RawImage image;
+      if (presenter && presenter->CaptureGuestOutput(image) && image.width && image.height) return "ok";
+      if (Clock::now() > until) return "err no frame";
+      Sleep(std::chrono::milliseconds(250));
+    }
+  }
   if (cmd == "await") {
     // Until the save is loaded and the world runs (no loading screen, a nonzero time step).
     std::chrono::milliseconds timeout = std::chrono::minutes(5);
@@ -373,7 +390,8 @@ std::string Execute(const std::string& line) {
   if (cmd == "teleport" || cmd == "road" || cmd == "car" || cmd == "drive" || cmd == "clock" ||
       cmd == "weather" || cmd == "invincible" || cmd == "nowanted" || cmd == "heli" ||
       cmd == "water" || cmd == "weapon" || cmd == "peds" || cmd == "cars" || cmd == "explode" ||
-      cmd == "boom" || cmd == "where" || cmd == "native" || cmd == "cutscene") {
+      cmd == "boom" || cmd == "where" || cmd == "native" || cmd == "cutscene" || cmd == "goto" ||
+      cmd == "blips") {
     return WorldCommand(args);
   }
   if (cmd == "time") {
