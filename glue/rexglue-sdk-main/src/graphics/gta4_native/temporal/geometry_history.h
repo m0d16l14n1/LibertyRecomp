@@ -602,19 +602,26 @@ class GeometryHistory {
       const size_t reg = word * 64 + size_t(std::countr_zero(bits));
       if (reg >= registers) break;
       const bool world = Reads(world_, reg);
-      for (size_t i = reg * 4; i < reg * 4 + 4; ++i) {
-        float x, y;
-        std::memcpy(&x, a.data() + i * sizeof(float), sizeof(float));
-        std::memcpy(&y, b.data() + i * sizeof(float), sizeof(float));
-        if (!std::isfinite(x) || !std::isfinite(y)) continue;
-        const float change = std::abs(x - y);
-        if (world) d.max_world = std::max(d.max_world, change);
-        if (world && reg < 3 && i % 4 < 3) d.max_rotation = std::max(d.max_rotation, change);
-        if (change > d.max_any && !Reads(kCameraRegisters, reg)) {
-          d.max_any = change;
-          d.max_index = uint32_t(i);
+      const bool camera = Reads(kCameraRegisters, reg);
+      // One register (four floats) at a time without per-lane branches, so it vectorizes; the
+      // lane order, the strict ">" for max_any and the double sum match the scalar loop.
+      float x[4], y[4], change[4];
+      std::memcpy(x, a.data() + reg * 16, 16);
+      std::memcpy(y, b.data() + reg * 16, 16);
+      for (size_t lane = 0; lane < 4; ++lane) {
+        const bool finite = std::isfinite(x[lane]) && std::isfinite(y[lane]);
+        change[lane] = finite ? std::abs(x[lane] - y[lane]) : -1.0f;  // -1: skipped lane
+      }
+      for (size_t lane = 0; lane < 4; ++lane) {
+        const float c = change[lane];
+        if (c < 0) continue;
+        if (world) d.max_world = std::max(d.max_world, c);
+        if (world && reg < 3 && lane < 3) d.max_rotation = std::max(d.max_rotation, c);
+        if (c > d.max_any && !camera) {
+          d.max_any = c;
+          d.max_index = uint32_t(reg * 4 + lane);
         }
-        d.sum += double(change) * change;
+        d.sum += double(c) * c;
       }
       if (d.max_any > any_limit || d.sum > sum_limit) return d;
      }
@@ -633,16 +640,17 @@ class GeometryHistory {
     for (const auto& candidate : shape->second) {
       // Another frame's object still drawn under its own key this frame is not this one.
       // The pointer and key compares go first; the two hash lookups after them.
-      if (claimed_.count(candidate.snapshot.get()) || candidate.key == key ||
-          current_.count(candidate.key) || PreviousAmbiguous(candidate.key))
-        continue;
-      // Near() reads only the world registers (at most four): test those first, so the many
-      // far candidates of a common shape skip the full pass over every register the shader
-      // reads. Same result as testing the full difference.
+      // Near() reads only the world registers (at most four): cheaper than the hash lookups
+      // below, and most candidates of a common shape fail it, so it goes first. The filters are
+      // independent, so the match is the same; only far_world now also counts candidates the
+      // lookups would have skipped.
       if (!Near(Distance(candidate.snapshot->vertex, vertex, false))) {
         ++statistics_.far_world;
         continue;
       }
+      if (claimed_.count(candidate.snapshot.get()) || candidate.key == key ||
+          current_.count(candidate.key) || PreviousAmbiguous(candidate.key))
+        continue;
       // A candidate past the step limit is refused, and one whose sum is beyond 2.25x the best so
       // far can neither win nor make the result ambiguous (the ambiguity bound only tightens as the
       // best improves), so its comparison stops there. The outcome is unchanged.
