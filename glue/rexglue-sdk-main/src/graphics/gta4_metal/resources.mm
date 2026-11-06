@@ -37,6 +37,7 @@ MTLPixelFormat ResourceStore::TextureFormat(xenos::TextureFormat format) {
     case xenos::TextureFormat::k_16_16_16_16_FLOAT: return MTLPixelFormatRGBA16Float;
     case xenos::TextureFormat::k_16_16_FLOAT: return MTLPixelFormatRG16Float;
     case xenos::TextureFormat::k_32_FLOAT: return MTLPixelFormatR32Float;
+    case xenos::TextureFormat::k_32_32_FLOAT: return MTLPixelFormatRG32Float;
     case xenos::TextureFormat::k_24_8:
     case xenos::TextureFormat::k_24_8_FLOAT: return MTLPixelFormatDepth32Float_Stencil8;
     default: return MTLPixelFormatInvalid;
@@ -48,6 +49,9 @@ MTLPixelFormat ResourceStore::SurfaceFormat(uint32_t format,bool depth) {
     case 0x18280186u: return MTLPixelFormatRGBA8Unorm;
     case 0x1A2201BFu: return MTLPixelFormatRGBA16Float;
     case 0x2DA2ABA4u: return MTLPixelFormatR32Float;
+    // k_32_32_FLOAT (low six bits 37): four 128x128 targets the episodes clear and resolve every
+    // frame; unmapped, each clear and resolve was rejected as an unsupported format.
+    case 0x2D22ABA5u: return MTLPixelFormatRG32Float;
     case 0x2D22AB9Fu:
     case 0x2D20AB8Du: return MTLPixelFormatRG16Float;
     default: return MTLPixelFormatInvalid;
@@ -117,7 +121,10 @@ std::shared_ptr<SurfaceResource> ResourceStore::Surface(const gta4_native::Surfa
     }
     auto format=SurfaceFormat(guest.format,depth);
     if(!width || !height || width>16384 || height>16384 || format==MTLPixelFormatInvalid) {
-      error="Unsupported native surface format, extent or sample count"; return {};
+      error=fmt::format("Unsupported native surface format, extent or sample count: handle={:08X} "
+                        "format={} depth={} size={}x{} samples={}",guest.handle,uint32_t(guest.format),depth,
+                        width,height,samples);
+      return {};
     }
     if(samples>1 && format==MTLPixelFormatR32Float && !state_->context->device.supports32BitMSAA) {
       // Apple GPU family 7 (M1, A14) cannot multisample 32-bit float formats; M2 and later can.

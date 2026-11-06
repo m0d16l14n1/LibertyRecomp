@@ -104,6 +104,22 @@ bool Renderer::State::Resolve(const gta4_native::ResolveCommand& request, std::s
     const bool initialized = source->initialized;
     if (!ResolveClears(resolve, error)) return false;
     if (preserved) return true;
+    // A color target nothing ever drew into or cleared (the render-target class resolves its
+    // post-processing downsample targets every frame, also while their pass is off: two a frame
+    // in GTA IV and both episodes, caller 828DA898/828DA8E0, flags 0x04000070 with no clear bit).
+    // The console copies whatever that EDRAM holds; resolve it as transparent black, the value a
+    // draw sampling the never-written destination already got (its one-time storage clear).
+    // Rejecting it counted a failed command every frame, ended that frame's QoS scope and skipped
+    // the destination's write publication.
+    if (!depth && !initialized && produced == 0 && destination->gpu_produced &&
+        (destination->image.usage & MTLTextureUsageRenderTarget)) {
+      if (!SettlePendingResolves(destination->image, true, error)) return false;
+      if (!resources.InitializeTextureStorage(destination, commands, [&] { EndRender(); }, error)) return false;
+      ++resolve_unproduced_sources;
+      destination->initialized = true;
+      resources.PublishWrite(resolve.destination_texture);
+      return true;
+    }
     // Some resolves are rejected every frame (two per frame in Games-on-Demand play). The caller
     // logs only the first 64 command failures and every 4096th; build the detailed report, which
     // walks related surfaces, only as often as it can reach the log.

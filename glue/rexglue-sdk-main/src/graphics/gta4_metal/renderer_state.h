@@ -262,6 +262,7 @@ struct Renderer::State {
   bool traced_scene = false;
   uint64_t content_serial=0;
   uint64_t resolve_skips=0, resolve_initializations_merged=0,resolve_image_exchanges=0;
+  uint64_t resolve_unproduced_sources=0;  // color resolves of a never-drawn source, written as transparent black
   id<MTLBuffer> readback_buffer=nil;
   std::shared_ptr<TextureResource> PrepareTexture(uint32_t handle,
       const xenos::xe_gpu_texture_fetch_t&,std::string&);
