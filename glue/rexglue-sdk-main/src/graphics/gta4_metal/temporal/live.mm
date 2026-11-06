@@ -205,6 +205,8 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
                    @"Liberty temporal device depth", error) ||
       !CreateImage(inputs.previous_depth, MTLPixelFormatR32Float, c.width, c.height,
                    @"Liberty expected previous surface depth", error) ||
+      !CreateImage(inputs.rigid_motion, MTLPixelFormatRG16Float, c.width, c.height,
+                   @"Liberty rigid (tyre) motion", error) ||
       !CreateImage(converted_, MTLPixelFormatRGBA16Float, c.width, c.height,
                    @"Liberty linear temporal input", error) ||
       !CreateImage(ui_add, MTLPixelFormatRGBA16Float, c.width, c.height,
@@ -216,7 +218,7 @@ bool Live::Begin(id<MTLCommandBuffer> cb, const gta4_native::TemporalCommand& c,
   // Configuring from scheduler data here can recreate the scaler each frame
   // if its depth convention differs from the subsequently adopted camera.
   if (!Clear(cb, inputs.motion, 0, error) || !Clear(cb, inputs.reactive, 1, error) ||
-      !Clear(cb, inputs.previous_depth, -1, error)) return false;
+      !Clear(cb, inputs.previous_depth, -1, error) || !Clear(cb, inputs.rigid_motion, 0, error)) return false;
   snapshot_reactive = !rex::cvar::GetFlagByName("gta4_temporal_snapshot").empty();
   frame_generation = generation;
   active = true;

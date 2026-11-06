@@ -10,7 +10,8 @@ struct DrawParameters {
   std::array<float, 2> input_extent{}, jitter_clip{}, previous_jitter_clip{};
   uint32_t valid_history = 0, reactive = 0, ui_mode = 0;
   float reactive_strength = 1.0f;
-  uint32_t padding[2]{};
+  uint32_t rigid_history = 0;  // buffer(27) is the rigid previous bank: rigid motion at color(7)
+  uint32_t padding = 0;
 };
 static_assert(sizeof(DrawParameters) == 48);
 class Live {

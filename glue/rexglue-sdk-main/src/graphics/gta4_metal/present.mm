@@ -252,7 +252,10 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     if(generated_pair.generated&&!temporal.ComposeInPlace(commands,generated_pair.generated,error))return false;
     if(generated_pair.generated){
       static uint64_t generated_count=0,dumped=0;
+      static std::string dumped_folder;
       const auto folder=rex::cvar::GetFlagByName("gta4_metalfx_frame_generation_dump");
+      // A new folder (the dev pad's `set`) starts a new run of dumps, as the temporal snapshot does.
+      if(folder!=dumped_folder){dumped_folder=folder;dumped=0;generated_count=0;}
       ++generated_count;
       temporal.snapshot_reactive=!folder.empty();
       const uint64_t every=std::max<uint32_t>(2,REXCVAR_GET(gta4_metalfx_frame_generation_dump_every));
@@ -265,6 +268,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
         DumpFrameImage(commands,generated_pair.generated,fmt::format("{}/framegen_{}_generated.ppm",folder,present.submitted_frame));
         DumpFrameImage(commands,generated_pair.real,fmt::format("{}/framegen_{}_real.ppm",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.motion,fmt::format("{}/framegen_{}_motion.raw",folder,present.submitted_frame));
+        DumpRawTexture(commands,temporal.inputs.rigid_motion,fmt::format("{}/framegen_{}_rigid.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.previous_depth,fmt::format("{}/framegen_{}_history.raw",folder,present.submitted_frame));
         DumpRawTexture(commands,temporal.inputs.depth,fmt::format("{}/framegen_{}_depth.raw",folder,present.submitted_frame));
         // Generate has already consumed this frame's live mask, and later scene

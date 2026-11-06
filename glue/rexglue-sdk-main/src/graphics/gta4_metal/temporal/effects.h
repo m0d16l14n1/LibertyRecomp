@@ -17,6 +17,9 @@ struct Inputs {
   // R32Float at input resolution and registered to the jittered scene. -1 is
   // invalid, including unsupported nonstandard depth viewports. MetalFX ignores it.
   id<MTLTexture> previous_depth = nil;
+  // Frame generation: RG16Float at input resolution, the rigid (body-only) motion of tyre pixels
+  // (the draws' own motion elsewhere; 0 where nothing wrote it). The repair warps tyres with it.
+  id<MTLTexture> rigid_motion = nil;
   // Optional GPU-produced 1x1 R16Float MetalFX exposure. Scalar Frame::exposure
   // remains the fallback for callers without a title exposure texture.
   id<MTLTexture> exposure = nil;

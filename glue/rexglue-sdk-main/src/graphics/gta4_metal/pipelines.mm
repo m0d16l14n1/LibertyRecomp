@@ -172,6 +172,10 @@ Renderer::State::Pipeline* Renderer::State::DrawPipeline(const Targets& targets,
   if(targets.temporal_motion){
     auto a=descriptor.colorAttachments[6];a.pixelFormat=MTLPixelFormatR32Float;
     a.writeMask=MTLColorWriteMaskRed;a.blendingEnabled=NO;
+    // Rigid motion (tyres' body-only motion for the frame-generation repair; others' own motion).
+    // The depth-only motion fragment has no output there.
+    auto r=descriptor.colorAttachments[7];r.pixelFormat=MTLPixelFormatRG16Float;
+    r.writeMask=ps?MTLColorWriteMaskAll:MTLColorWriteMaskNone;r.blendingEnabled=NO;
   }
   if(targets.temporal_ui){
     auto a=descriptor.colorAttachments[6];a.pixelFormat=MTLPixelFormatRGBA16Float;a.writeMask=ColorMask(NativeColorWriteMaskForTarget(fixed.color_write_mask,0)&7u);

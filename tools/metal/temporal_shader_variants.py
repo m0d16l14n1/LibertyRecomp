@@ -22,7 +22,8 @@ constant TextureCubeDescriptorHeap* g_TextureCubeDescriptorHeap [[buffer(3)]],
 constant SamplerDescriptorHeap* g_SamplerDescriptorHeap [[buffer(4)]],
 constant LibertyTemporalDraw& temporal [[buffer(6)]],
 constant PushConstants& previousConstants [[buffer(7)]],
-constant PushConstants& g_PushConstants [[buffer(8)]]"""
+constant PushConstants& g_PushConstants [[buffer(8)]],
+constant PushConstants& rigidConstants [[buffer(27)]]"""
 HEAPS = "g_Texture2DDescriptorHeap,g_Texture2DArrayDescriptorHeap,g_Texture3DDescriptorHeap,g_TextureCubeDescriptorHeap,g_SamplerDescriptorHeap"
 REACTIVE = """
 #ifdef __air__
@@ -62,7 +63,7 @@ struct LibertyTemporalDraw {
     uint reactive;
     uint uiMode;
     float reactiveStrength;
-    uint padding1;
+    uint rigidHistory;  // rigidConstants holds the rigid previous bank (tyres): rigid motion at color(7)
     uint padding2;
 };
 #endif
@@ -105,7 +106,8 @@ def transform(source: str, stage: int) -> str:
         raise ValueError("stock interpolator contract is unavailable")
     prefix = prefix.replace(interpolators, interpolators + """
     float4 libertyCurrentClip [[user(LIBERTY_CURRENT_CLIP)]];
-    float4 libertyPreviousClip [[user(LIBERTY_PREVIOUS_CLIP)]];""", 1)
+    float4 libertyPreviousClip [[user(LIBERTY_PREVIOUS_CLIP)]];
+    float4 libertyRigidClip [[user(LIBERTY_RIGID_CLIP)]];""", 1)
     if stage == archive.VERTEX:
         wrapper = f"""
 #ifdef __air__
@@ -127,6 +129,13 @@ vertex Interpolators shaderMain({PARAMETERS}, VertexShaderInput input [[stage_in
         // convention. Do not invent that convention for a remapped viewport.
         if(!all(currentDepthRange==float2(0,1)) || !all(previousDepthRange==float2(0,1)))
             current.libertyPreviousClip.z=-current.libertyPreviousClip.w;
+    }}
+    current.libertyRigidClip=current.libertyPreviousClip;
+    if(temporal.validHistory && temporal.rigidHistory) {{
+        Interpolators rigid=liberty_temporal_original({HEAPS},rigidConstants,input);
+        float2 rigidHalf=*(reinterpret_cast<device float2*>(rigidConstants.SharedConstants+552));
+        current.libertyRigidClip=rigid.oPos;
+        current.libertyRigidClip.xy-=rigidHalf*rigid.oPos.w;
     }}
     return current;
 }}
@@ -158,6 +167,12 @@ fragment PixelShaderOutput shaderMain(Interpolators input [[stage_in]],bool iFac
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?input.libertyPreviousClip.z/input.libertyPreviousClip.w:-1.0f;
         result.libertyUiAdd=float4(isfinite(previousDepth) && previousDepth>=0 && previousDepth<=1 ? previousDepth : -1.0f,0,0,0);
+        float2 rigidVelocity=velocity;
+        if(valid && temporal.rigidHistory && all(isfinite(input.libertyRigidClip)) && input.libertyRigidClip.w>1.0e-6f) {{
+            rigidVelocity=(input.libertyRigidClip.xy/input.libertyRigidClip.w-input.libertyCurrentClip.xy/input.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
+            if(!all(isfinite(rigidVelocity)) || any(abs(rigidVelocity)>65504.0f)) rigidVelocity=velocity;
+        }}
+        result.libertyUiTransmit=float4(valid?rigidVelocity:float2(0),0,0);
     }}
     return result;
 }}
@@ -192,7 +207,8 @@ def transform_override(source: str, stage: int) -> str:
     result = source[:entry.start()] + replacement + source[entry.end():]
     clip_members = """
     float4 libertyCurrentClip [[user(LIBERTY_CURRENT_CLIP)]];
-    float4 libertyPreviousClip [[user(LIBERTY_PREVIOUS_CLIP)]];"""
+    float4 libertyPreviousClip [[user(LIBERTY_PREVIOUS_CLIP)]];
+    float4 libertyRigidClip [[user(LIBERTY_RIGID_CLIP)]];"""
     target_struct = output_type if stage == archive.VERTEX else input_type
     opening = re.search(r"struct " + re.escape(target_struct) + r"\s*\{", result)
     if not opening:
@@ -204,7 +220,8 @@ def transform_override(source: str, stage: int) -> str:
         if not position or "g_PushConstants" not in arguments:
             raise ValueError("override clip-space/constant contract unavailable")
         previous_args = ["previousConstants" if a == "g_PushConstants" else a for a in arguments]
-        extra = ", constant LibertyTemporalDraw& temporal [[buffer(6)]], constant type_ConstantBuffer_PushConstants& previousConstants [[buffer(7)]]"
+        rigid_args = ["rigidConstants" if a == "g_PushConstants" else a for a in arguments]
+        extra = ", constant LibertyTemporalDraw& temporal [[buffer(6)]], constant type_ConstantBuffer_PushConstants& previousConstants [[buffer(7)]], constant type_ConstantBuffer_PushConstants& rigidConstants [[buffer(27)]]"
         body = f"""
     auto current=liberty_temporal_override_original({','.join(arguments)});
     current.libertyCurrentClip=current.{position[1]};
@@ -219,6 +236,12 @@ def transform_override(source: str, stage: int) -> str:
         float2 previousDepthRange=*(reinterpret_cast<device const float2*>(previousConstants.SharedConstants+1264));
         if(!all(currentDepthRange==float2(0,1)) || !all(previousDepthRange==float2(0,1)))
             current.libertyPreviousClip.z=-current.libertyPreviousClip.w;
+    }}
+    current.libertyRigidClip=current.libertyPreviousClip;
+    if(temporal.validHistory && temporal.rigidHistory) {{
+        auto rigid=liberty_temporal_override_original({','.join(rigid_args)});
+        current.libertyRigidClip=rigid.{position[1]};
+        current.libertyRigidClip.xy-=(*(reinterpret_cast<device const float2*>(rigidConstants.SharedConstants+552)))*rigid.{position[1]}.w;
     }}
     return current;
 """
@@ -246,6 +269,12 @@ def transform_override(source: str, stage: int) -> str:
     if(temporal.uiMode==0u) {{
         float previousDepth=valid?{input_name}.libertyPreviousClip.z/{input_name}.libertyPreviousClip.w:-1.0f;
         result.libertyUiAdd=float4(isfinite(previousDepth) && previousDepth>=0 && previousDepth<=1 ? previousDepth : -1.0f,0,0,0);
+        float2 rigidVelocity=velocity;
+        if(valid && temporal.rigidHistory && all(isfinite({input_name}.libertyRigidClip)) && {input_name}.libertyRigidClip.w>1.0e-6f) {{
+            rigidVelocity=({input_name}.libertyRigidClip.xy/{input_name}.libertyRigidClip.w-{input_name}.libertyCurrentClip.xy/{input_name}.libertyCurrentClip.w)*temporal.inputExtent*float2(0.5f,-0.5f);
+            if(!all(isfinite(rigidVelocity)) || any(abs(rigidVelocity)>65504.0f)) rigidVelocity=velocity;
+        }}
+        result.libertyUiTransmit=float4(valid?rigidVelocity:float2(0),0,0);
     }}
     return result;
 """

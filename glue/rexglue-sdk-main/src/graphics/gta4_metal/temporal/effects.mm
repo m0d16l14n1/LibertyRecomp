@@ -727,8 +727,10 @@ struct FrameInterpolation::State {
   id<MTLComputePipelineState> composite = nil, overlay = nil;
   id<MTLComputePipelineState> repair = nil;  // optional: nil skips the discontinuity repair
   id<MTLComputePipelineState> repair_weight = nil;  // its input-resolution weight pass
+  id<MTLComputePipelineState> wheel_tiles = nil;    // per 16x16 tile: nearest tyre's rigid motion
+  id<MTLTexture> wheel_tile_motion = nil;           // RGBA16Float, input size / 16
   id<MTLTexture> repair_weights = nil;               // R8, input size
-  id<MTLTexture> repair_motion = nil;                // RG16Float, input size: the warp's motion
+  id<MTLTexture> repair_motion = nil;                // RGBA16Float, input size: warp motion, wheel flag
   id<MTLComputePipelineState> sharpen = nil;  // optional: nil skips the sharpening
   uint64_t sharpen_failures = 0;
   // Three: a slot is reused three frames later. With two, the frame that last wrote it was
@@ -821,15 +823,20 @@ bool FrameInterpolation::Configure(id<MTLDevice> device, id<MTLLibrary> library,
       next->repair = [device newComputePipelineStateWithFunction:repair_function error:nil];
     if (auto weight_function = [library newFunctionWithName:@"liberty_temporal_framegen_repair_weight"])
       next->repair_weight = [device newComputePipelineStateWithFunction:weight_function error:nil];
-    if (!next->repair_weight) next->repair = nil;  // the repair reads the weight map
+    if (auto tiles_function = [library newFunctionWithName:@"liberty_temporal_framegen_wheel_tiles"])
+      next->wheel_tiles = [device newComputePipelineStateWithFunction:tiles_function error:nil];
+    if (!next->repair_weight || !next->wheel_tiles) next->repair = nil;  // the repair reads both
     if (next->repair) {
       MTLTextureDescriptor* w = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
           width:c.input_width height:c.input_height mipmapped:NO];
       w.storageMode = MTLStorageModePrivate;
       w.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
       next->repair_weights = [device newTextureWithDescriptor:w];
-      w.pixelFormat = MTLPixelFormatRG16Float;
+      w.pixelFormat = MTLPixelFormatRGBA16Float;  // xy warp motion, z wheel flag
       next->repair_motion = [device newTextureWithDescriptor:w];
+      w.width = (c.input_width + 15) / 16; w.height = (c.input_height + 15) / 16;
+      next->wheel_tile_motion = [device newTextureWithDescriptor:w];
+      if (!next->wheel_tile_motion) next->repair = nil;
       if (next->repair_weights && next->repair_motion) {
         next->repair_weights.label = @"Liberty frame-generation repair weights";
         next->repair_motion.label = @"Liberty frame-generation repair motion";
@@ -1083,7 +1090,9 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
     // Both paths join here: the native MTL4FX encode updates fence4, which the next proxy
     // encoder waits on (as the UI pass below), and the Metal 3 hop encodes into this command
     // buffer. Same slot, same command buffer: no new lifetime; slot.owner is set below.
+    bool repaired = false;  // this frame's repair_motion is valid (the sharpen pass reads its wheel flag)
     if (repair_requested && s.repair && !decision.reset) {
+      repaired = true;
       struct {
         float motion_scale[2], input_texel[2], output_texel[2];
         float threshold, near_plane, far_plane;
@@ -1096,6 +1105,25 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
           in.repair_motion_px > 0 ? in.repair_motion_px : 65504.0f,
           frame.near_plane, frame.far_plane,
           uint32_t(s.config.depth_reversed), 0.10f, 0};
+      // Pass 0 per 16x16 tile: the nearest tyre's rigid motion.
+      auto tiles = ComputeEncoder(commands, "framegen/wheel-tiles");
+      if (!tiles) {
+        s.history.Reset();
+        error = "frame-generation wheel tile encoder failed";
+        return false;
+      }
+      tiles.label = @"Liberty frame-generation wheel tiles";
+      [tiles setComputePipelineState:s.wheel_tiles];
+      [tiles setTexture:s.wheel_tile_motion atIndex:0];
+      [tiles setTexture:in.reactive atIndex:1];
+      [tiles setTexture:in.rigid_motion ? in.rigid_motion : in.motion atIndex:2];
+      {
+        const NSUInteger w = s.wheel_tiles.threadExecutionWidth,
+                         h = std::max<NSUInteger>(1, std::min<NSUInteger>(8, s.wheel_tiles.maxTotalThreadsPerThreadgroup / w));
+        [tiles dispatchThreads:MTLSizeMake(s.wheel_tile_motion.width, s.wheel_tile_motion.height, 1)
+         threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+      }
+      [tiles endEncoding];
       // Pass 1 at input resolution: the weight map (tyre marker grown, depth/motion edges).
       auto weights = ComputeEncoder(commands, "framegen/repair-weight");
       if (!weights) {
@@ -1110,6 +1138,7 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       [weights setTexture:in.depth atIndex:2];
       [weights setTexture:in.reactive atIndex:3];
       [weights setTexture:s.repair_motion atIndex:4];
+      [weights setTexture:s.wheel_tile_motion atIndex:5];
       [weights setBytes:&c length:sizeof(c) atIndex:0];
       {
         const NSUInteger w = s.repair_weight.threadExecutionWidth,
@@ -1159,6 +1188,8 @@ bool FrameInterpolation::Encode(id<MTLCommandBuffer> commands, const Inputs& in,
       [encoder setTexture:in.motion atIndex:2];
       [encoder setTexture:s.slots[s.previous].scene atIndex:3];
       [encoder setTexture:slot.scene atIndex:4];
+      // Without this frame's repair the motion texture stands in: its z reads 0 (no wheels).
+      [encoder setTexture:repaired ? s.repair_motion : in.motion atIndex:5];
       [encoder setBytes:&k length:sizeof(k) atIndex:0];
       const NSUInteger w = s.sharpen.threadExecutionWidth,
                        h = std::max<NSUInteger>(

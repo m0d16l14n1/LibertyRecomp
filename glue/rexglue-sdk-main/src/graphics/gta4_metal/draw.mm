@@ -282,7 +282,7 @@ bool Renderer::State::BeginRender(const Targets& target,std::string& error) {
     pass.colorAttachments[index].texture=image;pass.colorAttachments[index].loadAction=MTLLoadActionLoad;pass.colorAttachments[index].storeAction=MTLStoreActionStore;
   };
   if(target.temporal_motion||target.temporal_reactive){extra(4,temporal_scene.inputs.motion);extra(5,temporal_scene.inputs.reactive);}
-  if(target.temporal_motion)extra(6,temporal_scene.inputs.previous_depth);
+  if(target.temporal_motion){extra(6,temporal_scene.inputs.previous_depth);extra(7,temporal_scene.inputs.rigid_motion);}
   if(target.temporal_ui){extra(6,temporal_scene.ui_add);extra(7,temporal_scene.ui_transmit);}
   pass.renderTargetWidth=target.width; pass.renderTargetHeight=target.height;
   pass.defaultRasterSampleCount=target.samples;
@@ -851,7 +851,7 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   temporal_parameters.reactive=targets.temporal_reactive?(temporal_reactive_weighting?ReactiveMode(fixed,requested_colors,scene_policy.effect):1u):0u;
   // The marker must be the exact value whatever the blend state (mode 1 writes the strength).
   if(rigid_deformation&&targets.temporal_reactive)temporal_parameters.reactive=1u;
-  ui::metal::UploadSlice previous_vertex,previous_shared;
+  ui::metal::UploadSlice previous_vertex,previous_shared,rigid_vertex;
   uint64_t previous_vertex_address=0;
   const gta4_native::temporal::GeometrySnapshot* recorded_snapshot=nullptr;  // tagged with this frame's uploads below
   bool standard_motion_depth=temporal::StandardDepthViewport(shared);
@@ -914,19 +914,30 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
       // moves correctly on screen, without a rapidly divergent vector field inside it.
       std::array<uint8_t,4096> rigid_previous{};
       std::span<const uint8_t> previous_constants=history.previous->vertex;
-      // Tyres keep their true motion (spin included): the temporal scaler accumulates them with it
-      // (body-only motion made the tread disagree with its history every frame: vibrating wheels),
-      // and the frame-generation repair warps tyre pixels with the car body's motion instead
-      // (liberty_temporal_framegen_repair_weight). Peds/bone palettes (scope `all`) stay rigid.
-      if(rigid_deformation&&!temporal_generation_rigid_wheels_only){
+      // Tyres (scope `wheels`) keep their true motion (spin included) at color(4) for the temporal
+      // scaler (body-only motion made the tread disagree with its history every frame: vibrating
+      // wheels), and write this rigid motion at color(7) from a third vertex evaluation for the
+      // frame-generation repair, which warps the wheel with it. Scope `all` (peds, bone palettes)
+      // keeps the rigid motion in the main motion as before.
+      if(rigid_deformation){
         std::copy(history.previous->vertex.begin(),history.previous->vertex.end(),rigid_previous.begin());
         const auto& reads=pipeline->vertex.float_constant_mask;
         for(size_t word=1;word<reads.size();++word)
           for(uint64_t bits=reads[word];bits;bits&=bits-1){
             const size_t reg=word*64+size_t(std::countr_zero(bits));
-            std::memcpy(rigid_previous.data()+reg*16,captured_vertex.data()+reg*16,16);
+            // Keep the current pose (wheel spin/steer, bone rotations: entries within +-1) but the
+            // previous position (translation entries: world coordinates). Copying the whole current
+            // c64+ matrices kept the current world position too, so a tyre's "rigid" motion was the
+            // camera's alone: a wheel on a car moving with the camera jumped in generated frames.
+            for(size_t lane=0;lane<4;++lane){
+              float now,before;
+              std::memcpy(&now,captured_vertex.data()+reg*16+lane*4,4);
+              std::memcpy(&before,rigid_previous.data()+reg*16+lane*4,4);
+              if(std::isfinite(now)&&std::isfinite(before)&&std::abs(now)<=1.01f&&std::abs(before)<=1.01f)
+                std::memcpy(rigid_previous.data()+reg*16+lane*4,&now,4);
+            }
           }
-        previous_constants=rigid_previous;
+        if(!temporal_generation_rigid_wheels_only)previous_constants=rigid_previous;
       }
       // The variant runs the same vertex function on this bank, so it reads the current shader's range.
       if(rigid_deformation){
@@ -944,6 +955,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
         ++previous_bank_uploads;previous_bank_range_bytes+=size_t(RangeOf(pipeline->vertex.float_constant_mask,256).registers())*16;
       }
       if(!previous_vertex||!previous_shared)return false;
+      if(rigid_deformation&&temporal_generation_rigid_wheels_only){
+        rigid_vertex=Upload(rigid_previous,false,error);
+        if(!rigid_vertex)return false;
+        temporal_parameters.rigid_history=1;
+      }
       temporal_parameters.valid_history=1;temporal_parameters.previous_jitter_clip=history.previous->jitter_clip;
     }
     if(history.ambiguous){temporal_parameters.valid_history=0;temporal_parameters.reactive=1;}
@@ -1237,7 +1253,11 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
     [render setVertexBytes:&temporal_parameters length:sizeof(temporal_parameters) atIndex:6];
     [render setFragmentBytes:&temporal_parameters length:sizeof(temporal_parameters) atIndex:6];
     [render setVertexBytes:prior.data() length:sizeof(prior) atIndex:7];
+    // The rigid previous bank (tyres; see the rigid_deformation history above), else the same as 7.
+    const std::array<uint64_t,3> rigid{rigid_vertex?rigid_vertex.gpu_address:prior[0],prior[1],prior[2]};
+    [render setVertexBytes:rigid.data() length:sizeof(rigid) atIndex:27];
     if(previous_vertex){const std::array<id<MTLResource>,2> r{previous_vertex.buffer,previous_shared.buffer};bindings.ReadResources(render,r.data(),r.size());}
+    if(rigid_vertex){const std::array<id<MTLResource>,1> r{rigid_vertex.buffer};bindings.ReadResources(render,r.data(),r.size());}
   }
   bindings.ReadResources(render,indirect.data(),indirect_count);
   if (shared.modern_effects.cloud_mask_address)

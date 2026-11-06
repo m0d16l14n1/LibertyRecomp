@@ -294,40 +294,71 @@ inline uint2 liberty_repair_tap(uint2 id,float2 offset,int2 last){
 }
 // Also writes the motion pass 2 warps with: a pixel's own motion, except on tyres. Tyre draws carry
 // their true motion (spin included) so the temporal scaler accumulates them; for the generated
-// frame a spinning wheel is drawn from the current pose moved with the car, so a tyre pixel takes
-// the mean motion of nearby non-tyre pixels at about its depth (wheel arch, sill, bumper).
+// frame a spinning wheel is drawn from the current pose moved with the car (rigid motion).
 inline bool liberty_tyre_marker(float r){return r>0.70f&&r<0.80f;}
+// Part of a wheel once a tyre has been found nearby: the marker, or no history (1.0). Pieces of
+// the wheel drawn over the tyre without history (the lower part touching the road) max-blend the
+// marker away; without them the repaired wheel was cut off at that piece's edge.
+inline bool liberty_wheel_part(float r){return liberty_tyre_marker(r)||r>0.95f;}
+// Pass 0, one thread per 16x16 tile of the input: the rigid motion of the nearest tyre (a 4x4
+// grid inside the tile, then rings around its centre out to ~70 pixels), z = 1 when one was found.
+// Pass 1 reads its tile instead of searching per pixel (that search was ~3 ms at 1440p), and every
+// pixel of a tile warps a wheel with the same motion.
+kernel void liberty_temporal_framegen_wheel_tiles(texture2d<float,access::write> tiles [[texture(0)]],
+ texture2d<float> reactive [[texture(1)]],texture2d<float> rigid_motion [[texture(2)]],
+ uint2 tile [[thread_position_in_grid]]) {
+ if(any(tile>=uint2(tiles.get_width(),tiles.get_height())))return;
+ const int2 last=int2(reactive.get_width(),reactive.get_height())-1;
+ const uint2 centre=tile*16u+8u;
+ for(uint y=0;y<4;++y)for(uint x=0;x<4;++x){
+  const uint2 tap=liberty_repair_tap(tile*16u,float2(x*4+2,y*4+2),last);
+  if(liberty_tyre_marker(reactive.read(tap).r)){tiles.write(float4(rigid_motion.read(tap).xy,1,0),tile);return;}
+ }
+ const float search[6]={12,20,30,42,56,72};
+ for(uint ring=0;ring<6;++ring)for(uint k=0;k<12;++k){
+  const float angle=float(k)*0.52359878f+float(ring)*0.2617994f;
+  const uint2 tap=liberty_repair_tap(centre,float2(cos(angle),sin(angle))*search[ring],last);
+  if(liberty_tyre_marker(reactive.read(tap).r)){tiles.write(float4(rigid_motion.read(tap).xy,1,0),tile);return;}
+ }
+ tiles.write(float4(0),tile);
+}
 kernel void liberty_temporal_framegen_repair_weight(texture2d<float,access::write> weights [[texture(0)]],
  texture2d<float> motion [[texture(1)]],texture2d<float> depth [[texture(2)]],texture2d<float> reactive [[texture(3)]],
- texture2d<float,access::write> repair_motion [[texture(4)]],
+ texture2d<float,access::write> repair_motion [[texture(4)]],texture2d<float> wheel_tiles [[texture(5)]],
  constant TemporalRepairConstants& c [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
  const uint2 size=uint2(weights.get_width(),weights.get_height());
  if(any(id>=size))return;
  const int2 last=int2(size)-1;
+ // Wheels: in the generated (midpoint) frame a wheel sits half its motion back from where the
+ // current frame drew it (m points current -> previous), up to tens of pixels at speed seen from
+ // the side. Repairing only the current outline left the interpolator's own broken wheel showing
+ // next to the repaired one (a doubled wheel). So: find the nearby tyre's rigid motion (the draw's
+ // body-only motion, one value for the whole wheel), and mark this pixel as wheel when it lies in
+ // the current outline or the midpoint outline (the current one moved by half that motion), grown
+ // by a few pixels. Those pixels are warped with that one rigid motion and skip the layer check
+ // (the midpoint wheel covers road or body in the current frame). z of the motion map flags them.
  float2 warp_motion=motion.read(id).xy;
- if(liberty_tyre_marker(reactive.read(id).r)){
-  const float zc=depth.read(id).r;
-  if(temporal_valid_depth(zc)){
-   const float vc=temporal_view_depth(zc,c.near_plane,c.far_plane,c.reversed!=0);
-   float2 sum=0; float count=0;
-   const float body_rings[4]={4,8,13,20};
-   for(uint ring=0;ring<4&&count<6;++ring)for(uint k=0;k<8;++k){
-    const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
-    const uint2 tap=liberty_repair_tap(id,float2(cos(angle),sin(angle))*body_rings[ring],last);
-    if(reactive.read(tap).r>=0.5f)continue;  // another tyre pixel or no history
-    const float z=depth.read(tap).r;
-    if(!temporal_valid_depth(z))continue;
-    const float v=temporal_view_depth(z,c.near_plane,c.far_plane,c.reversed!=0);
-    if(abs(v-vc)>0.15f*vc)continue;  // the road or the background, not the car
-    sum+=motion.read(tap).xy; count+=1;
+ float wheel=0;
+ {
+  const float4 tile=wheel_tiles.read(min(id/16u,uint2(wheel_tiles.get_width(),wheel_tiles.get_height())-1u));
+  const float2 wheel_motion=tile.xy;
+  if(tile.z>0.5f){
+   const float2 centres[2]={float2(0),-0.5f*wheel_motion};
+   bool inside=false;
+   for(uint which=0;which<2&&!inside;++which){
+    inside=liberty_wheel_part(reactive.read(liberty_repair_tap(id,centres[which],last)).r);
+    for(uint k=0;k<8&&!inside;++k){
+     const float angle=float(k)*0.78539816f;
+     inside=liberty_wheel_part(reactive.read(liberty_repair_tap(id,centres[which]+float2(cos(angle),sin(angle))*2.0f,last)).r);
+    }
    }
-   if(count>0)warp_motion=sum/count;
+   if(inside){wheel=1;warp_motion=wheel_motion;}
   }
  }
- repair_motion.write(float4(warp_motion,0,0),id);
+ repair_motion.write(float4(warp_motion,wheel,0),id);
  // Ordinary transparent/light effects are intentionally bounded below 0.5. A strong value is
  // reserved for geometry whose deforming pose was made rigid for frame-generation motion.
- float weight=smoothstep(0.5f,0.7f,reactive.read(id).r);
+ float weight=max(wheel,smoothstep(0.5f,0.7f,reactive.read(id).r));
  const float rings[2]={3,7};
  for(uint ring=0;ring<2&&weight<1;++ring)for(uint k=0;k<8;++k){
   const float angle=float(k)*0.78539816f+float(ring)*0.39269908f;
@@ -378,11 +409,17 @@ kernel void liberty_temporal_framegen_repair(texture2d<float,access::read_write>
  const float2 uv=(float2(id)+0.5f)*c.output_texel;
  const float weight=repair_weight.sample(linear_sampler,uv).r;
  if(weight<=0)return;
+ // Pass 1's warp motion (own motion, or a wheel's rigid motion) and its wheel flag.
+ const float4 warp=motion.sample(nearest,uv);
+ const float2 m0=warp.xy*c.motion_scale;
+ if(warp.z>0.5f){
+  // Replaced whole: a blend with the interpolator's own wheel at the edge left a see-through ring.
+  generated.write(temporal_finite(scene.sample(linear_sampler,uv-0.5f*m0*c.output_texel)),id);
+  return;
+ }
  const float z0=depth.sample(nearest,uv).r;
  if(!temporal_valid_depth(z0))return;
  const float v0=temporal_view_depth(z0,c.near_plane,c.far_plane,c.reversed!=0);
- // Pass 1's warp motion: own motion, or the car body's next to a tyre.
- const float2 m0=motion.sample(nearest,uv).xy*c.motion_scale;
  // m points from the current position to the previous one; this pixel's content sits at the
  // midpoint, so it came from about uv - m/2 in the current image (scene only: the HUD is composed
  // over the generated image later, in present.mm).
@@ -418,9 +455,20 @@ struct TemporalSharpenConstants { float amount; float source_clamp; float2 motio
 kernel void liberty_temporal_framegen_sharpen(texture2d<float,access::read> source [[texture(0)]],
  texture2d<float,access::write> output [[texture(1)]],texture2d<float> motion [[texture(2)]],
  texture2d<float> previous_scene [[texture(3)]],texture2d<float> current_scene [[texture(4)]],
+ texture2d<float> repair_motion [[texture(5)]],
  constant TemporalSharpenConstants& k [[buffer(0)]],uint2 id [[thread_position_in_grid]]) {
  const uint2 size=uint2(source.get_width(),source.get_height());
  if(any(id>=size))return;
+ // Wheels the repair drew from the current pose (z flag of its motion map): their true motion
+ // includes the spin, so the source clamp below would pull colours from other spoke positions and
+ // shred the repaired wheel. Leave them as the repair wrote them.
+ {
+  constexpr sampler wheel_sampler(coord::normalized,address::clamp_to_edge,filter::nearest);
+  if(repair_motion.sample(wheel_sampler,(float2(id)+0.5f)/float2(size)).z>0.5f){
+   output.write(temporal_finite(source.read(id)),id);
+   return;
+  }
+ }
  const uint2 last=size-1;
  const float4 c=temporal_finite(source.read(id));
  const float3 n=temporal_finite(source.read(uint2(id.x,id.y>0?id.y-1:0))).rgb;
