@@ -637,14 +637,18 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       OnFocusUpdate(false, destruction_receiver);
       break;
     case SDL_EVENT_WINDOW_EXPOSED:
-      if (presenter()) presenter()->SetWindowHiddenFromUIThread(false);
+      if (presenter()) {
+        presenter()->SetWindowHiddenFromUIThread(false);
+        presenter()->SetWindowCoveredUnpacedFromUIThread(false);
+      }
       // The platform cannot retain the previous image; force the paint.
       OnPaint(true);
       break;
     case SDL_EVENT_WINDOW_OCCLUDED:
       // Paced at 2 fps on purpose while covered; logged so it doesn't read as a hang.
       if (!REXCVAR_GET(window_covered_pacing)) {
-        REXLOG_INFO("window covered: rendering continues at full rate (window_covered_pacing off)");
+        REXLOG_INFO("window covered: rendering continues at the frame limit, paced by a timer (window_covered_pacing off)");
+        if (presenter()) presenter()->SetWindowCoveredUnpacedFromUIThread(true);
         break;
       }
       REXLOG_INFO("window covered: frames paced at 2 fps until it is visible again");
@@ -656,7 +660,10 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
       OnMinimized(destruction_receiver);
       break;
     case SDL_EVENT_WINDOW_RESTORED:
-      if (presenter()) presenter()->SetWindowHiddenFromUIThread(false);
+      if (presenter()) {
+        presenter()->SetWindowHiddenFromUIThread(false);
+        presenter()->SetWindowCoveredUnpacedFromUIThread(false);
+      }
       OnRestored(destruction_receiver);
       break;
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:

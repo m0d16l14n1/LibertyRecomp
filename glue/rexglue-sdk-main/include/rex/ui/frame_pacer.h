@@ -179,11 +179,13 @@ class FramePublicationGate {
   }
   void Admit(uint64_t serial) {
     std::lock_guard lock(mutex_);
+    if (stall_covered_ && serial > admitted_) {covered_ = stall_covered_ = false; stall_timeouts_ = 0;}
     if(serial<=published_)admitted_=std::max(admitted_,serial);
     condition_.notify_all();
   }
   void Accept(uint64_t serial) {
     std::lock_guard lock(mutex_);
+    if (stall_covered_ && serial > admitted_) {covered_ = stall_covered_ = false; stall_timeouts_ = 0;}
     if (serial <= published_) {accepted_ = std::max(accepted_, serial);admitted_=std::max(admitted_,serial);}
     condition_.notify_all();
   }
@@ -196,12 +198,38 @@ class FramePublicationGate {
     // three periods at the title's own limit keeps that at a third of the limit
     // (20 fps at 60) rather than 4 fps, while staying far above any foreground
     // handoff wait (measured p99 17 ms, max 61 ms at a 60 fps limit).
+    if (covered_) {
+      // Covered but asked to keep rendering (window_covered_pacing off): nothing will be shown,
+      // so waiting for the host would only run into the watchdog (twice a frame: ~110 ms, 8 fps
+      // at a 60 fps limit). Hold the title to its own limit with a timer instead, as vsync would.
+      const auto period = std::chrono::nanoseconds(FramePacer::kSecond / (fps_ ? fps_ : 60));
+      const auto now = std::chrono::steady_clock::now();
+      covered_tick_ = std::max(covered_tick_ + period, now);
+      condition_.wait_until(lock, covered_tick_, [&] { return stopped_ || !covered_; });
+      return true;
+    }
     const uint64_t watchdog = hidden_ ? kHiddenWatchdogNs : WatchdogNs(fps_);
-    return condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
+    const bool released = condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
       return stopped_ || !available_ || !limited_ || epoch_ != epoch ||
              admitted_ + ahead_ >= serial;
     });
+    // The host can stop showing frames without saying so (a window covered or captured without
+    // an occlusion event). With the stall fallback (window_covered_pacing off), three watchdog
+    // expiries in a row switch to timer pacing until the host shows a frame again.
+    if (released) stall_timeouts_ = 0;
+    else if (stall_fallback_ && !hidden_ && ++stall_timeouts_ >= 3) {
+      covered_ = stall_covered_ = true;
+      covered_tick_ = std::chrono::steady_clock::now();
+    }
+    return released;
   }
+  // window_covered_pacing off: detect a host that stopped showing frames (see Wait).
+  void SetStallFallback(bool value) {
+    std::lock_guard lock(mutex_);
+    stall_fallback_ = value;
+    if (!value && stall_covered_) covered_ = stall_covered_ = false;
+  }
+  bool stall_covered() const { return stall_covered_; }
   // Running one frame ahead (ahead >= 1) must not mean replacing a frame the host
   // has not shown: the mailbox keeps only the newest image, so a producer that
   // publishes S+2 before S+1 is painted renders S+1 for nothing. At a 30 fps cap
@@ -218,7 +246,7 @@ class FramePublicationGate {
   bool WaitBeforePublish(uint32_t fps, bool paired, uint32_t ahead) {
     std::unique_lock lock(mutex_);
     // Hidden: the handoff wait after publishing already paces at its slow watchdog.
-    if (!ahead || hidden_ || (!fps && !paired && !previous_paired_)) return true;
+    if (!ahead || hidden_ || covered_ || (!fps && !paired && !previous_paired_)) return true;
     const uint64_t epoch = epoch_, previous = published_;
     const uint64_t watchdog = WatchdogNs(fps);
     return condition_.wait_for(lock, std::chrono::nanoseconds(watchdog), [&] {
@@ -243,6 +271,14 @@ class FramePublicationGate {
     hidden_ = value;
     condition_.notify_all();
   }
+  // Covered window that keeps rendering (window_covered_pacing off): pace by a timer at the
+  // title's limit instead of waiting for presentation that will not come.
+  void SetCovered(bool value) {
+    std::lock_guard lock(mutex_);
+    covered_ = value;
+    covered_tick_ = std::chrono::steady_clock::now();
+    condition_.notify_all();
+  }
   void Stop() {
     std::lock_guard lock(mutex_);
     stopped_ = true;
@@ -253,7 +289,10 @@ class FramePublicationGate {
   std::condition_variable condition_;
   uint64_t published_ = 0, accepted_ = 0, admitted_=0, epoch_ = 0;
   uint32_t fps_ = 0, ahead_ = 0;
-  bool limited_ = false, available_ = false, stopped_ = false, hidden_ = false;
+  bool limited_ = false, available_ = false, stopped_ = false, hidden_ = false, covered_ = false;
+  std::chrono::steady_clock::time_point covered_tick_{};
+  bool stall_fallback_ = false, stall_covered_ = false;
+  uint32_t stall_timeouts_ = 0;
   bool previous_paired_ = false;
 };
 

@@ -357,3 +357,29 @@ TEST_CASE("A generated pair runs one frame ahead and releases the producer once 
   g.Admit(second);
   REQUIRE(plain.wait_for(100ms)==std::future_status::ready);REQUIRE(plain.get());
 }
+
+TEST_CASE("Publication gate paces by a timer once the host stops showing frames", "[frame-pacer]") {
+  FramePublicationGate g; g.SetAvailable(true);
+  const auto elapsed=[](auto f){auto t=std::chrono::steady_clock::now();f();return std::chrono::steady_clock::now()-t;};
+  SECTION("without the stall fallback every frame runs into the watchdog") {
+    for (int i=0;i<4;++i) { auto s=g.Publish(60); CHECK_FALSE(g.Wait(s)); }
+    CHECK_FALSE(g.stall_covered());
+  }
+  SECTION("with it, three expiries switch to a 60 fps timer, and a shown frame switches back") {
+    g.SetStallFallback(true);
+    for (int i=0;i<3;++i) { auto s=g.Publish(60); CHECK_FALSE(g.Wait(s)); }
+    REQUIRE(g.stall_covered());
+    // Timer pacing: about one 16.7 ms period per frame, not the 50 ms watchdog.
+    uint64_t serial=0;
+    const auto d=elapsed([&]{ for (int i=0;i<6;++i) { serial=g.Publish(60); CHECK(g.Wait(serial)); } });
+    CHECK(d>=80ms);
+    CHECK(d<180ms);
+    // The host shows a frame again: back to waiting for it.
+    g.Admit(serial);
+    CHECK_FALSE(g.stall_covered());
+    auto s=g.Publish(60);
+    std::thread host([&]{ std::this_thread::sleep_for(5ms); g.Admit(s); });
+    CHECK(g.Wait(s));
+    host.join();
+  }
+}

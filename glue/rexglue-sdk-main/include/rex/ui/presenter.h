@@ -412,6 +412,7 @@ class Presenter {
   void CancelFramePacingWaits() { frame_publication_gate_.Stop(); }
   // Window occluded/minimized (UI thread): slow the producer's watchdog pace to 2 fps.
   void SetWindowHiddenFromUIThread(bool hidden) { frame_publication_gate_.SetHidden(hidden); }
+  void SetWindowCoveredUnpacedFromUIThread(bool covered) { frame_publication_gate_.SetCovered(covered); }
   const GuestOutputPaintConfig& GetGuestOutputPaintConfigFromUIThread() const {
     return guest_output_paint_config_;
   }

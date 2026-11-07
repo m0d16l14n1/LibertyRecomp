@@ -28,6 +28,7 @@
 #include <ffx_api/ffx_upscale.h>
 #endif
 
+REXCVAR_DECLARE(bool, window_covered_pacing);  // window_sdl.cpp
 REXCVAR_DEFINE_BOOL(host_present_from_non_ui_thread, true, "UI/Presenter",
                     "Allow presentation from non-UI thread");
 
@@ -672,6 +673,7 @@ bool Presenter::RefreshGuestOutput(
 
   const bool paired_presentation = is_active && writable_properties.provenance.paired_presentation;
   uint64_t pacing_wait_ns = 0;
+  frame_publication_gate_.SetStallFallback(!REXCVAR_GET(window_covered_pacing));
   if (is_active && provenance.producer_backpressure &&
       (provenance.frame_rate_limit || paired_presentation) &&
       std::this_thread::get_id() != ui_thread_id_) {
