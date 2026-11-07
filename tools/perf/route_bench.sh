@@ -59,6 +59,8 @@ prepare_home() {  # <saves source> <native.toml source>
     [ -e "$support/$linked" ] && ln -s "$support/$linked" "$root/$linked"
   done
   cp -R "$1" "$root/saves"
+  # Episodes from Liberty City keep their saves apart (saves-eflc), snapshotted next to saves/.
+  [ -d "$(dirname "$1")/saves-eflc" ] && cp -R "$(dirname "$1")/saves-eflc" "$root/saves-eflc"
   [ -f "$2" ] && cp "$2" "$root/native.toml"
   return 0
 }
@@ -123,6 +125,7 @@ case "$mode" in
     [ -e "$dir/input.rec" ] && { echo "route '$route' exists ($dir); pick another name" >&2; exit 1; }
     mkdir -p "$dir/record/shots"
     cp -R "$support/saves" "$dir/saves"
+    [ -d "$support/saves-eflc" ] && cp -R "$support/saves-eflc" "$dir/saves-eflc"
     cp "$support/native.toml" "$dir/native.toml" 2>/dev/null || true
     printf '%s\n' "$@" > "$dir/flags.txt"
     wait_for_peers

@@ -23,6 +23,9 @@
 #include <rex/platform.h>
 #include <rex/ui/windowed_app.h>
 #include <rex/ui/windowed_app_context_sdl.h>
+#if REX_PLATFORM_MAC
+#include <rex/ui/surface_mac.h>
+#endif
 
 REXCVAR_DEFINE_BOOL(diagnostics, false, "Diagnostics",
                     "Enable diagnostic logging and instrumentation");
@@ -148,6 +151,9 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR comman
 #else
 
 int main(int argc, char* argv[]) {
+#if REX_PLATFORM_MAC
+  rex::ui::BeginGameActivity();
+#endif
   return RunWindowedApp(argc, argv);
 }
 

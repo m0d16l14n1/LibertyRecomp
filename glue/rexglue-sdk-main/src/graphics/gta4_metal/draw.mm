@@ -1434,6 +1434,12 @@ bool Renderer::State::Draw(const gta4_native::CommandHeader& header,std::span<co
   }
   if(!encode_draw())return false;
   if(!draw_encoded)return true;
+  if(gpu_pass_timer::enabled()){
+    // Draws per frame by phase and target (gta4_metal_gpu_pass_log rows "#draws/...").
+    static const char* kPhase[]={"unknown","gbuffer","lights-to-screen","light-setup","light-draw","radar","composite-postfx"};
+    const auto phase=uint32_t(Phase());
+    gpu_pass_timer::Count(fmt::format("draws/{} {}x{}",phase<7?kPhase[phase]:"other",targets.width,targets.height));
+  }
   temporal::CommitPrimaryJitter(draw_encoded,scene_policy.primary,execution_camera_matches,
       temporal.metadata.jitter_applied,temporal.jitter_decided,temporal.jitter_eligible);
   if(temporal.jitter_decided&&!temporal.jitter_eligible)temporal.metadata.jitter_applied=false;

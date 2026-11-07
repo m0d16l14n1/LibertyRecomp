@@ -15,6 +15,16 @@
 
 namespace rex::ui {
 
+void BeginGameActivity() {
+  // Measured on the M5 Air (2026-11-07): an EFLC session whose window stayed in the background
+  // while the Mac was in use ran 7.7 fps, 19 us per encoded draw against 3 us normally, with the
+  // same draws, no thermal pressure and no rebuild; the identical run later held 51 fps.
+  static id<NSObject> activity = [NSProcessInfo.processInfo
+      beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
+                        reason:@"Running the game"];
+  (void)activity;
+}
+
 bool NativeDisplayPixelSizeForWindow(void* ns_window, uint32_t& width, uint32_t& height) {
   NSWindow* window = (__bridge NSWindow*)ns_window;
   NSScreen* screen = window ? window.screen : NSScreen.mainScreen;
