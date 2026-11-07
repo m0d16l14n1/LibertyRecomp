@@ -406,6 +406,9 @@ class Presenter {
   virtual bool CaptureGuestOutput(RawImage& image_out) = 0;
   // The connected display's refresh rate in Hz, 0 if unknown. Any thread.
   virtual uint32_t DisplayRefreshRate() const { return 0; }
+  // Time the last RefreshGuestOutput from the producer spent held by frame pacing (the frame-rate
+  // limit and the paired-presentation handoff), so callers can tell work from waiting.
+  uint64_t LastPacingWaitNs() const { return last_pacing_wait_ns_.load(std::memory_order_relaxed); }
   void CancelFramePacingWaits() { frame_publication_gate_.Stop(); }
   // Window occluded/minimized (UI thread): slow the producer's watchdog pace to 2 fps.
   void SetWindowHiddenFromUIThread(bool hidden) { frame_publication_gate_.SetHidden(hidden); }
@@ -1079,6 +1082,7 @@ class Presenter {
   // rather than being blank.
   bool guest_output_active_last_refresh_ = false;
   std::atomic<uint32_t> host_frame_rate_limit_{0};
+  std::atomic<uint64_t> last_pacing_wait_ns_{0};
   FramePacer frame_pacer_;  // Existing exclusive paint owner.
   FramePacer::Attempt pacing_attempt_{};
   FramePublicationGate frame_publication_gate_;

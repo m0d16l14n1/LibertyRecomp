@@ -56,6 +56,7 @@ add_executable(unit_tests
     graphics/native_frame_scheduling_test.cpp
     graphics/native_msaa_policy_test.cpp
     graphics/hdr_policy_test.cpp
+    graphics/generation_governor_test.cpp
     graphics/texture_filtering_policy_test.cpp
     graphics/anisotropic_filtering_policy_test.cpp
     graphics/native_black_anomaly_test.cpp

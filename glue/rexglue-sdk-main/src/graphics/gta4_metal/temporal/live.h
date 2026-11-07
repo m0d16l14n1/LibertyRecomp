@@ -32,6 +32,9 @@ class Live {
                  std::array<float, 2> offset = {});
   bool Compose(id<MTLCommandBuffer>, id<MTLTexture>, id<MTLTexture>, std::string&);
   bool Generate(id<MTLCommandBuffer>, InterpolationOutput&, std::string&);
+  // Generation paused (the frame generation governor): drop the interpolator's previous real
+  // frame so the first pair after resuming does not span the pause.
+  void PauseGeneration() { interpolation_.Reset(); }
   FrameInterpolation::EncodeCounts interpolation_counts() const { return interpolation_.encode_counts(); }
   bool NeedsMotionCoverage() const;
   bool ValidateMotionCoverage(id<MTLCommandBuffer>, std::string&);

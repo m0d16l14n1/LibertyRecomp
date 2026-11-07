@@ -671,12 +671,14 @@ bool Presenter::RefreshGuestOutput(
   }
 
   const bool paired_presentation = is_active && writable_properties.provenance.paired_presentation;
+  uint64_t pacing_wait_ns = 0;
   if (is_active && provenance.producer_backpressure &&
       (provenance.frame_rate_limit || paired_presentation) &&
       std::this_thread::get_id() != ui_thread_id_) {
     const uint64_t begin = FramePacerNowNs();
     const bool shown = frame_publication_gate_.WaitBeforePublish(
         provenance.frame_rate_limit, paired_presentation, REXCVAR_GET(present_frames_ahead));
+    pacing_wait_ns += FramePacerNowNs() - begin;
     if (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter))
       REXLOG_INFO("FramePacer point=before-publish frame={} previous-shown={} wait-ns={}",
                   provenance.submitted_frame, shown, FramePacerNowNs() - begin);
@@ -894,11 +896,13 @@ bool Presenter::RefreshGuestOutput(
       paint_result != PaintResult::kGpuLostExternally) {
     const uint64_t begin = FramePacerNowNs();
     const bool accepted = frame_publication_gate_.Wait(publication_serial);
+    pacing_wait_ns += FramePacerNowNs() - begin;
     if (rex::diagnostics::IsEnabled(rex::diagnostics::Category::kPresenter)) {
       REXLOG_INFO("FramePacer point=handoff serial={} frame={} released={} wait-ns={}",
                   publication_serial, provenance.submitted_frame, accepted, FramePacerNowNs()-begin);
     }
   }
+  last_pacing_wait_ns_.store(pacing_wait_ns, std::memory_order_relaxed);
   // Handle GPU loss when not in the middle of the function anymore, and
   // lifecycle management from the GPU loss callback is fine on the UI thread.
   if (host_gpu_loss_callback_) {

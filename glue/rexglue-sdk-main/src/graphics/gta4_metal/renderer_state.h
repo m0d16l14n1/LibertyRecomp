@@ -8,7 +8,9 @@
 #include "depth_of_field.h"
 #include "sun_shafts.h"
 #include "modern_sky_probe.h"
+#include <chrono>
 #include "temporal/live.h"
+#include "temporal/generation_governor.h"
 #include "raytracing/capture.h"
 #include "raytracing/ambient_occlusion.h"
 #include "raytracing/sun_shadows.h"
@@ -262,7 +264,12 @@ struct Renderer::State {
   bool traced_scene = false;
   uint64_t content_serial=0;
   uint64_t resolve_skips=0, resolve_initializations_merged=0,resolve_image_exchanges=0;
-  uint64_t resolve_unproduced_sources=0;  // color resolves of a never-drawn source, written as transparent black
+  uint64_t resolve_unproduced_sources=0;
+  // gta4_metalfx_frame_generation_auto: whether generating helps, decided per real frame.
+  temporal::GenerationGovernor generation_governor;
+  std::chrono::steady_clock::time_point governor_last_present{};
+  uint64_t governor_switches_on=0,governor_switches_off=0,governor_real_only_frames=0;
+  bool governor_last_paired=true;  // the last real frame got its generated midpoint  // color resolves of a never-drawn source, written as transparent black
   id<MTLBuffer> readback_buffer=nil;
   std::shared_ptr<TextureResource> PrepareTexture(uint32_t handle,
       const xenos::xe_gpu_texture_fetch_t&,std::string&);

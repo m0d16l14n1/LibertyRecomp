@@ -181,6 +181,8 @@ case "$mode" in
     flags=()
     case " $* " in *" --fullscreen"*) ;; *) flags+=(--fullscreen=false) ;; esac
     case " $* " in *" --background_window"*) ;; *) flags+=(--background_window=true) ;; esac
+    # A background window is often covered by the apps in use; keep it rendering at full rate.
+    case " $* " in *" --window_covered_pacing"*) ;; *) flags+=(--window_covered_pacing=false) ;; esac
     run_game "$out" ${flags[@]+"${flags[@]}"} --gta4_pad_script="$out/run.pad" \
       --gta4_input_route="$out/route.csv" --gta4_pad_exit_on_end=true "$@"
     summarize "$out"

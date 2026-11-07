@@ -20,6 +20,10 @@ REXCVAR_DECLARE(bool, gta4_temporal_late_constants_diag);  // temporal/live.mm
 REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_half_rate, true, "GPU",
                     "MetalFX frame generation: draw real frames at half the display refresh, so every "
                     "one gets its generated midpoint and the screen shows an even rate");
+REXCVAR_DEFINE_BOOL(gta4_metalfx_frame_generation_auto, true, "GPU",
+                    "MetalFX frame generation: generate only while it helps (real frames miss the refresh "
+                    "but a real frame plus the interpolation fits in two), decided from each real frame's "
+                    "work; real frames are shown at full rate otherwise. Off: always generate");
 REXCVAR_DEFINE_STRING(gta4_metalfx_frame_generation_dump, "", "GPU/Diagnostics",
                       "Folder for MetalFX frame generation checks: every 120th generated frame and the real "
                       "frame after it, as PPM, at most 6 pairs (empty = off)");
@@ -229,7 +233,33 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
   auto& temporal=temporal_scene;
   const bool scene_output=temporal.active&&temporal.HasSceneOutput()&&temporal.ui_active&&temporal.final_scene;
   const bool temporal_output=scene_output&&temporal.ui_exact;
-  const bool generation_enabled=temporal_output&&temporal.resolved&&temporal.frame_generation&&rex::cvar::GetFlagByName("gta4_present_mode")!="immediate";
+  const bool generation_possible=temporal_output&&temporal.resolved&&temporal.frame_generation&&rex::cvar::GetFlagByName("gta4_present_mode")!="immediate";
+  bool generation_enabled=generation_possible;
+  if(generation_possible&&presenter&&REXCVAR_GET(gta4_metalfx_frame_generation_auto)){
+    // Work of the previous real frame: its interval minus what the presenter held it for pacing.
+    const auto now=std::chrono::steady_clock::now();
+    const uint64_t interval=governor_last_present.time_since_epoch().count()
+        ?uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now-governor_last_present).count()):0;
+    governor_last_present=now;
+    const uint64_t wait=presenter->LastPacingWaitNs();
+    const uint32_t refresh=presenter->DisplayRefreshRate();
+    using Change=temporal::GenerationGovernor::Change;
+    const Change change=generation_governor.Update(interval,interval>wait?interval-wait:0,refresh,governor_last_paired);
+    if(change!=Change::kNone){
+      if(change==Change::kOn)++governor_switches_on;else ++governor_switches_off;
+      REXLOG_INFO("gta4-metal-frame-generation: auto {} frame={} work-ms={:.1f} refresh={} interpolation-ms={:.1f} failures={}",
+          change==Change::kOn?"on (real frames miss the refresh; a pair fits in two)":
+          change==Change::kOffSlow?"off (real frames cannot hold half the refresh)":
+          change==Change::kOffUnpaired?"off (pairs not kept on time: too few real frames got a midpoint)":"off (real frames fit the refresh)",
+          present.submitted_frame,generation_governor.smoothed_work_ms(),refresh?refresh:60,generation_governor.cost_ms(),
+          generation_governor.failures());
+    }
+    generation_enabled=generation_governor.generating();
+    if(!generation_enabled){temporal.PauseGeneration();++governor_real_only_frames;}
+  }else if(!generation_possible){
+    generation_governor.Reset();
+    governor_last_present={};
+  }
   temporal::InterpolationOutput generated_pair;
   if(generation_enabled){
     std::string generation_error;
@@ -248,6 +278,7 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
       }
     }
     if(!temporal.Generate(commands,generated_pair,generation_error))REXLOG_WARN("gta4-metal-frame-generation: frame={} skipped: {}",present.submitted_frame,generation_error);
+    governor_last_paired=generated_pair.generated!=nil;
     if(generated_pair.real&&!temporal.Compose(commands,temporal.final_scene,generated_pair.real,error))return false;
     if(generated_pair.generated&&!temporal.ComposeInPlace(commands,generated_pair.generated,error))return false;
     if(generated_pair.generated){
@@ -386,10 +417,12 @@ bool Renderer::State::Present(const gta4_native::PresentCommand& present, std::s
     }
   }
   if(temporal.active&&(present.submitted_frame<=6||present.submitted_frame%60==0))
-    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} camera-filled={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={} slow-skips={}",
+    REXLOG_INFO("gta4-metal-temporal-frame frame={} input={}x{} output={}x{} world={} history={} reactive={} ui={} resolved={} ui-exact={} generated={} camera-filled={} geometry-bytes={} jittered={} composite={} composite-shader={:016X} scene-stage={} spatial-fallback={} fallback-reason={} generation-skip={} slow-skips={} auto-generating={} auto-on={} auto-off={} auto-real-only={} auto-work-ms={:.1f} auto-interpolation-ms={:.1f}",
       present.submitted_frame,temporal.config.input_width,temporal.config.input_height,output_width,output_height,temporal.world_draws,temporal.history_draws,
       temporal.reactive_draws,temporal.ui_draws,temporal.resolved,temporal.ui_exact,generated_pair.generated!=nil,temporal.camera_filled_frames,temporal.geometry.owned_bytes(),
-      temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason,temporal.slow_generation_skips);
+      temporal.jittered_draws,temporal.composite_seen,temporal.composite_shader,temporal.composite_scene_stage,temporal.spatial_fallback,temporal.fallback_reason,temporal.generation_skip_reason,temporal.slow_generation_skips,
+      generation_governor.generating(),governor_switches_on,governor_switches_off,governor_real_only_frames,
+      generation_governor.smoothed_work_ms(),generation_governor.cost_ms());
   if (temporal.active && REXCVAR_GET(gta4_temporal_diagnostics)) {
     const auto& d = temporal.AntiAliasingState();
     if (d.valid && (present.submitted_frame <= 6 || present.submitted_frame % 60 == 0 ||

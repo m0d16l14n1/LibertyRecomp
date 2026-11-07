@@ -342,3 +342,32 @@ Kept for the record. 1 was confirmed and fixed (3 slots); 2 was a consequence of
      textures away. Judge ours on image quality as well as cost.
 5. Commit in parts: the denoiser; the FG ring and skip reason; the proxy wait split; the presenter pacing;
    the dev pad `peds` retry.
+
+## Automatic frame generation (2026-11-07)
+
+`gta4_metalfx_frame_generation_auto` (on by default; only acts while `gta4_metalfx_frame_generation`
+is on) decides per real frame whether to generate, in `temporal/generation_governor.h`:
+
+- **Input:** each real frame's work, its interval minus the time the presenter held it for pacing
+  (`Presenter::LastPacingWaitNs`: the frame-rate limit and the paired-presentation handoff),
+  smoothed over 8 frames, and the display refresh.
+- **On** after real frames have missed the refresh (work above 1.1 refreshes) for 1 s while the
+  work plus the learned interpolation cost fits 1.75 refreshes (29 ms at 60 Hz).
+- **Off** when the work stops fitting two refreshes for 1 s, when fewer than 75% of the real frames
+  got their midpoint over a second (pairs not kept on time), or when the work without the
+  interpolation would fit 0.85 of a refresh for 2 s. The first two back off: 8 s, doubling per
+  failure in a row up to 2 min, reset after 10 s of successful generation.
+- While off, real frames are shown at full rate (no half-rate pacing) and the interpolator's
+  previous frame is dropped, so the first pair after resuming does not span the pause.
+- Logged as `gta4-metal-frame-generation: auto on/off (...)`; the `gta4-metal-temporal-frame` line
+  carries `auto-generating`, `auto-on`, `auto-off`, `auto-real-only`, `auto-work-ms` and
+  `auto-interpolation-ms`. Tests: `tests/unit/graphics/generation_governor_test.cpp`.
+- **Measured (M5 Air, 60 Hz, TBoGT action bench, background):** a first version (1.9-refresh
+  entry, no pair check) switched on at 25-27 ms of work, where every fifth pair stayed in flight
+  and the screen showed 39.6 fps, no better than real frames alone (38.5), and toggled seven
+  times in 50 s. With the pair check and the 1.75 entry it switches on in short judder spans,
+  leaves within a second when pairs slip or work jumps (48 ms: `failures=1`), and stays off for
+  the heavy windows. On this machine the band where generation wins is narrow; the governor
+  makes leaving it on cheap rather than making it a win.
+- Background benches now pass `--window_covered_pacing=false` (`route_bench.sh`): a covered
+  window otherwise paces at 2 fps, which read as 7 and 2 fps heli/boat windows.
